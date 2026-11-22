@@ -16,14 +16,37 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Dict, Any, Optional
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("llm-client")
 
 
+def load_dotenv_if_present():
+    """Load key-value pairs from .env in project root if present, without external dependencies."""
+    project_root = Path(__file__).parent.parent.resolve()
+    env_paths = [project_root / ".env", Path.cwd() / ".env"]
+    for env_path in env_paths:
+        if env_path.is_file():
+            try:
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip('"').strip("'")
+                        if k and k not in os.environ:
+                            os.environ[k] = v
+            except Exception:
+                pass
+
+
 class LLMClient:
     def __init__(self, provider: str = "auto", model: str = None, api_key: str = None, base_url: str = None):
+        load_dotenv_if_present()
         self.provider = provider.lower()
         self.model = model
         self.api_key = api_key
@@ -35,26 +58,49 @@ class LLMClient:
         if self.provider != "auto":
             return
 
-        if os.environ.get("OPENAI_API_KEY"):
+        # 1. Custom / Generic OpenAI-Compatible Endpoints (vLLM, LM Studio, DeepSeek, Groq, Together, etc.)
+        if os.environ.get("OPENAI_BASE_URL") or os.environ.get("LLM_BASE_URL"):
+            self.provider = "openai"
+            self.base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("LLM_BASE_URL")
+            self.api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("LLM_API_KEY") or "none"
+            self.model = self.model or os.environ.get("OPENAI_MODEL") or os.environ.get("LLM_MODEL") or "default"
+        # 2. DeepSeek direct API
+        elif os.environ.get("DEEPSEEK_API_KEY"):
+            self.provider = "openai"
+            self.base_url = "https://api.deepseek.com/v1"
+            self.api_key = os.environ.get("DEEPSEEK_API_KEY")
+            self.model = self.model or os.environ.get("DEEPSEEK_MODEL") or "deepseek-chat"
+        # 3. Groq direct API (fast open models)
+        elif os.environ.get("GROQ_API_KEY"):
+            self.provider = "openai"
+            self.base_url = "https://api.groq.com/openai/v1"
+            self.api_key = os.environ.get("GROQ_API_KEY")
+            self.model = self.model or os.environ.get("GROQ_MODEL") or "llama-3.3-70b-versatile"
+        # 4. Standard OpenAI
+        elif os.environ.get("OPENAI_API_KEY"):
             self.provider = "openai"
             self.api_key = os.environ.get("OPENAI_API_KEY")
-            self.model = self.model or "gpt-4o-mini"
+            self.model = self.model or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
+        # 5. Anthropic Claude
         elif os.environ.get("ANTHROPIC_API_KEY"):
             self.provider = "anthropic"
             self.api_key = os.environ.get("ANTHROPIC_API_KEY")
-            self.model = self.model or "claude-3-5-sonnet-20241022"
+            self.model = self.model or os.environ.get("ANTHROPIC_MODEL") or "claude-3-5-sonnet-20241022"
+        # 6. Google Gemini
         elif os.environ.get("GEMINI_API_KEY"):
             self.provider = "gemini"
             self.api_key = os.environ.get("GEMINI_API_KEY")
-            self.model = self.model or "gemini-1.5-flash"
+            self.model = self.model or os.environ.get("GEMINI_MODEL") or "gemini-1.5-flash"
+        # 7. OpenRouter
         elif os.environ.get("OPENROUTER_API_KEY"):
             self.provider = "openrouter"
             self.api_key = os.environ.get("OPENROUTER_API_KEY")
-            self.model = self.model or "meta-llama/llama-3.1-8b-instruct"
+            self.model = self.model or os.environ.get("OPENROUTER_MODEL") or "meta-llama/llama-3.1-8b-instruct"
+        # 8. Local Ollama
         elif os.environ.get("OLLAMA_BASE_URL") or self._check_ollama():
             self.provider = "ollama"
             self.base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-            self.model = self.model or "llama3"
+            self.model = self.model or os.environ.get("OLLAMA_MODEL") or "llama3"
         else:
             self.provider = "none"
 

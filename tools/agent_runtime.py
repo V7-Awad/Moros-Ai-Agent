@@ -167,22 +167,36 @@ class AgentRunner:
         )
 
         current_prompt = user_goal
-        history: List[Dict[str, str]] = []
+        history: List[Dict[str, str]] = [{"role": "user", "content": user_goal}]
         reasoning_steps: List[str] = []
         findings_accumulated: List[Dict[str, Any]] = []
         artifacts_accumulated: List[str] = []
 
         step = 0
+        started_at = time.monotonic()
         while step < max_steps:
+            if time.monotonic() - started_at >= context.budget.get("timeout_seconds", 180):
+                return AgentResult(
+                    status="timeout",
+                    summary=f"{agent_id} stopped after reaching its time budget.",
+                    findings=findings_accumulated,
+                    artifacts=artifacts_accumulated,
+                    usage={"steps": step, "provider": self.llm.provider, "model": self.llm.model},
+                    reasoning_steps=reasoning_steps,
+                )
             step += 1
             logger.info(f"[{agent_id}] ReAct Step {step}/{max_steps}")
 
             # Send prompt to LLM
-            step_prompt = current_prompt
+            step_prompt = "\n\n".join(
+                f"{item['role'].upper()}: {item['content']}"
+                for item in history[-12:]
+            )[-12000:]
             llm_response = self.llm.complete(
                 step_prompt,
                 system_prompt=full_system_prompt,
-                temperature=0.1
+                temperature=0.1,
+                max_tokens=context.budget.get("max_tokens", 4000),
             )
 
             if not llm_response:
@@ -216,6 +230,7 @@ class AgentRunner:
                 thought_text = thought_match.group(1).strip() if thought_match else llm_response.strip()
                 reasoning_steps.append(f"Step {step}: {thought_text[:120]}...")
                 current_prompt = "Observation: No tool action was specified. If you are finished, output 'Final Answer: <summary>'. Otherwise, call a valid Action."
+                history.append({"role": "user", "content": current_prompt})
                 continue
 
             tool_name = action_match.group(1).strip()

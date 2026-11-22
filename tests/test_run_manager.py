@@ -52,3 +52,34 @@ def test_finish_run(tmp_path):
     finished = rm.finish_run(run_id, status="completed")
     assert finished["status"] == "completed"
     assert finished["completed_at"] is not None
+
+
+def test_agent_session_tracking(tmp_path):
+    rm = RunManager(tmp_path)
+    run = rm.create_run(target="test.org", skills=["js-analyze"])
+    run_id = run["run_id"]
+
+    # Register child agent
+    session = rm.register_agent_session(
+        run_id,
+        agent_id="js-analyze-gpt4o-r1",
+        skill="js-analyze",
+        parent_agent_id="coordinator",
+        model="gpt4o"
+    )
+    assert session["agent_id"] == "js-analyze-gpt4o-r1"
+    assert session["status"] == "running"
+
+    # Update child agent
+    rm.update_agent_session(
+        run_id,
+        agent_id="js-analyze-gpt4o-r1",
+        status="completed",
+        summary="Analysis found 2 endpoints",
+        findings_count=2
+    )
+
+    sessions = rm.list_agent_sessions(run_id)
+    assert len(sessions) == 1
+    assert sessions[0]["status"] == "completed"
+    assert sessions[0]["findings_count"] == 2

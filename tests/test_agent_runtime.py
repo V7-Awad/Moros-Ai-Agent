@@ -55,7 +55,7 @@ class MockLLM:
     def is_available(self):
         return True
 
-    def complete(self, prompt, system_prompt=None, temperature=0.1):
+    def complete(self, prompt, system_prompt=None, temperature=0.1, max_tokens=4000, **kwargs):
         if self.responses:
             return self.responses.pop(0)
         return "Final Answer: No more responses"

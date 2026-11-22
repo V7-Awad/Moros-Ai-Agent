@@ -97,6 +97,10 @@ Examples:
                         help="Limit active recon checks to the exact target hostname")
     parser.add_argument("--https-only", action="store_true",
                         help="Do not fall back to plaintext HTTP during active recon")
+    parser.add_argument("--max-http-requests", type=int, default=40,
+                        help="Maximum same-host GET/HEAD requests per scan (default: 40)")
+    parser.add_argument("--request-delay", type=float, default=0.4,
+                        help="Minimum seconds between target requests (default: 0.4)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show execution plan without running anything")
     parser.add_argument("--check", action="store_true",
@@ -212,6 +216,8 @@ Examples:
         active_host_limit=args.active_host_limit,
         root_only_active=args.root_only_active,
         https_only=args.https_only,
+        max_http_requests=args.max_http_requests,
+        request_delay=args.request_delay,
     )
 
     try:

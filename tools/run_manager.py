@@ -134,6 +134,70 @@ class RunManager:
         logger.info(f"[RunManager] Run {run_id} finished with status '{status}'")
         return record
 
+    def register_agent_session(self, run_id: str, agent_id: str, skill: str,
+                               parent_agent_id: str = "coordinator",
+                               status: str = "running", model: str = "default") -> Dict[str, Any]:
+        """Record child agent session in agents.jsonl (Priority 1: Real Sub-Agent Sessions)."""
+        run_path = self._run_dir(run_id)
+        if not run_path.exists():
+            return {}
+        record = {
+            "agent_id": agent_id,
+            "parent_agent_id": parent_agent_id,
+            "skill": skill,
+            "status": status,
+            "model": model,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "completed_at": None,
+            "findings_count": 0,
+            "summary": "",
+        }
+        with open(run_path / "agents.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return record
+
+    def update_agent_session(self, run_id: str, agent_id: str, status: str = "completed",
+                             summary: str = "", findings_count: int = 0):
+        """Update child agent session status in agents.jsonl."""
+        run_path = self._run_dir(run_id)
+        agents_file = run_path / "agents.jsonl"
+        if not agents_file.is_file():
+            return
+        updated_records = []
+        with open(agents_file, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    rec = json.loads(line)
+                    if rec.get("agent_id") == agent_id:
+                        rec["status"] = status
+                        rec["summary"] = summary
+                        rec["findings_count"] = findings_count
+                        rec["completed_at"] = datetime.now(timezone.utc).isoformat()
+                    updated_records.append(rec)
+                except Exception:
+                    continue
+        with open(agents_file, "w", encoding="utf-8") as f:
+            for rec in updated_records:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    def list_agent_sessions(self, run_id: str) -> List[Dict[str, Any]]:
+        """List all child agent sessions for a run."""
+        run_path = self._run_dir(run_id)
+        agents_file = run_path / "agents.jsonl"
+        if not agents_file.is_file():
+            return []
+        records = []
+        with open(agents_file, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    try:
+                        records.append(json.loads(line))
+                    except Exception:
+                        pass
+        return records
+
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
         run_file = self._run_dir(run_id) / "run.json"
         if not run_file.is_file():

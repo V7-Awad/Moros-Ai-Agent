@@ -232,8 +232,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json({"target": target_name, "runs": rm.list_runs()})
                 return
             elif sub.startswith("runs/"):
-                run_id = sub[5:]
+                rest = sub[5:]
                 rm = RunManager(target_path)
+                if "/agents" in rest:
+                    run_id = rest.split("/agents")[0].strip("/")
+                    self.send_json({"run_id": run_id, "agents": rm.list_agent_sessions(run_id)})
+                    return
+                run_id = rest
                 run_data = rm.get_run(run_id)
                 if not run_data:
                     self.send_error_json("Run not found", status=404)
@@ -635,6 +640,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
         output_dir = target_dir / "output"
         logs_dir = output_dir / "logs"
 
+        latest_status = {}
+        try:
+            latest_run = RunManager(target_dir).get_latest_or_active_run()
+            if latest_run:
+                events_path = output_dir / "runs" / latest_run["run_id"] / "events.jsonl"
+                if events_path.is_file():
+                    for line in events_path.read_text(encoding="utf-8").splitlines():
+                        try:
+                            event = json.loads(line)
+                            details = event.get("details", {})
+                            skill = details.get("skill")
+                            kind = event.get("event", "")
+                            if skill and kind.startswith("SKILL_"):
+                                latest_status[skill] = kind.removeprefix("SKILL_").lower()
+                        except (json.JSONDecodeError, AttributeError):
+                            continue
+        except (OSError, KeyError, TypeError):
+            pass
+
         statuses = []
         for s in ALL_SKILLS:
             skill_log_dir = logs_dir / s
@@ -645,6 +669,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             log_files = []
             if has_logs:
                 log_files = [f.name for f in skill_log_dir.glob("*.log")]
+                state = "completed"
+
+            run_state = latest_status.get(s)
+            if run_state in {"running", "failed", "blocked", "blocked_scope"}:
+                state = run_state
+            elif run_state == "candidates_only":
+                state = "candidates_only"
+            elif run_state == "not_implemented":
+                state = "not_implemented"
+            elif run_state in {"completed", "success"}:
                 state = "completed"
 
             # Check if review failed
@@ -844,31 +878,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def get_target_checkpoints(self, target_name):
         target_dir = TARGETS_DIR / target_name
         cp_mgr = CheckpointManager(target_name, target_dir)
-        checkpoints = cp_mgr.list_checkpoints()
-
-        # If no explicit checkpoint file yet, auto-generate from state-changing endpoints
-        if not checkpoints:
-            output_dir = target_dir / "output"
-            ep_file = output_dir / "js" / "endpoints.json"
-            if ep_file.exists():
-                try:
-                    data = json.loads(ep_file.read_text(encoding="utf-8"))
-                    for ep in data.get("endpoints", []):
-                        if ep.get("method") in ["POST", "PUT", "DELETE"]:
-                            url = ep.get("url") or (str(ep.get("base_url", "")).rstrip("/") + str(ep.get("path", "")))
-                            cp_mgr.create_checkpoint(
-                                checkpoint_type="State-Changing Endpoint Confirmation",
-                                target_url=url,
-                                method=ep.get("method"),
-                                reason=f"Endpoint uses {ep.get('method')} which may modify database or application state.",
-                                risk_level="HIGH",
-                                agent="dashboard_detector"
-                            )
-                    checkpoints = cp_mgr.list_checkpoints()
-                except Exception:
-                    pass
-
-        return checkpoints
+        return cp_mgr.list_checkpoints()
 
     def handle_checkpoint_decision(self, target_name, checkpoint_id, action, notes):
         target_dir = TARGETS_DIR / target_name

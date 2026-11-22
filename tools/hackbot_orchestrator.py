@@ -31,7 +31,6 @@ from llm_client import LLMClient
 from skill_runner import SkillRunner
 from conversation_store import ConversationStore
 from run_manager import RunManager
-from checkpoint_manager import CheckpointManager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -74,15 +73,6 @@ SKILL_DEPENDENCIES = {
     "report-conglomeration": [],  # Runs after all selected skills
 }
 
-# Skills that require human approval at certain checkpoints
-HUMAN_CHECKPOINT_SKILLS = [
-    "xss-stored",
-    "xss-blind",
-    "ssrf-post-exploit",
-    "idp-race-condition",
-    "auth-password-reset-bruteforce",
-]
-
 MAX_REVIEW_RETRIES = 3
 
 
@@ -91,7 +81,8 @@ class HackbotOrchestrator:
                  models: list = None, runs_per_skill: int = 1,
                  review_model: str = None, api_spec: str = None,
                  active_host_limit: int = 20, root_only_active: bool = False,
-                 https_only: bool = False):
+                 https_only: bool = False, max_http_requests: int = 40,
+                 request_delay: float = 0.4):
         self.target = target
         self.target_dir = Path(target_dir)
         self.skills = skills
@@ -102,6 +93,8 @@ class HackbotOrchestrator:
         self.active_host_limit = max(1, active_host_limit)
         self.root_only_active = root_only_active
         self.https_only = https_only
+        self.max_http_requests = max(1, max_http_requests)
+        self.request_delay = max(0.0, request_delay)
         self.scope_authorized = False
 
         self.execution_log: list = []
@@ -114,14 +107,33 @@ class HackbotOrchestrator:
             (output_base / subdir).mkdir(parents=True, exist_ok=True)
         self.conversations = ConversationStore(self.target_dir)
 
-        # Initialize RunManager and CheckpointManager
+        # Initialize durable run tracking.
         self.run_manager = RunManager(self.target_dir)
-        self.checkpoint_manager = CheckpointManager(self.target, self.target_dir)
         self.current_run = None
 
-        # Initialize LLM client and real skill execution engine
-        self.llm = LLMClient(provider=self.models[0] if self.models else "auto")
-        self.runner = SkillRunner(self.target, self.target_dir, self.llm)
+        # "default" must auto-detect configured providers; model labels are not providers.
+        self.llm = self._llm_for_model(self.models[0] if self.models else "default")
+        self.runner = SkillRunner(self.target, self.target_dir, self.llm,
+                                  max_http_requests=self.max_http_requests,
+                                  request_delay=self.request_delay)
+
+    @staticmethod
+    def _llm_for_model(model_name: str) -> LLMClient:
+        requested = (model_name or "default").strip()
+        normalized = requested.lower()
+        if normalized in {"", "default", "auto", "open-weight-local"}:
+            return LLMClient(provider="auto")
+        if "/" in requested:
+            provider, model = requested.split("/", 1)
+            if provider.lower() in {"openai", "anthropic", "gemini", "openrouter", "ollama"}:
+                return LLMClient(provider=provider, model=model)
+        if normalized.startswith(("gpt-", "o1", "o3", "o4")):
+            return LLMClient(provider="openai", model=requested)
+        if normalized.startswith("claude-"):
+            return LLMClient(provider="anthropic", model=requested)
+        if normalized.startswith("gemini-"):
+            return LLMClient(provider="gemini", model=requested)
+        return LLMClient(provider="auto", model=requested)
 
     def verify_scope(self) -> bool:
         """Require a readable scope note that names this target and authorization."""
@@ -205,6 +217,7 @@ class HackbotOrchestrator:
 
         # Step 2: Verify scope
         self.scope_authorized = self.verify_scope()
+        self.runner.scope_authorized = self.scope_authorized
         if not self.scope_authorized:
             # Allow only passive recon without scope
             self.skills = [s for s in self.skills if s == "recon-subdomain"]
@@ -242,16 +255,14 @@ class HackbotOrchestrator:
                 self._log_event(skill_name, "BLOCKED", reason)
                 continue
 
-            # Check if this skill requires human checkpoint approval
-            if skill_name in HUMAN_CHECKPOINT_SKILLS:
-                logger.info(f"⚠️  HUMAN CHECKPOINT GATE: '{skill_name}' registered for human review.")
-                self._log_event(skill_name, "CHECKPOINT_GATE", "Human review checkpoint registered")
-
             # Run skill with each model
             for model in self.models:
                 for run_num in range(1, self.runs_per_skill + 1):
                     sub_run_id = f"{skill_name}_{model}_run{run_num}"
                     logger.info(f"  Run: {sub_run_id}")
+                    self.run_manager.update_skill_progress(run_id, skill_name, status="running")
+                    self.llm = self._llm_for_model(model)
+                    self.runner.llm = self.llm
 
                     result = self._execute_skill(skill_name, model, run_num)
 
@@ -293,9 +304,21 @@ class HackbotOrchestrator:
     def _execute_skill(self, skill_name: str, model: str, run_num: int) -> dict:
         """Execute a tool-backed skill with real execution logic."""
         start_time = datetime.now(timezone.utc)
+        agent_id = f"{skill_name}-{model}-r{run_num}"
+
+        if self.current_run:
+            self.run_manager.register_agent_session(
+                self.current_run["run_id"],
+                agent_id=agent_id,
+                skill=skill_name,
+                parent_agent_id="coordinator",
+                status="running",
+                model=model
+            )
 
         result = {
             "skill": skill_name,
+            "agent_id": agent_id,
             "model": model,
             "run_number": run_num,
             "start_time": start_time.isoformat(),
@@ -332,6 +355,11 @@ class HackbotOrchestrator:
             elif skill_name == "content-discovery":
                 res = self.runner.run_content_discovery()
                 result["status"] = res.get("status", "COMPLETED")
+                result["notes"] = (
+                    f"Checked {res.get('paths_checked', 0)} safe paths; "
+                    f"{res.get('findings_count', 0)} need manual review; "
+                    f"{res.get('requests_used', 0)} target requests used."
+                )
             elif skill_name in [
                 "xss-reflected", "xss-stored", "xss-dom", "xss-blind",
                 "ssrf-identify", "ssrf-post-exploit", "idp-race-condition",
@@ -339,7 +367,9 @@ class HackbotOrchestrator:
             ]:
                 res = self.runner.run_vuln_skill(skill_name)
                 result["status"] = res.get("status", "COMPLETED")
-                result["notes"] = f"Identified {res.get('findings_count', 0)} candidate findings"
+                result["notes"] = res.get(
+                    "summary", f"Recorded {res.get('findings_count', 0)} candidate findings"
+                )
             elif skill_name == "report-conglomeration":
                 res = self.runner.run_report_conglomeration()
                 result["status"] = res.get("status", "COMPLETED")
@@ -353,6 +383,16 @@ class HackbotOrchestrator:
 
         result["end_time"] = datetime.now(timezone.utc).isoformat()
         self._log_event(skill_name, result["status"], result.get("notes", ""))
+
+        if self.current_run:
+            self.run_manager.update_agent_session(
+                self.current_run["run_id"],
+                agent_id=agent_id,
+                status=result["status"].lower(),
+                summary=result.get("notes", ""),
+                findings_count=result.get("findings_count", 0)
+            )
+
         return result
 
     def _execute_api_spec(self) -> dict:
@@ -476,6 +516,10 @@ def main():
                         help="Limit active recon checks to the exact target hostname")
     parser.add_argument("--https-only", action="store_true",
                         help="Do not fall back to plaintext HTTP during active recon")
+    parser.add_argument("--max-http-requests", type=int, default=40,
+                        help="Maximum same-host GET/HEAD requests per scan (default: 40)")
+    parser.add_argument("--request-delay", type=float, default=0.4,
+                        help="Minimum seconds between target requests (default: 0.4)")
 
     args = parser.parse_args()
 

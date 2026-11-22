@@ -874,7 +874,7 @@
 
       <!-- Right Header Actions & Stats -->
       <div class="stats">
-        <span id="scopeBadge" class="pill ok hide-sm"><b>SCOPE VERIFIED</b></span>
+        <span id="scopeBadge" class="pill warn hide-sm"><b>SCOPE NOTE FOUND</b></span>
         <span id="scanStatusBadge" class="pill"><b>IDLE</b></span>
         <button onclick="openModal('newScanModal')" class="btn">
           <span>Launch Scan</span>
@@ -918,8 +918,8 @@
         <div class="part" id="tabBtn-findings" onclick="switchTab('findings')">
           <span class="chip">04</span>
           <div>
-            <strong>Findings & PoCs</strong>
-            <small>Verified vulnerabilities</small>
+            <strong>Findings & Triage</strong>
+            <small>Candidates and validated findings</small>
           </div>
           <span class="nav-badge bad" id="navFindingsCount">0</span>
         </div>
@@ -934,10 +934,10 @@
         <div class="part" id="tabBtn-checkpoints" onclick="switchTab('checkpoints')">
           <span class="chip">06</span>
           <div>
-            <strong>HITL Checkpoints</strong>
-            <small>Human approval gate</small>
+            <strong>Manual Decisions</strong>
+            <small>Manual decision records</small>
           </div>
-          <span class="nav-badge warn" id="navCheckpointsBadge">HITL</span>
+          <span class="nav-badge warn" id="navCheckpointsBadge">DECISIONS</span>
         </div>
         <div class="part" id="tabBtn-terminal" onclick="switchTab('terminal')">
           <span class="chip">07</span>
@@ -970,8 +970,8 @@
           <span id="sysPlaywrightStatus" class="mono" style="color:var(--ok);">Checking...</span>
         </div>
         <div class="line" style="display:flex; justify-content:space-between; font-size:12px;">
-          <span>Human-in-Loop:</span>
-          <span style="color:var(--cyan); font-weight:600;">Enforced</span>
+          <span>Active probes:</span>
+          <span style="color:var(--cyan); font-weight:600;">GET / HEAD only</span>
         </div>
       </div>
 
@@ -993,9 +993,9 @@
             <div>
               <div style="display:flex; align-items:center; gap:10px; margin-bottom:4px;">
                 <h1 id="overviewTargetName" style="margin:0; font:700 24px 'Space Grotesk', system-ui, sans-serif; color:#fff;" class="mono">Select a target</h1>
-                <span id="overviewScopeTag" class="pill ok">SCOPE VERIFIED</span>
+                <span id="overviewScopeTag" class="pill warn">SCOPE NOTE FOUND</span>
               </div>
-              <p class="hint" style="margin:0;">Autonomous multi-skill reconnaissance, JS collection, vulnerability discovery & review-skill verification.</p>
+              <p class="hint" style="margin:0;">Scoped same-host checks, JavaScript analysis, and evidence-linked triage.</p>
             </div>
             <div style="display:flex; gap:8px;">
               <button onclick="refreshTargetData()" class="ghost">Refresh</button>
@@ -1299,7 +1299,7 @@
           <select id="scanSkillsSelect" class="mono" style="width:100%;">
             <option value="all">Assessment pipeline (recon + artifact triage)</option>
             <option value="recon-subdomain,js-discover,js-analyze">Reconnaissance & JS artifact analysis</option>
-            <option value="xss-reflected,xss-dom,xss-stored,xss-blind">XSS candidate triage (no exploit probes)</option>
+            <option value="xss-reflected">Reflected XSS check (benign marker only)</option>
             <option value="ssrf-identify,ssrf-post-exploit">SSRF candidate triage (no exploit probes)</option>
             <option value="content-discovery">Content Discovery Only</option>
           </select>
@@ -1510,10 +1510,10 @@
         const scopeBadge = document.getElementById('scopeBadge');
         const overviewScopeTag = document.getElementById('overviewScopeTag');
         if (summary.has_scope) {
-          scopeBadge.className = "pill ok hide-sm";
-          scopeBadge.innerHTML = "<b>SCOPE VERIFIED</b>";
-          overviewScopeTag.className = "pill ok";
-          overviewScopeTag.textContent = "SCOPE VERIFIED";
+          scopeBadge.className = "pill warn hide-sm";
+          scopeBadge.innerHTML = "<b>SCOPE NOTE FOUND</b>";
+          overviewScopeTag.className = "pill warn";
+          overviewScopeTag.textContent = "SCOPE NOTE FOUND";
         } else {
           scopeBadge.className = "pill warn hide-sm";
           scopeBadge.innerHTML = "<b>PASSIVE RECON ONLY</b>";
@@ -1753,6 +1753,12 @@
           } else if (s.state === "failed") {
             secClass = "sec";
             badge = `<span class="tag bad">FAILED (NUDGE)</span>`;
+          } else if (s.state === "candidates_only") {
+            badge = `<span class="tag warn">CANDIDATES ONLY</span>`;
+          } else if (s.state === "not_implemented") {
+            badge = `<span class="tag low">NOT IMPLEMENTED</span>`;
+          } else if (s.state === "blocked" || s.state === "blocked_scope") {
+            badge = `<span class="tag warn">BLOCKED</span>`;
           }
 
           return `
@@ -1824,7 +1830,7 @@
 
         if (cps.length === 0) {
           container.innerHTML = `<div class="card"><p class="hint">No checkpoints recorded.</p></div>`;
-          overviewList.innerHTML = `<p class="hint">All actions verified. No checkpoints waiting.</p>`;
+          overviewList.innerHTML = `<p class="hint">No manual decisions recorded for this target.</p>`;
           return;
         }
 

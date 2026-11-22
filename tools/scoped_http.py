@@ -1,6 +1,7 @@
 """Bounded HTTP client for non-destructive, same-host assessment checks."""
 
 import os
+import hashlib
 import threading
 import time
 import urllib.error
@@ -72,7 +73,7 @@ class ScopedHttpClient:
         try:
             with self._opener.open(request, timeout=self.timeout_seconds) as response:
                 body = b"" if method == "HEAD" else response.read(self.max_body_bytes + 1)
-                return self._response_result(response.status, response.url, response.headers, body, started)
+                return self._response_result(response.status, response.geturl(), response.headers, body, started)
         except urllib.error.HTTPError as response:
             try:
                 body = b"" if method == "HEAD" else response.read(self.max_body_bytes + 1)
@@ -89,10 +90,19 @@ class ScopedHttpClient:
     def _response_result(self, status_code: int, url: str, headers: Any, body: bytes, started: float) -> Dict[str, Any]:
         truncated = len(body) > self.max_body_bytes
         body = body[:self.max_body_bytes]
+        allowed_headers = {
+            "content-type", "server", "strict-transport-security",
+            "content-security-policy", "x-content-type-options",
+            "x-frame-options", "referrer-policy",
+        }
+        parsed = urllib.parse.urlparse(url)
+        safe_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
         return {
-            "status": "response", "status_code": status_code, "url": url,
-            "headers": {str(key).lower(): str(value)[:500] for key, value in headers.items()},
+            "status": "response", "status_code": status_code, "url": safe_url,
+            "headers": {str(key).lower(): str(value)[:500] for key, value in headers.items()
+                        if str(key).lower() in allowed_headers},
             "body": body.decode("utf-8", errors="replace"),
             "body_bytes": len(body), "body_truncated": truncated,
+            "body_sha256": hashlib.sha256(body).hexdigest(),
             "duration_s": round(time.monotonic() - started, 3),
         }

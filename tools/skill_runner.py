@@ -7,7 +7,7 @@ Implements the actual execution logic for each of the 15 micro-skills:
 - JavaScript collection, beautification & analysis
 - Secret scanning & endpoint mapping
 - Content discovery with tech-stack-aware wordlists
-- Vulnerability testing with human checkpoints (HITL)
+- Bounded, same-host, non-destructive HTTP checks
 - Completion verification (Review-Skill)
 - Final report conglomeration
 """
@@ -33,7 +33,6 @@ if str(tools_dir) not in sys.path:
     sys.path.insert(0, str(tools_dir))
 
 from agent_runtime import AgentRunner, AgentContext, AgentResult, ToolRegistry
-from checkpoint_manager import CheckpointManager
 from scoped_http import ScopedHttpClient
 
 logger = logging.getLogger("skill-runner")
@@ -51,14 +50,6 @@ class SkillRunner:
         self._recorded_evidence_ids = None
         self.scope_authorized = False
         self.http = ScopedHttpClient(target, max_requests=max_http_requests, delay_seconds=request_delay)
-
-    @staticmethod
-    def _target_request_headers(user_agent: str) -> dict:
-        headers = {"User-Agent": user_agent}
-        bug_bounty_id = os.environ.get("MOROS_BUG_BOUNTY_ID", "").strip()
-        if bug_bounty_id:
-            headers["X-Bug-Bounty"] = bug_bounty_id
-        return headers
 
     @staticmethod
     def _host_is_in_root_scope(host: str, root: str) -> bool:
@@ -147,7 +138,8 @@ class SkillRunner:
         recon_dir = self.output_dir / "recon"
         recon_dir.mkdir(parents=True, exist_ok=True)
 
-        self.log_step(skill, "step-01-auth-check.log", f"Verified authorization for target: {self.target}")
+        self.log_step(skill, "step-01-auth-check.log",
+                      f"Scope note matched configured target {self.target}; this is not independent proof of authorization.")
         subdomains = set([self.target])
 
         # Step 2: Certificate Transparency Logs (crt.sh)
@@ -195,7 +187,9 @@ class SkillRunner:
         # Step 7: Active reachability checks require an authorization document.
         live_hosts = []
         if active_validation:
-            hosts_to_check = [self.target] if root_only else sorted_subs[:max(1, max_active_hosts)]
+            # Until an explicit machine-readable multi-host scope is loaded, only
+            # the exact configured hostname is eligible for active checks.
+            hosts_to_check = [self.target]
             protocols = ["https"] if https_only else ["https", "http"]
             self.log_step(skill, "step-07-live-validation.log",
                           f"Active HEAD checks: {len(hosts_to_check)} host(s), protocols={','.join(protocols)}, timeout=4s.")
@@ -296,81 +290,44 @@ class SkillRunner:
         for d in [raw_ext, raw_inline, raw_lazy, raw_hist, beautified_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
-        self.log_step(skill, "step-01-auth-check.log", "Authorization confirmed.")
-        self.log_step(skill, "step-02-browser-crawl.log", f"Initiating crawl of https://{self.target}")
+        if not self.scope_authorized:
+            self.log_step(skill, "step-01-auth-check.log", "Blocked: no matching scope note; no target requests were sent.")
+            return {"status": "BLOCKED_SCOPE", "files_collected": 0}
+
+        self.log_step(skill, "step-01-auth-check.log", "Scope note matched the exact configured target; network policy is same-host GET/HEAD only.")
+        self.log_step(skill, "step-02-browser-crawl.log", f"Fetching the root page and same-host JavaScript from {self.http.base_url}")
 
         collected_files = []
+        root_response = self.http.request("/", method="GET")
+        if root_response.get("status") == "response":
+            html_content = root_response.get("body", "")
+            script_srcs = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
+            for i, src in enumerate(script_srcs[:10]):
+                full_src = urllib.parse.urljoin(self.http.base_url + "/", src)
+                bundle = self.http.request(full_src, method="GET")
+                if bundle.get("status") != "response" or bundle.get("status_code") != 200:
+                    continue
+                fname = re.sub(r'[^\w\-.]', '_', urllib.parse.urlparse(src).path.split("/")[-1] or f"bundle_{i}.js")
+                if not fname.endswith(".js"):
+                    fname += ".js"
+                out_path = raw_ext / fname
+                out_path.write_text(bundle.get("body", ""), encoding="utf-8")
+                collected_files.append(str(out_path))
 
-        # Attempt Playwright browser crawl if installed
-        has_playwright = False
-        try:
-            import playwright
-            has_playwright = True
-        except ImportError:
-            pass
+            inlines = re.findall(r'<script(?![^>]*src=)[^>]*>(.*?)</script>', html_content,
+                                 re.DOTALL | re.IGNORECASE)
+            for idx, block in enumerate(inlines):
+                if block.strip():
+                    inline_path = raw_inline / f"index_block_{idx}.js"
+                    inline_path.write_text(block.strip(), encoding="utf-8")
+                    collected_files.append(str(inline_path))
+        else:
+            self.log_step(skill, "step-02-browser-crawl.log",
+                          f"Root fetch failed: {root_response.get('error', root_response.get('status'))}")
 
-        if has_playwright:
-            try:
-                cmd = [
-                    sys.executable,
-                    str(PROJECT_ROOT / "tools" / "browser-crawl.py"),
-                    "--target", f"https://{self.target}",
-                    "--output-dir", str(js_dir / "raw"),
-                    "--max-depth", "3"
-                ]
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
-                self.log_step(skill, "step-02-browser-crawl.log", f"Browser crawl exit code: {proc.returncode}")
-            except Exception as e:
-                self.log_step(skill, "step-02-browser-crawl.log", f"Browser crawl notice: {e}")
-
-        # Fallback / Direct HTTP JS collection to ensure non-empty collection
-        if not any(raw_ext.glob("*.js")):
-            try:
-                target_url = f"https://{self.target}"
-                req = urllib.request.Request(target_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"})
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    html_content = resp.read().decode("utf-8", errors="ignore")
-
-                # Extract script tags
-                script_srcs = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
-                for i, src in enumerate(script_srcs[:10]):
-                    full_src = urllib.parse.urljoin(target_url, src)
-                    try:
-                        s_req = urllib.request.Request(full_src, headers={"User-Agent": "Mozilla/5.0 Chrome/120.0.0.0"})
-                        with urllib.request.urlopen(s_req, timeout=8) as s_resp:
-                            js_body = s_resp.read()
-                            fname = re.sub(r'[^\w\-.]', '_', src.split("/")[-1] or f"bundle_{i}.js")
-                            if not fname.endswith(".js"):
-                                fname += ".js"
-                            out_p = raw_ext / fname
-                            out_p.write_bytes(js_body)
-                            collected_files.append(str(out_p))
-                    except Exception:
-                        pass
-
-                # Extract inline script blocks
-                inlines = re.findall(r'<script(?![^>]*src=)[^>]*>(.*?)</script>', html_content, re.DOTALL | re.IGNORECASE)
-                for idx, block in enumerate(inlines):
-                    if block.strip():
-                        inline_path = raw_inline / f"index_block_{idx}.js"
-                        inline_path.write_text(block.strip(), encoding="utf-8")
-                        collected_files.append(str(inline_path))
-            except Exception as e:
-                self.log_step(skill, "step-02-browser-crawl.log", f"HTTP fetch notice: {e}")
-
-        # Step 5: Historical fetch via tools/wayback-fetch.py
-        try:
-            cmd = [
-                sys.executable,
-                str(PROJECT_ROOT / "tools" / "wayback-fetch.py"),
-                "--domain", self.target,
-                "--output-dir", str(raw_hist),
-                "--limit", "20"
-            ]
-            subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-            self.log_step(skill, "step-05-historical.log", "Wayback fetch completed.")
-        except Exception as e:
-            self.log_step(skill, "step-05-historical.log", f"Wayback notice: {e}")
+        # Historical wildcard fetching is intentionally disabled until an explicit
+        # multi-host scope allowlist is supported.
+        self.log_step(skill, "step-05-historical.log", "Historical wildcard downloads skipped by same-host scope policy.")
 
         # Step 6: Source map hunter
         try:
@@ -630,24 +587,75 @@ class SkillRunner:
 
         self.log_step(skill, "step-05-combine.log", f"Generated combined wordlist ({len(combined)} paths).")
 
-        discovered = []
-        interesting = []
-        for path in combined:
-            result = self.http.request(path, method="GET")
-            if result.get("status") != "response":
-                self.log_step(skill, "step-06-scan.log", f"{path}: {result.get('status')} {result.get('error', result.get('reason', ''))}")
-                continue
-            row = {key: value for key, value in result.items() if key != "body"}
+        probe_results = {}
+
+        def probe_safe_path(path: str) -> Dict[str, Any]:
+            path = str(path)
+            if path not in combined:
+                return {"status": "blocked", "reason": "Path is not in the approved low-impact route list."}
+            if path in probe_results:
+                return probe_results[path]
+            response = self.http.request(path, method="GET")
+            row = {key: value for key, value in response.items() if key != "body"}
             row["path"] = path
-            discovered.append(row)
-            if result.get("status_code") in {200, 401, 403} and path != "/":
-                interesting.append({"path": path, "status_code": result["status_code"],
-                                    "content_type": result.get("headers", {}).get("content-type", ""),
-                                    "classification": "reachable_route_for_manual_review"})
+            probe_results[path] = row
+            if row.get("status") != "response":
+                self.log_step(skill, "step-06-scan.log",
+                              f"{path}: {row.get('status')} {row.get('error', row.get('reason', ''))}")
+            return row
+
+        registry = ToolRegistry()
+        registry.register(
+            "probe_safe_path", probe_safe_path,
+            "Send one same-host GET to a path from the fixed low-impact public route list. No other paths or methods are accepted.",
+            parameters={"path": {"type": "string", "enum": combined}},
+        )
+
+        def deterministic_fallback(_context: AgentContext) -> AgentResult:
+            for path in combined:
+                probe_safe_path(path)
+            return AgentResult(
+                status="completed",
+                summary=f"Checked {len(probe_results)} low-impact public routes with same-host GET requests.",
+                artifacts=[str(cd_dir / "discovered-paths.json")],
+                usage={"requests_used": self.http.request_count},
+            )
+
+        agent_result = AgentRunner(llm_client=self.llm).run(
+            context=AgentContext(
+                target=self.target,
+                target_dir=self.target_dir,
+                skill=skill,
+                run_id=f"content-discovery-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+                scope={"allowed_hosts": [self.http.target], "methods": ["GET"],
+                       "request_budget": self.http.max_requests},
+                budget={"max_steps": min(10, len(combined)), "max_tokens": 2000,
+                        "timeout_seconds": 120},
+            ),
+            tools=registry,
+            system_prompt=(
+                f"You are Moros's content discovery agent for the authorized host {self.http.target}. "
+                "Only choose paths from the tool's fixed enum. Use GET only. Do not request secrets, backups, "
+                "admin panels, authentication actions, or state-changing routes. Summarize observed HTTP metadata only."
+            ),
+            user_goal=("Choose and inspect relevant paths from the safe route list. Prefer robots.txt, sitemap.xml, "
+                       "public API documentation, health/status, and the root page. Do not invent paths."),
+            fallback_fn=deterministic_fallback,
+        )
+
+        discovered = list(probe_results.values())
+        interesting = [
+            {"path": row["path"], "status_code": row["status_code"],
+             "content_type": row.get("headers", {}).get("content-type", ""),
+             "classification": "reachable_route_for_manual_review"}
+            for row in discovered
+            if row.get("status") == "response" and row.get("status_code") in {200, 401, 403}
+            and row.get("path") != "/"
+        ]
+        root_response = probe_results.get("/")
 
         header_rows = []
-        root_response = self.http.request("/", method="GET")
-        if root_response.get("status") == "response":
+        if root_response and root_response.get("status") == "response":
             response_headers = root_response.get("headers", {})
             for header in ["strict-transport-security", "content-security-policy",
                            "x-content-type-options", "x-frame-options", "referrer-policy"]:
@@ -665,8 +673,9 @@ class SkillRunner:
                    "No credentials, payloads, state-changing methods, or cross-host redirects were used.\n")
         (cd_dir / "content-discovery-summary.md").write_text(summary, encoding="utf-8")
 
-        self.log_step(skill, "step-06-scan.log", f"Completed {len(discovered)} same-host GET checks; request budget used {self.http.request_count}/{self.http.max_requests}.")
-        return {"status": "COMPLETED", "paths_checked": len(discovered), "findings_count": len(interesting),
+        self.log_step(skill, "step-06-scan.log", f"Completed {len(discovered)} same-host GET checks; request budget used {self.http.request_count}/{self.http.max_requests}; agent={agent_result.status}.")
+        return {"status": "COMPLETED", "agent_status": agent_result.status,
+                "paths_checked": len(discovered), "findings_count": len(interesting),
                 "requests_used": self.http.request_count}
 
     # ==================== SKILL 6-12: VULNERABILITY TESTING ====================
@@ -675,6 +684,7 @@ class SkillRunner:
         v_dir = self.output_dir / "findings" / skill_name
         v_dir.mkdir(parents=True, exist_ok=True)
         self.log_step(skill_name, "step-01-verify.log", f"Starting {skill_name} testing.")
+        request_count_before = self.http.request_count
 
         if not self.scope_authorized:
             self.log_step(skill_name, "step-06-document.log", "Blocked: no matching scope note; no target requests were sent.")
@@ -696,22 +706,6 @@ class SkillRunner:
 
         findings = []
 
-        # Enforce Design Requirements #1 & #3: Flag state-changing endpoints for human approval via CheckpointManager
-        cp_mgr = CheckpointManager(self.target, self.target_dir)
-        for ep in endpoints:
-            method = ep.get("method", "GET").upper()
-            url = ep.get("url") or (str(ep.get("base_url", "")).rstrip("/") + str(ep.get("path", "")))
-            if method in ["POST", "PUT", "DELETE"]:
-                cp = cp_mgr.create_checkpoint(
-                    checkpoint_type="State-Changing Endpoint Confirmation",
-                    target_url=url,
-                    method=method,
-                    reason=f"Endpoint requires human approval before sending {method} payload.",
-                    risk_level="HIGH",
-                    agent=skill_name
-                )
-                self.log_step(skill_name, "step-02-checkpoint.log", f"Registered HITL checkpoint {cp['id']} for {method} {url}")
-
         # Heuristics create triage candidates. They do not prove exploitability.
         if skill_name == "xss-reflected":
             for ep in endpoints:
@@ -727,17 +721,35 @@ class SkillRunner:
                         continue
                     marker = "MOROS_REFLECT_" + hashlib.sha256(f"{url}|{param_name}".encode()).hexdigest()[:12]
                     probe_value = f"<moros-probe>{marker}</moros-probe>"
-                    probe = self.http.request(url, method="GET", params={param_name: probe_value})
+                    clean_url = urllib.parse.urlunparse(parsed_url._replace(query="", fragment=""))
+                    probe = self.http.request(clean_url, method="GET", params={param_name: probe_value})
                     body = probe.get("body", "")
                     if probe.get("status") != "response" or marker not in body:
                         continue
                     context_start = max(0, body.find(marker) - 100)
                     context = body[context_start:body.find(marker) + len(marker) + 100]
-                    escaped = f"&lt;moros-probe&gt;{marker}&lt;/moros-probe&gt;" in body.lower()
+                    escaped = f"&lt;moros-probe&gt;{marker.lower()}&lt;/moros-probe&gt;" in body.lower()
                     evidence = self.record_candidate_evidence(
                         skill_name, "Reflected XSS", Path(ep.get("_source_artifact", ep_file)), ep,
                         "A harmless, non-executable HTML marker was reflected in the response. This does not prove script execution.",
                     )
+                    probe_artifact = self.output_dir / "evidence" / "http-probes" / (
+                        "xss-reflected-" + hashlib.sha256(f"{clean_url}|{param_name}|{marker}".encode()).hexdigest()[:16] + ".json"
+                    )
+                    probe_artifact.parent.mkdir(parents=True, exist_ok=True)
+                    probe_artifact.write_text(json.dumps({
+                        "target": self.target,
+                        "method": "GET",
+                        "url": clean_url,
+                        "parameter": param_name,
+                        "probe": "non-executable <moros-probe> marker",
+                        "marker": marker,
+                        "response_status": probe.get("status_code"),
+                        "response_sha256": probe.get("body_sha256"),
+                        "marker_escaped": escaped,
+                        "response_context": context,
+                        "script_executed": False,
+                    }, indent=2), encoding="utf-8")
                     findings.append({
                         "title": f"Reflected input observed on {url}",
                         "type": "Reflected XSS",
@@ -747,7 +759,9 @@ class SkillRunner:
                         "validation_status": "unverified",
                         "confidence": "medium" if not escaped else "low",
                         "evidence_ids": [evidence["evidence_id"]],
-                        "evidence": [{**evidence, "response_status": probe.get("status_code"),
+                        "evidence": [{**evidence, "probe_artifact": str(probe_artifact),
+                                      "response_sha256": probe.get("body_sha256"),
+                                      "response_status": probe.get("status_code"),
                                       "marker_escaped": escaped, "response_context": context}],
                         "severity": "AI-proposed severity: UNASSESSED — pending evidence and human review",
                         "notes": "A harmless marker was reflected. No script payload was sent or executed; manual context review is required."
@@ -777,11 +791,28 @@ class SkillRunner:
                     })
 
         out_findings = v_dir / f"candidates-{skill_name}.json"
-        out_findings.write_text(json.dumps({"target": self.target, "findings": findings}, indent=2), encoding="utf-8")
-        (v_dir / f"{skill_name}-summary.md").write_text(f"# {skill_name} Triage — {self.target}\n\nRecorded {len(findings)} unverified candidates. No finding is confirmed by this heuristic pass.", encoding="utf-8")
-        self.log_step(skill_name, "step-06-document.log", f"Recorded {len(findings)} unverified candidates; no issue was marked confirmed.")
+        if skill_name == "xss-reflected":
+            requests_used = self.http.request_count - request_count_before
+            result_status = "COMPLETED"
+            summary = (f"Sent {requests_used} same-host GET marker probes. "
+                       f"Observed {len(findings)} harmless marker reflections; none is confirmed as executable XSS.")
+        elif skill_name == "ssrf-identify":
+            result_status = "CANDIDATES_ONLY"
+            summary = (f"Recorded {len(findings)} URL-like parameter candidates. "
+                       "No SSRF callback or server-side fetch test was sent.")
+        else:
+            result_status = "NOT_IMPLEMENTED"
+            summary = "This skill is not implemented as an active check yet; no vulnerability test was performed."
+            findings = []
+        out_findings.write_text(json.dumps({"target": self.target, "status": result_status,
+                                           "findings": findings}, indent=2), encoding="utf-8")
+        (v_dir / f"{skill_name}-summary.md").write_text(
+            f"# {skill_name} Assessment — {self.target}\n\n{summary}", encoding="utf-8")
+        self.log_step(skill_name, "step-06-document.log",
+                      f"Status: {result_status}; {summary}")
 
-        return {"status": "SUCCESS", "findings_count": len(findings)}
+        return {"status": result_status, "findings_count": len(findings), "summary": summary,
+                "requests_used": self.http.request_count - request_count_before}
 
     # ==================== SKILL 13: REVIEW-SKILL ====================
 
