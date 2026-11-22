@@ -298,6 +298,6 @@ tests/test_subagent_chat.py::test_execute_subagent_chat_deterministic PASSED [10
 
 ## 👤 Author & Credits
 
-- **Lead Architecture & Development:** **Raider** (`By Raider`)
+- **Lead Architecture & Development:** **Raider** 
 - **Research & Core Framework:** Moros AI Security Team
 - **License:** [MIT License](LICENSE)
