@@ -1,0 +1,32 @@
+{
+  "target": "demo.target.local",
+  "frontend": {
+    "framework": "React",
+    "version": "18.3.1",
+    "build_tool": "Vite 5.2",
+    "state_management": "Zustand",
+    "ui_library": "Tailwind CSS + Radix UI"
+  },
+  "backend_indicators": {
+    "likely_framework": "Express / Node.js",
+    "api_style": "REST (JSON)",
+    "api_version": "v1",
+    "evidence": [
+      "Express standard error envelope format",
+      "X-Powered-By: Express in server header",
+      "Prisma ORM validation errors"
+    ]
+  },
+  "third_party": [
+    {"name": "axios", "version": "1.6.0", "purpose": "HTTP client"},
+    {"name": "lodash", "version": "4.17.21", "purpose": "Utility"},
+    {"name": "jsonwebtoken", "version": "9.0.2", "purpose": "JWT auth"}
+  ],
+  "cdn": "Cloudflare Enterprise",
+  "known_misconfigs_for_stack": [
+    "React 18: dangerouslySetInnerHTML in user profile component",
+    "Vite: Source maps exposed in production build (/assets/*.js.map)",
+    "Express: Missing rate-limiting on /api/v1/auth/reset-password",
+    "Prisma: Stack traces leaked on invalid relation filters"
+  ]
+}

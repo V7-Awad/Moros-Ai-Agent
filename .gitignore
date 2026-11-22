@@ -22,9 +22,13 @@ env/
 Thumbs.db
 desktop.ini
 
-# Target output (never commit real engagement data)
+# Target output (never commit real engagement data, except demo)
 targets/*/output/
 targets/*/scope-of-work.*
+!targets/demo.target.local/**
+
+# Working scratch
+.work/
 
 # Playwright browsers
 playwright-browsers/

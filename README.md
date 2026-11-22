@@ -98,7 +98,30 @@ python setup.py init-target --domain example.com
 cp /path/to/scope-of-work.pdf targets/example.com/
 ```
 
-### 3. Run a Scan
+### 3. Launch Web Dashboard (Interactive Viewer)
+
+Inspired by Strix (`usestrix/strix`), Moros AI features a local web viewer dashboard:
+
+```bash
+# Launch dashboard directly (opens in your default browser at http://127.0.0.1:8080)
+python dashboard.py
+
+# Or via run.py (similar to 'strix view')
+python run.py view
+python run.py --dashboard
+```
+
+**Dashboard Features:**
+- 📊 **Executive Overview**: High-level severity metrics, vulnerability breakdown charts, and target tech stack.
+- 🕸️ **Agent Multi-Skill Graph**: Visual orchestration tree of all 14 micro-skills and their review status.
+- 🚨 **Vulnerabilities & Exploits**: Full finding cards with AI-proposed severities, context, and 1-click copy cURL PoCs.
+- 🛡️ **Human-in-the-Loop (HITL) Center**: Actionable checkpoints to approve/reject state-changing or destructive actions.
+- 💻 **Live Terminal & Tool Logs**: Real-time streaming console for inspecting skill logs.
+- 📄 **Report Viewer**: Formatted markdown penetration testing report with print/PDF export.
+
+---
+
+### 4. Run a Scan (CLI)
 
 ```bash
 # Run the full pipeline against a target

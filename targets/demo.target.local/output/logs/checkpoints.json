@@ -1,0 +1,20 @@
+[
+  {
+    "id": "cp-post-avatar",
+    "type": "State-Changing Endpoint Confirmation",
+    "target_url": "/api/v1/user/avatar-fetch",
+    "method": "POST",
+    "reason": "Endpoint triggers external HTTP requests from backend server (SSRF vector). Human confirmation required before probing internal subnets.",
+    "status": "APPROVED",
+    "created_at": "2026-11-22T14:40:00Z"
+  },
+  {
+    "id": "cp-delete-comments",
+    "type": "Destructive HTTP Method (DELETE)",
+    "target_url": "/api/v1/comments/delete",
+    "method": "DELETE",
+    "reason": "Destructive DELETE operation. Automatic execution is prohibited to prevent data loss.",
+    "status": "PENDING_APPROVAL",
+    "created_at": "2026-11-22T14:42:00Z"
+  }
+]

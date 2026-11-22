@@ -73,7 +73,7 @@ Examples:
         """
     )
 
-    parser.add_argument("--target", required=True,
+    parser.add_argument("--target", required=False, default=None,
                         help="Target domain (e.g., example.com)")
     parser.add_argument("--target-dir", default=None,
                         help="Custom target directory (default: targets/<domain>)")
@@ -89,8 +89,19 @@ Examples:
                         help="Show execution plan without running anything")
     parser.add_argument("--check", action="store_true",
                         help="Check prerequisites only")
+    parser.add_argument("--dashboard", action="store_true",
+                        help="Launch local web dashboard viewer (like 'strix view')")
+    parser.add_argument("--port", type=int, default=8080,
+                        help="Dashboard server port (default: 8080)")
 
     args = parser.parse_args()
+
+    # Check dashboard flag or subcommands
+    if args.dashboard or (len(sys.argv) > 1 and sys.argv[1] == "view"):
+        from dashboard.server import run_dashboard
+        target_name = args.target if hasattr(args, "target") else None
+        run_dashboard(port=args.port, default_target=target_name)
+        sys.exit(0)
 
     # Check prerequisites
     issues = check_prerequisites()
@@ -109,6 +120,12 @@ Examples:
         for issue in issues:
             print(f"   • {issue}")
         print()
+
+    if not args.target:
+        print("\n❌ Error: --target is required to run a scan.")
+        print("   Example: python run.py --target example.com")
+        print("   To launch dashboard: python run.py --dashboard (or python dashboard.py)")
+        sys.exit(1)
 
     # Resolve target directory
     target_dir = args.target_dir or str(PROJECT_ROOT / "targets" / args.target)

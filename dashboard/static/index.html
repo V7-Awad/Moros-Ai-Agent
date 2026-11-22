@@ -1,0 +1,1075 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Moros AI Agent — Pentest Dashboard</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- Marked for Markdown rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#f0fdf4',
+              500: '#22c55e',
+              600: '#16a34a',
+              700: '#15803d',
+            },
+            dark: {
+              950: '#090d16',
+              900: '#0f172a',
+              850: '#131d35',
+              800: '#1e293b',
+              700: '#334155',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    /* Custom scrollbars */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0f172a; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #475569; }
+    .font-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+  </style>
+</head>
+<body class="bg-dark-950 text-slate-100 min-h-screen flex flex-col font-sans antialiased selection:bg-brand-500 selection:text-black">
+
+  <!-- ==================== HEADER ==================== -->
+  <header class="border-b border-dark-800 bg-dark-900/80 backdrop-blur sticky top-0 z-40 px-6 py-3 flex items-center justify-between">
+    <div class="flex items-center space-x-4">
+      <div class="flex items-center space-x-3">
+        <div class="w-9 h-9 rounded-lg bg-gradient-to-tr from-brand-600 to-emerald-400 flex items-center justify-center shadow-lg shadow-emerald-500/20">
+          <i data-lucide="shield-alert" class="w-5 h-5 text-black"></i>
+        </div>
+        <div>
+          <div class="flex items-center space-x-2">
+            <span class="font-extrabold text-lg tracking-wider text-white">MOROS <span class="text-brand-500">AI</span></span>
+            <span class="text-[10px] uppercase font-bold tracking-widest px-2 py-0.5 rounded bg-brand-500/10 text-brand-400 border border-brand-500/20">AGENTIC PENTEST</span>
+          </div>
+          <p class="text-xs text-slate-400">Autonomous Web Pentest Automation System</p>
+        </div>
+      </div>
+
+      <!-- Target Selector -->
+      <div class="hidden md:flex items-center space-x-2 ml-8 pl-8 border-l border-dark-800">
+        <span class="text-xs text-slate-400 font-medium">TARGET:</span>
+        <select id="targetSelect" onchange="onTargetChange()" class="bg-dark-850 border border-dark-700 text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:border-brand-500 font-mono text-emerald-400">
+          <option value="">Loading targets...</option>
+        </select>
+        <button onclick="openModal('newTargetModal')" class="p-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 text-slate-300 hover:text-white transition" title="Add Target">
+          <i data-lucide="plus" class="w-4 h-4"></i>
+        </button>
+      </div>
+    </div>
+
+    <!-- Right Header Actions -->
+    <div class="flex items-center space-x-3">
+      <!-- Scope Status Badge -->
+      <div id="scopeBadge" class="hidden sm:flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+        <i data-lucide="file-check-2" class="w-3.5 h-3.5"></i>
+        <span>SCOPE VERIFIED</span>
+      </div>
+
+      <!-- Scan status badge -->
+      <div id="scanStatusBadge" class="hidden sm:flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-dark-800 text-slate-300 border border-dark-700">
+        <span class="w-2 h-2 rounded-full bg-slate-500"></span>
+        <span>IDLE</span>
+      </div>
+
+      <!-- New Scan Button -->
+      <button onclick="openModal('newScanModal')" class="flex items-center space-x-2 px-4 py-1.5 rounded-lg bg-gradient-to-r from-brand-600 to-emerald-500 hover:from-brand-500 hover:to-emerald-400 text-black font-semibold text-sm shadow-lg shadow-emerald-500/20 transition">
+        <i data-lucide="play" class="w-4 h-4 fill-current"></i>
+        <span>Launch Scan</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ==================== MAIN CONTENT WRAPPER ==================== -->
+  <div class="flex-1 flex overflow-hidden">
+
+    <!-- SIDEBAR NAVIGATION -->
+    <aside class="w-64 border-r border-dark-800 bg-dark-900/50 flex flex-col justify-between p-4 space-y-6">
+      <nav class="space-y-1.5">
+        <button onclick="switchTab('overview')" id="tabBtn-overview" class="w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium transition bg-dark-800 text-white">
+          <i data-lucide="layout-dashboard" class="w-4 h-4 text-brand-400"></i>
+          <span>Dashboard Overview</span>
+        </button>
+        <button onclick="switchTab('pipeline')" id="tabBtn-pipeline" class="w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium transition text-slate-400 hover:bg-dark-850 hover:text-slate-200">
+          <i data-lucide="git-fork" class="w-4 h-4"></i>
+          <span>Agent Graph & Skills</span>
+          <span class="ml-auto text-xs px-1.5 py-0.5 rounded bg-dark-800 text-slate-400">14</span>
+        </button>
+        <button onclick="switchTab('findings')" id="tabBtn-findings" class="w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium transition text-slate-400 hover:bg-dark-850 hover:text-slate-200">
+          <i data-lucide="bug" class="w-4 h-4"></i>
+          <span>Findings & Exploits</span>
+          <span id="navFindingsCount" class="ml-auto text-xs px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 font-bold">0</span>
+        </button>
+        <button onclick="switchTab('endpoints')" id="tabBtn-endpoints" class="w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium transition text-slate-400 hover:bg-dark-850 hover:text-slate-200">
+          <i data-lucide="network" class="w-4 h-4"></i>
+          <span>Endpoints & APIs</span>
+          <span id="navEndpointsCount" class="ml-auto text-xs px-1.5 py-0.5 rounded bg-dark-800 text-slate-400">0</span>
+        </button>
+        <button onclick="switchTab('checkpoints')" id="tabBtn-checkpoints" class="w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium transition text-slate-400 hover:bg-dark-850 hover:text-slate-200">
+          <i data-lucide="user-check" class="w-4 h-4"></i>
+          <span>Human Checkpoints</span>
+          <span id="navCheckpointsBadge" class="ml-auto text-xs px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-bold">HITL</span>
+        </button>
+        <button onclick="switchTab('terminal')" id="tabBtn-terminal" class="w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium transition text-slate-400 hover:bg-dark-850 hover:text-slate-200">
+          <i data-lucide="terminal" class="w-4 h-4"></i>
+          <span>Live Logs & Output</span>
+        </button>
+        <button onclick="switchTab('report')" id="tabBtn-report" class="w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium transition text-slate-400 hover:bg-dark-850 hover:text-slate-200">
+          <i data-lucide="file-text" class="w-4 h-4"></i>
+          <span>Report Conglomeration</span>
+        </button>
+      </nav>
+
+      <!-- System Status Widget -->
+      <div class="p-3.5 rounded-xl bg-dark-900 border border-dark-800 space-y-2.5 text-xs text-slate-400">
+        <div class="flex items-center justify-between font-semibold text-slate-300">
+          <span>SYSTEM STATUS</span>
+          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+        </div>
+        <div class="flex justify-between">
+          <span>Engine:</span>
+          <span class="font-mono text-slate-200">Moros AI v1.0</span>
+        </div>
+        <div class="flex justify-between">
+          <span>Playwright:</span>
+          <span id="sysPlaywrightStatus" class="font-mono text-slate-200">Checking...</span>
+        </div>
+        <div class="flex justify-between">
+          <span>Human-in-Loop:</span>
+          <span class="font-semibold text-emerald-400">Enforced</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- CONTENT AREA -->
+    <main class="flex-1 overflow-y-auto p-8 space-y-8">
+
+      <!-- ==================== TAB 1: OVERVIEW ==================== -->
+      <section id="tab-overview" class="space-y-8">
+        <!-- Target Header Banner -->
+        <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4 p-6 rounded-2xl bg-gradient-to-r from-dark-900 via-dark-850 to-dark-900 border border-dark-800">
+          <div class="space-y-1">
+            <div class="flex items-center space-x-3">
+              <h1 id="overviewTargetName" class="text-2xl font-extrabold text-white font-mono">Select a target</h1>
+              <span id="overviewScopeTag" class="px-2.5 py-0.5 rounded text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">SCOPE VERIFIED</span>
+            </div>
+            <p class="text-sm text-slate-400">Autonomous dynamic reconnaissance, JS collection, vulnerability discovery & verification</p>
+          </div>
+          <div class="flex items-center space-x-3">
+            <button onclick="refreshTargetData()" class="flex items-center space-x-2 px-3 py-2 rounded-lg bg-dark-800 hover:bg-dark-700 text-sm font-medium transition">
+              <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+              <span>Refresh</span>
+            </button>
+            <button onclick="switchTab('report')" class="flex items-center space-x-2 px-4 py-2 rounded-lg bg-dark-700 hover:bg-dark-600 text-sm font-medium transition text-white">
+              <i data-lucide="download" class="w-4 h-4"></i>
+              <span>Export Report</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Metrics Grid -->
+        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+          <!-- Total Findings -->
+          <div class="p-4 rounded-xl bg-dark-900 border border-dark-800 space-y-1">
+            <span class="text-xs text-slate-400 font-medium">TOTAL FINDINGS</span>
+            <div id="statTotalFindings" class="text-2xl font-bold text-white font-mono">0</div>
+            <span class="text-[11px] text-slate-500">Across all categories</span>
+          </div>
+          <!-- Critical -->
+          <div class="p-4 rounded-xl bg-dark-900 border border-rose-500/20 bg-rose-500/5 space-y-1">
+            <div class="flex items-center justify-between text-xs text-rose-400 font-medium">
+              <span>CRITICAL</span>
+              <i data-lucide="flame" class="w-3.5 h-3.5"></i>
+            </div>
+            <div id="statCritical" class="text-2xl font-bold text-rose-400 font-mono">0</div>
+            <span class="text-[11px] text-rose-400/60">Pending human review</span>
+          </div>
+          <!-- High -->
+          <div class="p-4 rounded-xl bg-dark-900 border border-orange-500/20 bg-orange-500/5 space-y-1">
+            <div class="flex items-center justify-between text-xs text-orange-400 font-medium">
+              <span>HIGH</span>
+              <i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i>
+            </div>
+            <div id="statHigh" class="text-2xl font-bold text-orange-400 font-mono">0</div>
+            <span class="text-[11px] text-orange-400/60">Pending human review</span>
+          </div>
+          <!-- Medium -->
+          <div class="p-4 rounded-xl bg-dark-900 border border-yellow-500/20 bg-yellow-500/5 space-y-1">
+            <div class="flex items-center justify-between text-xs text-yellow-400 font-medium">
+              <span>MEDIUM</span>
+              <i data-lucide="alert-circle" class="w-3.5 h-3.5"></i>
+            </div>
+            <div id="statMedium" class="text-2xl font-bold text-yellow-400 font-mono">0</div>
+            <span class="text-[11px] text-yellow-400/60">Pending human review</span>
+          </div>
+          <!-- Endpoints -->
+          <div class="p-4 rounded-xl bg-dark-900 border border-dark-800 space-y-1">
+            <span class="text-xs text-slate-400 font-medium">ENDPOINTS DISCOVERED</span>
+            <div id="statEndpoints" class="text-2xl font-bold text-emerald-400 font-mono">0</div>
+            <span class="text-[11px] text-slate-500">From JS & crawl</span>
+          </div>
+          <!-- JS Files -->
+          <div class="p-4 rounded-xl bg-dark-900 border border-dark-800 space-y-1">
+            <span class="text-xs text-slate-400 font-medium">JS ARTIFACTS</span>
+            <div id="statJsFiles" class="text-2xl font-bold text-cyan-400 font-mono">0</div>
+            <span class="text-[11px] text-slate-500">Raw & beautified</span>
+          </div>
+        </div>
+
+        <!-- Middle Section: Chart + Tech Stack -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <!-- Vulnerability Chart -->
+          <div class="p-6 rounded-2xl bg-dark-900 border border-dark-800 space-y-4 flex flex-col justify-between">
+            <div class="flex items-center justify-between">
+              <h2 class="text-sm font-semibold tracking-wider text-slate-300 uppercase">Vulnerability Severity Distribution</h2>
+              <i data-lucide="pie-chart" class="w-4 h-4 text-slate-400"></i>
+            </div>
+            <div class="relative flex items-center justify-center my-auto h-48">
+              <canvas id="vulnChart"></canvas>
+            </div>
+            <div class="text-[11px] text-center text-slate-500">All severities are AI-proposed and provisional until confirmed.</div>
+          </div>
+
+          <!-- Tech Stack Fingerprint -->
+          <div class="lg:col-span-2 p-6 rounded-2xl bg-dark-900 border border-dark-800 space-y-4">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center space-x-2">
+                <i data-lucide="cpu" class="w-4 h-4 text-brand-400"></i>
+                <h2 class="text-sm font-semibold tracking-wider text-slate-300 uppercase">Detected Tech Stack & Misconfigurations</h2>
+              </div>
+              <span class="text-xs text-slate-500 font-mono">js-analyze output</span>
+            </div>
+
+            <div id="techStackContainer" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div class="p-4 rounded-xl bg-dark-850 border border-dark-800 space-y-2">
+                <span class="text-xs font-semibold text-slate-400 uppercase">Frontend Architecture</span>
+                <div id="techFrontend" class="text-sm font-medium text-slate-200">Analyzing...</div>
+              </div>
+              <div class="p-4 rounded-xl bg-dark-850 border border-dark-800 space-y-2">
+                <span class="text-xs font-semibold text-slate-400 uppercase">Backend Indicators</span>
+                <div id="techBackend" class="text-sm font-medium text-slate-200">Analyzing...</div>
+              </div>
+              <div class="md:col-span-2 p-4 rounded-xl bg-dark-850 border border-dark-800 space-y-2">
+                <span class="text-xs font-semibold text-amber-400 uppercase flex items-center space-x-1.5">
+                  <i data-lucide="shield-alert" class="w-3.5 h-3.5"></i>
+                  <span>Known Misconfigurations to Probe</span>
+                </span>
+                <ul id="techMisconfigs" class="text-xs text-slate-300 space-y-1 list-disc list-inside">
+                  <li>Run `js-analyze` to populate stack vulnerabilities</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Human Checkpoints Preview in Overview -->
+        <div class="p-6 rounded-2xl bg-dark-900 border border-amber-500/20 bg-amber-500/[0.02] space-y-4">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center space-x-2.5">
+              <i data-lucide="user-check" class="w-5 h-5 text-amber-400"></i>
+              <h2 class="text-sm font-bold text-slate-200 uppercase tracking-wider">Human-In-The-Loop Checkpoint Queue</h2>
+            </div>
+            <button onclick="switchTab('checkpoints')" class="text-xs text-amber-400 hover:underline">View All Checkpoints &rarr;</button>
+          </div>
+          <div id="overviewCheckpointsList" class="space-y-3">
+            <p class="text-xs text-slate-400">No pending checkpoints requiring approval.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== TAB 2: AGENT GRAPH & SKILLS ==================== -->
+      <section id="tab-pipeline" class="hidden space-y-6">
+        <div>
+          <h1 class="text-xl font-bold text-white">Agent Multi-Skill Coordination Graph</h1>
+          <p class="text-xs text-slate-400">14 specialized micro-skills orchestrated with strict completion verification (Review-Skill)</p>
+        </div>
+
+        <!-- Skills Flowchart Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4" id="skillsGrid">
+          <!-- Dynamic Skill Cards inserted here -->
+        </div>
+      </section>
+
+      <!-- ==================== TAB 3: FINDINGS & EXPLOITS ==================== -->
+      <section id="tab-findings" class="hidden space-y-6">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div>
+            <h1 class="text-xl font-bold text-white">Discovered Vulnerabilities & Exploit Evidence</h1>
+            <p class="text-xs text-slate-400">All findings include verified PoC curl commands and context</p>
+          </div>
+          <!-- Severity Filter Buttons -->
+          <div class="flex items-center space-x-2">
+            <button onclick="filterFindings('ALL')" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-brand-600 text-black filter-btn" data-filter="ALL">All</button>
+            <button onclick="filterFindings('CRITICAL')" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-dark-800 text-rose-400 hover:bg-dark-700 filter-btn" data-filter="CRITICAL">Critical</button>
+            <button onclick="filterFindings('HIGH')" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-dark-800 text-orange-400 hover:bg-dark-700 filter-btn" data-filter="HIGH">High</button>
+            <button onclick="filterFindings('MEDIUM')" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-dark-800 text-yellow-400 hover:bg-dark-700 filter-btn" data-filter="MEDIUM">Medium</button>
+            <button onclick="filterFindings('LOW')" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-dark-800 text-blue-400 hover:bg-dark-700 filter-btn" data-filter="LOW">Low</button>
+          </div>
+        </div>
+
+        <!-- Findings List -->
+        <div id="findingsContainer" class="space-y-4">
+          <p class="text-sm text-slate-400">No findings recorded yet for this target.</p>
+        </div>
+      </section>
+
+      <!-- ==================== TAB 4: ENDPOINTS & APIS ==================== -->
+      <section id="tab-endpoints" class="hidden space-y-6">
+        <div>
+          <h1 class="text-xl font-bold text-white">Discovered API Endpoints & Routes</h1>
+          <p class="text-xs text-slate-400">Extracted from client-side JS bundles, inline scripts, and dynamic spidering</p>
+        </div>
+
+        <div class="bg-dark-900 rounded-2xl border border-dark-800 overflow-hidden">
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-xs">
+              <thead class="bg-dark-850 text-slate-400 border-b border-dark-800 uppercase font-mono">
+                <tr>
+                  <th class="px-4 py-3">Method</th>
+                  <th class="px-4 py-3">Endpoint URL</th>
+                  <th class="px-4 py-3">Category</th>
+                  <th class="px-4 py-3">Parameters</th>
+                  <th class="px-4 py-3">Source File</th>
+                  <th class="px-4 py-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="endpointsTableBody" class="divide-y divide-dark-800 text-slate-300 font-mono">
+                <tr><td colspan="6" class="px-4 py-6 text-center text-slate-500">No endpoints discovered yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== TAB 5: HUMAN CHECKPOINTS ==================== -->
+      <section id="tab-checkpoints" class="hidden space-y-6">
+        <div class="flex items-center justify-between">
+          <div>
+            <h1 class="text-xl font-bold text-white">Human-In-The-Loop Approval Center</h1>
+            <p class="text-xs text-slate-400">Mandatory human review for state-changing endpoints, brute-forcing, and exploit chaining</p>
+          </div>
+          <span class="px-3 py-1 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20">Zero Unattended Exploitation</span>
+        </div>
+
+        <div id="checkpointsContainer" class="space-y-4">
+          <p class="text-sm text-slate-400">No pending checkpoints for this target.</p>
+        </div>
+      </section>
+
+      <!-- ==================== TAB 6: TERMINAL & LOGS ==================== -->
+      <section id="tab-terminal" class="hidden space-y-6">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div>
+            <h1 class="text-xl font-bold text-white">Live Execution Logs & Tool Terminal</h1>
+            <p class="text-xs text-slate-400">Streaming execution logs across all tools, agents, and verification steps</p>
+          </div>
+          <!-- Log File Selector -->
+          <div class="flex items-center space-x-2">
+            <select id="logFileSelect" onchange="fetchSelectedLog()" class="bg-dark-850 border border-dark-700 text-xs rounded-lg px-3 py-1.5 font-mono text-slate-200">
+              <option value="LIVE">Live Scan Stream</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="bg-black/80 rounded-2xl border border-dark-800 p-4 font-mono text-xs text-emerald-400/90 h-[600px] overflow-y-auto leading-relaxed shadow-inner" id="terminalBox">
+          <pre id="terminalOutput" class="whitespace-pre-wrap">Listening for agent execution logs...</pre>
+        </div>
+      </section>
+
+      <!-- ==================== TAB 7: REPORT CONGLOMERATION ==================== -->
+      <section id="tab-report" class="hidden space-y-6">
+        <div class="flex items-center justify-between">
+          <div>
+            <h1 class="text-xl font-bold text-white">Penetration Testing Final Deliverable Report</h1>
+            <p class="text-xs text-slate-400">Synthesized report from all skill passes, deduplicated, ready for human sign-off</p>
+          </div>
+          <button onclick="window.print()" class="px-4 py-2 rounded-lg bg-dark-800 hover:bg-dark-700 text-xs font-semibold text-white border border-dark-700 transition flex items-center space-x-2">
+            <i data-lucide="printer" class="w-4 h-4"></i>
+            <span>Print / Save as PDF</span>
+          </button>
+        </div>
+
+        <div class="bg-dark-900 rounded-2xl border border-dark-800 p-8 prose prose-invert max-w-none" id="reportContent">
+          <p class="text-slate-400">Loading final report...</p>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- ==================== MODALS ==================== -->
+
+  <!-- 1. Launch Scan Modal -->
+  <div id="newScanModal" class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-dark-900 border border-dark-700 rounded-2xl w-full max-w-lg p-6 space-y-6 shadow-2xl">
+      <div class="flex items-center justify-between border-b border-dark-800 pb-4">
+        <div class="flex items-center space-x-2">
+          <i data-lucide="play-circle" class="w-5 h-5 text-brand-400"></i>
+          <h3 class="text-lg font-bold text-white">Launch Moros AI Assessment</h3>
+        </div>
+        <button onclick="closeModal('newScanModal')" class="text-slate-400 hover:text-white">&times;</button>
+      </div>
+
+      <div class="space-y-4 text-xs">
+        <div>
+          <label class="block text-slate-300 font-semibold mb-1">Target Domain</label>
+          <input type="text" id="scanTargetInput" class="w-full bg-dark-850 border border-dark-700 rounded-lg px-3 py-2 text-white font-mono" placeholder="example.com">
+        </div>
+
+        <div>
+          <label class="block text-slate-300 font-semibold mb-1">Skills Execution Strategy</label>
+          <select id="scanSkillsSelect" class="w-full bg-dark-850 border border-dark-700 rounded-lg px-3 py-2 text-white font-mono">
+            <option value="all">Full Autonomous Pipeline (All 14 Skills)</option>
+            <option value="recon-subdomain,js-discover,js-analyze">Reconnaissance & JS Discovery Only</option>
+            <option value="xss-reflected,xss-dom,xss-stored,xss-blind">XSS Testing Suite Only</option>
+            <option value="ssrf-identify,ssrf-post-exploit">SSRF Pipeline Only</option>
+            <option value="content-discovery">Content Discovery Only</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-slate-300 font-semibold mb-1">Model Tier / Provider</label>
+          <select id="scanModelSelect" class="w-full bg-dark-850 border border-dark-700 rounded-lg px-3 py-2 text-white font-mono">
+            <option value="default">Default Configured Harness</option>
+            <option value="claude-sonnet,gpt-4o-mini">Multi-Model Tier (Claude + OpenAI)</option>
+            <option value="open-weight-local">Local / Open-Weight (via OpenCode)</option>
+          </select>
+        </div>
+
+        <div class="flex items-center space-x-2 pt-2">
+          <input type="checkbox" id="scanDryRunCheck" class="rounded bg-dark-850 border-dark-700 text-brand-500 focus:ring-brand-500">
+          <label for="scanDryRunCheck" class="text-slate-300">Dry-run only (simulate execution plan without calling live endpoints)</label>
+        </div>
+      </div>
+
+      <div class="flex justify-end space-x-3 pt-4 border-t border-dark-800">
+        <button onclick="closeModal('newScanModal')" class="px-4 py-2 rounded-lg bg-dark-800 text-slate-300 text-xs font-semibold hover:bg-dark-700">Cancel</button>
+        <button onclick="submitNewScan()" class="px-5 py-2 rounded-lg bg-brand-600 hover:bg-brand-500 text-black text-xs font-bold shadow-lg shadow-emerald-500/20">Start Assessment</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. New Target Modal -->
+  <div id="newTargetModal" class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-dark-900 border border-dark-700 rounded-2xl w-full max-w-md p-6 space-y-6 shadow-2xl">
+      <div class="flex items-center justify-between border-b border-dark-800 pb-4">
+        <h3 class="text-lg font-bold text-white">Initialize New Target</h3>
+        <button onclick="closeModal('newTargetModal')" class="text-slate-400 hover:text-white">&times;</button>
+      </div>
+      <div class="space-y-4 text-xs">
+        <div>
+          <label class="block text-slate-300 font-semibold mb-1">Target Domain / Host</label>
+          <input type="text" id="newTargetDomainInput" class="w-full bg-dark-850 border border-dark-700 rounded-lg px-3 py-2 text-white font-mono" placeholder="app.target.com">
+        </div>
+        <div class="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300/90 text-xs leading-relaxed">
+          <strong>⚠️ Authorization Reminder:</strong> You must have a signed scope-of-work or bug bounty authorization for this target before offensive skills can execute.
+        </div>
+      </div>
+      <div class="flex justify-end space-x-3 pt-4 border-t border-dark-800">
+        <button onclick="closeModal('newTargetModal')" class="px-4 py-2 rounded-lg bg-dark-800 text-slate-300 text-xs font-semibold">Cancel</button>
+        <button onclick="submitNewTarget()" class="px-5 py-2 rounded-lg bg-brand-600 hover:bg-brand-500 text-black text-xs font-bold">Initialize</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== SCRIPT ==================== -->
+  <script>
+    let currentTarget = "";
+    let targetsList = [];
+    let currentFindings = [];
+    let activeFilter = "ALL";
+    let chartInstance = null;
+    let pollInterval = null;
+
+    // --- Tab Switching ---
+    function switchTab(tabId) {
+      const tabs = ['overview', 'pipeline', 'findings', 'endpoints', 'checkpoints', 'terminal', 'report'];
+      tabs.forEach(t => {
+        const el = document.getElementById(`tab-${t}`);
+        const btn = document.getElementById(`tabBtn-${t}`);
+        if (el) el.classList.add('hidden');
+        if (btn) {
+          btn.classList.remove('bg-dark-800', 'text-white');
+          btn.classList.add('text-slate-400');
+        }
+      });
+      const activeEl = document.getElementById(`tab-${tabId}`);
+      const activeBtn = document.getElementById(`tabBtn-${tabId}`);
+      if (activeEl) activeEl.classList.remove('hidden');
+      if (activeBtn) {
+        activeBtn.classList.add('bg-dark-800', 'text-white');
+        activeBtn.classList.remove('text-slate-400');
+      }
+      lucide.createIcons();
+    }
+
+    // --- Modals ---
+    function openModal(id) { document.getElementById(id).classList.remove('hidden'); }
+    function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
+
+    // --- Initialization ---
+    async function init() {
+      lucide.createIcons();
+      await fetchSystemInfo();
+      await fetchTargets();
+
+      // Check URL query param for default target
+      const urlParams = new URLSearchParams(window.location.search);
+      const urlTarget = urlParams.get('target');
+      if (urlTarget && targetsList.some(t => t.name === urlTarget)) {
+        currentTarget = urlTarget;
+      } else if (targetsList.length > 0) {
+        currentTarget = targetsList[0].name;
+      }
+
+      document.getElementById('targetSelect').value = currentTarget;
+      document.getElementById('scanTargetInput').value = currentTarget;
+
+      if (currentTarget) {
+        await refreshTargetData();
+      }
+
+      // Start live polling
+      pollInterval = setInterval(pollScanStatus, 2500);
+    }
+
+    async function fetchSystemInfo() {
+      try {
+        const res = await fetch('/api/system');
+        const data = await res.json();
+        document.getElementById('sysPlaywrightStatus').textContent = data.playwright_installed ? 'Installed' : 'Missing';
+        document.getElementById('sysPlaywrightStatus').className = data.playwright_installed ? 'font-mono text-emerald-400' : 'font-mono text-rose-400';
+      } catch (e) {
+        console.error("System info error:", e);
+      }
+    }
+
+    async function fetchTargets() {
+      try {
+        const res = await fetch('/api/targets');
+        targetsList = await res.json();
+        const sel = document.getElementById('targetSelect');
+        sel.innerHTML = '';
+        targetsList.forEach(t => {
+          const opt = document.createElement('option');
+          opt.value = t.name;
+          opt.textContent = `${t.name} (${t.findings_total} findings)`;
+          sel.appendChild(opt);
+        });
+      } catch (e) {
+        console.error("Targets error:", e);
+      }
+    }
+
+    async function onTargetChange() {
+      currentTarget = document.getElementById('targetSelect').value;
+      document.getElementById('scanTargetInput').value = currentTarget;
+      await refreshTargetData();
+    }
+
+    async function refreshTargetData() {
+      if (!currentTarget) return;
+
+      document.getElementById('overviewTargetName').textContent = currentTarget;
+
+      // 1. Fetch Summary
+      try {
+        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/summary`);
+        const summary = await res.json();
+
+        // Scope badge
+        const scopeBadge = document.getElementById('scopeBadge');
+        const overviewScopeTag = document.getElementById('overviewScopeTag');
+        if (summary.has_scope) {
+          scopeBadge.className = "hidden sm:flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20";
+          scopeBadge.innerHTML = `<i data-lucide="file-check-2" class="w-3.5 h-3.5"></i><span>SCOPE VERIFIED</span>`;
+          overviewScopeTag.className = "px-2.5 py-0.5 rounded text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20";
+          overviewScopeTag.textContent = "SCOPE VERIFIED";
+        } else {
+          scopeBadge.className = "hidden sm:flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20";
+          scopeBadge.innerHTML = `<i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i><span>PASSIVE RECON ONLY</span>`;
+          overviewScopeTag.className = "px-2.5 py-0.5 rounded text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20";
+          overviewScopeTag.textContent = "NO SCOPE FILE — PASSIVE RECON ONLY";
+        }
+
+        // Metrics
+        document.getElementById('statTotalFindings').textContent = summary.total_findings;
+        document.getElementById('statCritical').textContent = summary.severities.CRITICAL || 0;
+        document.getElementById('statHigh').textContent = summary.severities.HIGH || 0;
+        document.getElementById('statMedium').textContent = summary.severities.MEDIUM || 0;
+        document.getElementById('statEndpoints').textContent = summary.total_endpoints;
+        document.getElementById('statJsFiles').textContent = summary.total_js_files;
+
+        // Render Chart
+        renderVulnChart(summary.severities);
+
+        // Tech Stack
+        renderTechStack(summary.tech_fingerprint);
+      } catch (e) {
+        console.error("Summary error:", e);
+      }
+
+      // 2. Fetch Findings
+      await fetchFindings();
+
+      // 3. Fetch Skills status
+      await fetchSkillsStatus();
+
+      // 4. Fetch Endpoints
+      await fetchEndpoints();
+
+      // 5. Fetch Checkpoints
+      await fetchCheckpoints();
+
+      // 6. Fetch Logs list
+      await fetchLogsList();
+
+      // 7. Fetch Report
+      await fetchReport();
+
+      lucide.createIcons();
+    }
+
+    function renderVulnChart(severities) {
+      const ctx = document.getElementById('vulnChart').getContext('2d');
+      if (chartInstance) chartInstance.destroy();
+
+      const data = [
+        severities.CRITICAL || 0,
+        severities.HIGH || 0,
+        severities.MEDIUM || 0,
+        severities.LOW || 0,
+        severities.INFO || 0,
+      ];
+
+      const allZero = data.every(v => v === 0);
+
+      chartInstance = new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+          labels: ['Critical', 'High', 'Medium', 'Low', 'Info'],
+          datasets: [{
+            data: allZero ? [1] : data,
+            backgroundColor: allZero ? ['#334155'] : ['#f43f5e', '#fb923c', '#facc15', '#60a5fa', '#94a3b8'],
+            borderWidth: 0,
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: {
+              position: 'bottom',
+              labels: { color: '#94a3b8', font: { size: 10, family: 'monospace' }, boxWidth: 10 }
+            }
+          },
+          cutout: '72%'
+        }
+      });
+    }
+
+    function renderTechStack(tech) {
+      const fEl = document.getElementById('techFrontend');
+      const bEl = document.getElementById('techBackend');
+      const mEl = document.getElementById('techMisconfigs');
+
+      if (!tech || Object.keys(tech).length === 0) {
+        fEl.textContent = "Run js-analyze to detect";
+        bEl.textContent = "Run js-analyze to detect";
+        mEl.innerHTML = "<li>No fingerprint data yet.</li>";
+        return;
+      }
+
+      if (tech.frontend) {
+        fEl.innerHTML = `<span class="text-emerald-400 font-bold">${tech.frontend.framework || 'Detected'}</span> ${tech.frontend.version || ''} (${tech.frontend.build_tool || 'Webpack/Vite'})`;
+      }
+      if (tech.backend_indicators) {
+        bEl.innerHTML = `<span class="text-cyan-400 font-bold">${tech.backend_indicators.likely_framework || 'Unknown'}</span> (${tech.backend_indicators.api_style || 'REST'})`;
+      }
+      if (tech.known_misconfigs_for_stack && tech.known_misconfigs_for_stack.length > 0) {
+        mEl.innerHTML = tech.known_misconfigs_for_stack.map(m => `<li>${m}</li>`).join('');
+      }
+    }
+
+    async function fetchFindings() {
+      try {
+        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/findings`);
+        currentFindings = await res.json();
+        document.getElementById('navFindingsCount').textContent = currentFindings.length;
+        renderFindingsList();
+      } catch (e) {
+        console.error("Findings error:", e);
+      }
+    }
+
+    function filterFindings(sev) {
+      activeFilter = sev;
+      document.querySelectorAll('.filter-btn').forEach(btn => {
+        if (btn.dataset.filter === sev) {
+          btn.className = "px-3 py-1.5 rounded-lg text-xs font-semibold bg-brand-600 text-black filter-btn";
+        } else {
+          btn.className = "px-3 py-1.5 rounded-lg text-xs font-semibold bg-dark-800 text-slate-300 hover:bg-dark-700 filter-btn";
+        }
+      });
+      renderFindingsList();
+    }
+
+    function renderFindingsList() {
+      const container = document.getElementById('findingsContainer');
+      const filtered = activeFilter === "ALL" 
+        ? currentFindings 
+        : currentFindings.filter(f => f.severity_level === activeFilter);
+
+      if (filtered.length === 0) {
+        container.innerHTML = `<div class="p-8 text-center text-slate-500 bg-dark-900 rounded-xl border border-dark-800">No findings match the current filter.</div>`;
+        return;
+      }
+
+      container.innerHTML = filtered.map(f => {
+        let badgeColor = "bg-rose-500/10 text-rose-400 border-rose-500/20";
+        if (f.severity_level === "HIGH") badgeColor = "bg-orange-500/10 text-orange-400 border-orange-500/20";
+        if (f.severity_level === "MEDIUM") badgeColor = "bg-yellow-500/10 text-yellow-400 border-yellow-500/20";
+        if (f.severity_level === "LOW") badgeColor = "bg-blue-500/10 text-blue-400 border-blue-500/20";
+
+        return `
+          <div class="p-5 rounded-2xl bg-dark-900 border border-dark-800 space-y-4 hover:border-dark-700 transition">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div class="space-y-1">
+                <div class="flex items-center space-x-2">
+                  <span class="px-2.5 py-0.5 rounded text-[11px] font-bold border ${badgeColor}">${f.severity_level}</span>
+                  <h3 class="font-bold text-white text-base">${f.title}</h3>
+                </div>
+                <div class="text-xs text-slate-400 font-mono">${f.endpoint || 'Global Application Scope'}</div>
+              </div>
+              <span class="text-[11px] px-2 py-0.5 rounded bg-dark-800 text-slate-400 border border-dark-700">AI-PROPOSED SEVERITY — PENDING HUMAN REVIEW</span>
+            </div>
+
+            ${f.payload ? `
+              <div class="p-3 rounded-lg bg-dark-950 border border-dark-800 font-mono text-xs text-slate-300">
+                <span class="text-slate-500 select-none">Payload / Trigger: </span>
+                <span class="text-emerald-400">${escapeHtml(f.payload)}</span>
+              </div>
+            ` : ''}
+
+            ${f.curl_command ? `
+              <div class="space-y-1">
+                <div class="flex items-center justify-between text-xs text-slate-400 font-mono">
+                  <span>Reproduction cURL:</span>
+                  <button onclick="copyToClipboard('${escapeJs(f.curl_command)}')" class="hover:text-emerald-400">Copy</button>
+                </div>
+                <div class="p-3 rounded-lg bg-dark-950 border border-dark-800 font-mono text-xs text-cyan-300 overflow-x-auto">
+                  ${escapeHtml(f.curl_command)}
+                </div>
+              </div>
+            ` : ''}
+
+            ${f.details ? `<p class="text-xs text-slate-300 leading-relaxed">${escapeHtml(f.details)}</p>` : ''}
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function fetchSkillsStatus() {
+      try {
+        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/skills`);
+        const skills = await res.json();
+        const grid = document.getElementById('skillsGrid');
+
+        grid.innerHTML = skills.map((s, idx) => {
+          let stateBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-400">PENDING</span>`;
+          if (s.state === "completed") {
+            stateBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">PASSED</span>`;
+          } else if (s.state === "failed") {
+            stateBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/10 text-rose-400 border border-rose-500/20">FAILED (NUDGE)</span>`;
+          }
+
+          return `
+            <div class="p-4 rounded-xl bg-dark-900 border border-dark-800 space-y-3 flex flex-col justify-between">
+              <div class="space-y-1">
+                <div class="flex items-center justify-between">
+                  <span class="text-[10px] font-mono text-slate-500">STAGE ${idx + 1}</span>
+                  ${stateBadge}
+                </div>
+                <h4 class="font-bold text-sm text-white font-mono">${s.skill}</h4>
+              </div>
+              <div class="pt-2 border-t border-dark-800/80 flex items-center justify-between text-xs text-slate-400">
+                <span>Logs: ${s.logs_count} files</span>
+                <span class="text-slate-500">${s.review_status}</span>
+              </div>
+            </div>
+          `;
+        }).join('');
+      } catch (e) {
+        console.error("Skills error:", e);
+      }
+    }
+
+    async function fetchEndpoints() {
+      try {
+        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/endpoints`);
+        const data = await res.json();
+        const tb = document.getElementById('endpointsTableBody');
+        const list = data.endpoints || [];
+        document.getElementById('navEndpointsCount').textContent = list.length;
+
+        if (list.length === 0) {
+          tb.innerHTML = `<tr><td colspan="6" class="px-4 py-6 text-center text-slate-500">No endpoints discovered yet.</td></tr>`;
+          return;
+        }
+
+        tb.innerHTML = list.map(ep => {
+          let mColor = "text-emerald-400";
+          if (ep.method === "POST") mColor = "text-cyan-400";
+          if (ep.method === "PUT") mColor = "text-yellow-400";
+          if (ep.method === "DELETE") mColor = "text-rose-400";
+
+          return `
+            <tr class="hover:bg-dark-850/50 transition">
+              <td class="px-4 py-3 font-bold ${mColor}">${ep.method}</td>
+              <td class="px-4 py-3 text-white">${escapeHtml(ep.url)}</td>
+              <td class="px-4 py-3 text-slate-400">${ep.category || 'api'}</td>
+              <td class="px-4 py-3 text-slate-400">${(ep.parameters || []).join(', ') || '-'}</td>
+              <td class="px-4 py-3 text-slate-500 text-[11px] truncate max-w-xs">${ep.source_file || '-'}</td>
+              <td class="px-4 py-3 text-right">
+                <button onclick="copyToClipboard('${escapeJs(ep.url)}')" class="text-slate-400 hover:text-white">Copy</button>
+              </td>
+            </tr>
+          `;
+        }).join('');
+      } catch (e) {
+        console.error("Endpoints error:", e);
+      }
+    }
+
+    async function fetchCheckpoints() {
+      try {
+        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/checkpoints`);
+        const cps = await res.json();
+        const container = document.getElementById('checkpointsContainer');
+        const overviewList = document.getElementById('overviewCheckpointsList');
+
+        const pending = cps.filter(c => c.status === "PENDING_APPROVAL");
+        document.getElementById('navCheckpointsBadge').textContent = pending.length > 0 ? `${pending.length} PENDING` : "CLEAR";
+
+        if (cps.length === 0) {
+          container.innerHTML = `<div class="p-8 text-center text-slate-500 bg-dark-900 rounded-xl border border-dark-800">No checkpoints recorded.</div>`;
+          overviewList.innerHTML = `<p class="text-xs text-slate-400">All actions verified. No checkpoints waiting.</p>`;
+          return;
+        }
+
+        overviewList.innerHTML = cps.slice(0, 3).map(c => `
+          <div class="flex items-center justify-between text-xs p-2.5 rounded-lg bg-dark-850 border border-dark-800">
+            <div>
+              <span class="font-bold text-white">${c.type}</span> &bull; <span class="text-slate-400">${c.target_url}</span>
+            </div>
+            <span class="font-semibold ${c.status === 'APPROVED' ? 'text-emerald-400' : (c.status === 'REJECTED' ? 'text-rose-400' : 'text-amber-400')}">${c.status}</span>
+          </div>
+        `).join('');
+
+        container.innerHTML = cps.map(c => `
+          <div class="p-5 rounded-2xl bg-dark-900 border ${c.status === 'PENDING_APPROVAL' ? 'border-amber-500/30 bg-amber-500/5' : 'border-dark-800'} space-y-3">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div class="space-y-0.5">
+                <div class="flex items-center space-x-2">
+                  <span class="px-2 py-0.5 rounded text-[10px] font-bold ${c.status === 'APPROVED' ? 'bg-emerald-500/10 text-emerald-400' : (c.status === 'REJECTED' ? 'bg-rose-500/10 text-rose-400' : 'bg-amber-500/10 text-amber-400')}">${c.status}</span>
+                  <h3 class="font-bold text-white">${c.type}</h3>
+                </div>
+                <div class="text-xs text-slate-400 font-mono">${c.method || 'ACTION'} ${c.target_url}</div>
+              </div>
+              ${c.status === 'PENDING_APPROVAL' ? `
+                <div class="flex items-center space-x-2">
+                  <button onclick="respondCheckpoint('${c.id}', 'approve')" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-black font-bold text-xs">Approve</button>
+                  <button onclick="respondCheckpoint('${c.id}', 'reject')" class="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs">Reject</button>
+                </div>
+              ` : `<span class="text-xs text-slate-500">Decided</span>`}
+            </div>
+            <p class="text-xs text-slate-300">${c.reason || ''}</p>
+          </div>
+        `).join('');
+      } catch (e) {
+        console.error("Checkpoints error:", e);
+      }
+    }
+
+    async function respondCheckpoint(id, action) {
+      try {
+        await fetch('/api/checkpoints/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target: currentTarget, checkpoint_id: id, action: action })
+        });
+        await fetchCheckpoints();
+      } catch (e) {
+        alert("Error saving checkpoint decision");
+      }
+    }
+
+    async function fetchLogsList() {
+      try {
+        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/logs`);
+        const data = await res.json();
+        const sel = document.getElementById('logFileSelect');
+        const currentVal = sel.value;
+        sel.innerHTML = '<option value="LIVE">Live Scan Stream</option>';
+        (data.logs || []).forEach(l => {
+          const opt = document.createElement('option');
+          opt.value = l.path;
+          opt.textContent = `${l.path} (${Math.round(l.size/1024*10)/10} KB)`;
+          sel.appendChild(opt);
+        });
+        sel.value = currentVal;
+      } catch (e) {
+        console.error("Logs error:", e);
+      }
+    }
+
+    async function fetchSelectedLog() {
+      const file = document.getElementById('logFileSelect').value;
+      if (file === "LIVE") {
+        await pollScanStatus();
+        return;
+      }
+      try {
+        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/logs?file=${encodeURIComponent(file)}`);
+        const data = await res.json();
+        document.getElementById('terminalOutput').textContent = data.content || "Empty log file.";
+      } catch (e) {
+        document.getElementById('terminalOutput').textContent = "Error reading log.";
+      }
+    }
+
+    async function fetchReport() {
+      try {
+        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/report`);
+        const data = await res.json();
+        document.getElementById('reportContent').innerHTML = marked.parse(data.markdown || "# No report content");
+      } catch (e) {
+        console.error("Report error:", e);
+      }
+    }
+
+    async function pollScanStatus() {
+      if (!currentTarget) return;
+      try {
+        const res = await fetch(`/api/scan/status?target=${encodeURIComponent(currentTarget)}`);
+        const data = await res.json();
+        const badge = document.getElementById('scanStatusBadge');
+
+        if (data.status === "running") {
+          badge.className = "hidden sm:flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20";
+          badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span><span>SCANNING...</span>`;
+        } else {
+          badge.className = "hidden sm:flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-dark-800 text-slate-300 border border-dark-700";
+          badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-slate-500"></span><span>IDLE</span>`;
+        }
+
+        // If on terminal and LIVE is selected, update output
+        const logSel = document.getElementById('logFileSelect');
+        if (logSel && logSel.value === "LIVE" && data.logs) {
+          const out = document.getElementById('terminalOutput');
+          out.textContent = data.logs || "Waiting for output...";
+          const box = document.getElementById('terminalBox');
+          box.scrollTop = box.scrollHeight;
+        }
+      } catch (e) {
+        // Silent poll error
+      }
+    }
+
+    async function submitNewScan() {
+      const target = document.getElementById('scanTargetInput').value.trim();
+      const skills = document.getElementById('scanSkillsSelect').value;
+      const models = document.getElementById('scanModelSelect').value;
+      const dryRun = document.getElementById('scanDryRunCheck').checked;
+
+      if (!target) {
+        alert("Target domain required");
+        return;
+      }
+
+      closeModal('newScanModal');
+      switchTab('terminal');
+
+      try {
+        const res = await fetch('/api/scan/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target: target, skills: skills, models: models, dry_run: dryRun })
+        });
+        const data = await res.json();
+        if (data.status === "success") {
+          currentTarget = target;
+          await refreshTargetData();
+        } else {
+          alert(data.message || "Failed to start scan");
+        }
+      } catch (e) {
+        alert("Scan launch error: " + e);
+      }
+    }
+
+    async function submitNewTarget() {
+      const domain = document.getElementById('newTargetDomainInput').value.trim();
+      if (!domain) {
+        alert("Domain required");
+        return;
+      }
+
+      closeModal('newTargetModal');
+      try {
+        const res = await fetch('/api/targets/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ domain: domain })
+        });
+        const data = await res.json();
+        if (data.status === "success") {
+          await fetchTargets();
+          currentTarget = domain;
+          document.getElementById('targetSelect').value = domain;
+          await refreshTargetData();
+        } else {
+          alert(data.message || "Target creation failed");
+        }
+      } catch (e) {
+        alert("Error: " + e);
+      }
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function escapeJs(str) {
+      if (!str) return '';
+      return String(str).replace(/'/g, "\\'").replace(/"/g, '\\"');
+    }
+
+    function copyToClipboard(text) {
+      navigator.clipboard.writeText(text).then(() => {
+        alert("Copied to clipboard!");
+      });
+    }
+
+    window.onload = init;
+  </script>
+</body>
+</html>

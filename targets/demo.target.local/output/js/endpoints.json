@@ -1,0 +1,54 @@
+{
+  "target": "demo.target.local",
+  "total_endpoints": 6,
+  "endpoints": [
+    {
+      "url": "/api/v1/search",
+      "method": "GET",
+      "category": "public",
+      "parameters": ["q", "filter", "sort"],
+      "source_file": "beautified/external/search.chunk.js",
+      "auth_required": false
+    },
+    {
+      "url": "/api/v1/user/profile",
+      "method": "GET",
+      "category": "user",
+      "parameters": ["userId"],
+      "source_file": "beautified/external/app.chunk.js",
+      "auth_required": true
+    },
+    {
+      "url": "/api/v1/user/avatar-fetch",
+      "method": "POST",
+      "category": "upload",
+      "parameters": ["image_url", "resize"],
+      "source_file": "beautified/external/settings.chunk.js",
+      "auth_required": true
+    },
+    {
+      "url": "/api/v1/admin/debug/config",
+      "method": "GET",
+      "category": "admin",
+      "parameters": [],
+      "source_file": "beautified/lazy-loaded/admin-panel.chunk.js",
+      "auth_required": true
+    },
+    {
+      "url": "/api/v1/auth/reset-password",
+      "method": "POST",
+      "category": "auth",
+      "parameters": ["token", "new_password", "user_id"],
+      "source_file": "beautified/inline/auth_block_0.js",
+      "auth_required": false
+    },
+    {
+      "url": "/api/v1/comments/delete",
+      "method": "DELETE",
+      "category": "user",
+      "parameters": ["comment_id"],
+      "source_file": "beautified/external/comments.chunk.js",
+      "auth_required": true
+    }
+  ]
+}
