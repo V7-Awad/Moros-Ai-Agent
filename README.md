@@ -11,7 +11,8 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-00e5ff.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-0077ff.svg?style=flat-square)](LICENSE)
-[![Tests Passing](https://img.shields.io/badge/tests-22%20passed%20(100%25)-19e6b0.svg?style=flat-square)](tests/)
+[![Tests Passing](https://img.shields.io/badge/tests-32%20passed%20(100%25)-19e6b0.svg?style=flat-square)](tests/)
+[![Manual](https://img.shields.io/badge/Documentation-PDF%20Manual-0284c7.svg?style=flat-square)](MOROS_AI_OPERATOR_GUIDE.pdf)
 [![SARIF 2.1.0](https://img.shields.io/badge/SARIF-2.1.0%20OASIS-00e5ff.svg?style=flat-square)](#-sarif-210--github-code-scanning-export)
 [![HITL Gating](https://img.shields.io/badge/HITL-Enforceable%20Blocking-f1c26b.svg?style=flat-square)](#-enforceable-human-in-the-loop-hitl-gating)
 [![UI: Neon Cyber](https://img.shields.io/badge/Dashboard-Neon%20Cyber%20Fluid-00e5ff.svg?style=flat-square)](#-interactive-web-dashboard)
