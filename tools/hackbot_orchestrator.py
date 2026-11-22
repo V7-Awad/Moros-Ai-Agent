@@ -30,6 +30,8 @@ if str(tools_dir) not in sys.path:
 from llm_client import LLMClient
 from skill_runner import SkillRunner
 from conversation_store import ConversationStore
+from run_manager import RunManager
+from checkpoint_manager import CheckpointManager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -87,7 +89,9 @@ MAX_REVIEW_RETRIES = 3
 class HackbotOrchestrator:
     def __init__(self, target: str, target_dir: str, skills: list,
                  models: list = None, runs_per_skill: int = 1,
-                 review_model: str = None, api_spec: str = None):
+                 review_model: str = None, api_spec: str = None,
+                 active_host_limit: int = 20, root_only_active: bool = False,
+                 https_only: bool = False):
         self.target = target
         self.target_dir = Path(target_dir)
         self.skills = skills
@@ -95,6 +99,9 @@ class HackbotOrchestrator:
         self.runs_per_skill = runs_per_skill
         self.review_model = review_model
         self.api_spec = Path(api_spec).resolve() if api_spec else None
+        self.active_host_limit = max(1, active_host_limit)
+        self.root_only_active = root_only_active
+        self.https_only = https_only
         self.scope_authorized = False
 
         self.execution_log: list = []
@@ -103,38 +110,80 @@ class HackbotOrchestrator:
 
         # Ensure output directories
         output_base = self.target_dir / "output"
-        for subdir in ["recon", "js", "content-discovery", "findings", "logs", "report", "api"]:
+        for subdir in ["recon", "js", "content-discovery", "findings", "logs", "report", "api", "runs"]:
             (output_base / subdir).mkdir(parents=True, exist_ok=True)
         self.conversations = ConversationStore(self.target_dir)
+
+        # Initialize RunManager and CheckpointManager
+        self.run_manager = RunManager(self.target_dir)
+        self.checkpoint_manager = CheckpointManager(self.target, self.target_dir)
+        self.current_run = None
 
         # Initialize LLM client and real skill execution engine
         self.llm = LLMClient(provider=self.models[0] if self.models else "auto")
         self.runner = SkillRunner(self.target, self.target_dir, self.llm)
 
     def verify_scope(self) -> bool:
-        """Check that scope-of-work authorization exists."""
-        scope_files = list(self.target_dir.glob("scope-of-work.*"))
-        if not scope_files:
-            logger.error(f"❌ AUTHORIZATION FAILED: No scope-of-work file found in {self.target_dir}")
-            logger.error("   Place scope-of-work.pdf or scope-of-work.md in the target directory.")
-            self._log_event("scope-check", "FAILED", "No scope-of-work file found")
-            return False
+        """Require a readable scope note that names this target and authorization."""
+        allowed_suffixes = {".md", ".txt", ".yaml", ".yml", ".json"}
+        scope_files = [p for p in self.target_dir.glob("scope-of-work.*")
+                       if p.suffix.lower() in allowed_suffixes]
+        target = self.target.lower()
+        auth_terms = ("authorized", "authorised", "in scope", "scope of work", "scope-of-work")
+        for scope_file in scope_files:
+            try:
+                content = scope_file.read_text(encoding="utf-8", errors="replace").lower()
+            except OSError:
+                continue
+            if target in content and any(term in content for term in auth_terms):
+                logger.warning("Scope note matches target and authorization wording; this is not independent proof of permission.")
+                self._log_event("scope-check", "TEXT_MATCH", f"Scope text matched target in {scope_file}")
+                return True
 
-        logger.info(f"✅ Authorization verified: {scope_files[0]}")
-        self._log_event("scope-check", "PASSED", f"Found {scope_files[0]}")
-        return True
+        reason = "No readable scope-of-work text names the target and authorization wording."
+        logger.error("❌ Active checks disabled: %s", reason)
+        self._log_event("scope-check", "FAILED", reason)
+        return False
 
-    def validate_dependencies(self) -> bool:
-        """Verify that all skill dependencies are satisfied."""
+    def _check_dependency_artifact(self, dep_skill: str) -> bool:
+        """Check whether the required artifact for a prerequisite skill exists on disk."""
+        output_base = self.target_dir / "output"
+        if dep_skill == "recon-subdomain":
+            recon_dir = output_base / "recon"
+            return (recon_dir / "subdomains.txt").is_file() or any(recon_dir.glob("*.json"))
+        elif dep_skill == "js-discover":
+            js_dir = output_base / "js"
+            manifest = js_dir / "collection-manifest.json"
+            raw_js = list((js_dir / "raw").rglob("*.js")) if (js_dir / "raw").exists() else []
+            return manifest.is_file() or len(raw_js) > 0
+        elif dep_skill == "js-analyze":
+            ep_file = output_base / "js" / "endpoints.json"
+            api_file = output_base / "api" / "endpoints.json"
+            return ep_file.is_file() or api_file.is_file()
+        elif dep_skill == "content-discovery":
+            cd_file = output_base / "content-discovery" / "wordlist-combined.txt"
+            return cd_file.is_file()
+        elif dep_skill == "ssrf-identify":
+            ssrf_file = output_base / "findings" / "ssrf-identify" / "candidates-ssrf-identify.json"
+            return ssrf_file.is_file()
+        return False
+
+    def validate_dependencies(self) -> dict:
+        """
+        Verify that all skill dependencies are satisfied.
+        Returns a dict of blocked_skill -> explanation reason.
+        """
+        blocked = {}
         for skill in self.skills:
             deps = SKILL_DEPENDENCIES.get(skill, [])
             for dep in deps:
-                if dep not in self.skills and dep != skill:
-                    # Check if dependency was run in a previous session (output exists)
-                    # For now, just warn
-                    logger.warning(f"⚠️  Skill '{skill}' depends on '{dep}' which is not in this run")
-
-        return True
+                if dep not in self.skills:
+                    if not self._check_dependency_artifact(dep):
+                        reason = f"Prerequisite skill '{dep}' is missing from run schedule and required artifact was not found on disk."
+                        blocked[skill] = reason
+                        logger.warning(f"🚫 Skill '{skill}' is BLOCKED: {reason}")
+                        break
+        return blocked
 
     def run(self):
         """Execute the full orchestration pipeline."""
@@ -145,60 +194,100 @@ class HackbotOrchestrator:
         logger.info(f"Runs per skill: {self.runs_per_skill}")
         logger.info("=" * 60)
 
-        # Step 1: Verify scope
+        # Step 1: Initialize durable run
+        self.current_run = self.run_manager.create_run(
+            target=self.target,
+            skills=self.skills,
+            dry_run=False,
+            models=",".join(self.models)
+        )
+        run_id = self.current_run["run_id"]
+
+        # Step 2: Verify scope
         self.scope_authorized = self.verify_scope()
         if not self.scope_authorized:
             # Allow only passive recon without scope
             self.skills = [s for s in self.skills if s == "recon-subdomain"]
             if not self.skills:
                 logger.error("No skills can run without authorization. Aborting.")
-                return
+                self.run_manager.finish_run(run_id, status="failed", error="No authorization scope found")
+                return {"status": "FAILED", "failed_skills": [{"skill": "scope-check", "notes": "No authorization"}]}
             logger.warning("⚠️  Running in PASSIVE-ONLY mode (no scope-of-work)")
 
-        # Step 2: Validate dependencies
-        self.validate_dependencies()
+        # Step 3: Validate dependencies & mark blocked skills
+        blocked_skills = self.validate_dependencies()
+        for b_skill, reason in blocked_skills.items():
+            self.skill_results[b_skill] = [{"skill": b_skill, "status": "BLOCKED", "notes": reason}]
+            self.run_manager.update_skill_progress(run_id, b_skill, status="blocked", summary=reason)
+            self._log_event(b_skill, "BLOCKED", reason)
 
-        # Step 3: Order skills according to dependency chain
-        ordered_skills = [s for s in SKILL_ORDER if s in self.skills]
+        # Step 4: Order skills according to dependency chain
+        ordered_skills = [s for s in SKILL_ORDER if s in self.skills and s not in blocked_skills]
         logger.info(f"Execution order: {' → '.join(ordered_skills)}")
 
-        # Step 4: Execute each skill
+        # Step 5: Execute each scheduled skill
         for skill_name in ordered_skills:
             logger.info(f"\n{'='*40}")
             logger.info(f"STARTING SKILL: {skill_name}")
             logger.info(f"{'='*40}")
 
-            # Check if this skill needs human approval
+            # Check if dynamic predecessor failed in this run
+            deps = SKILL_DEPENDENCIES.get(skill_name, [])
+            failed_dep = next((d for d in deps if any(f["skill"] == d for f in self.failed_skills)), None)
+            if failed_dep:
+                reason = f"Prerequisite skill '{failed_dep}' failed earlier in this run."
+                logger.warning(f"🚫 Skipping skill '{skill_name}': {reason}")
+                self.skill_results[skill_name] = [{"skill": skill_name, "status": "BLOCKED", "notes": reason}]
+                self.run_manager.update_skill_progress(run_id, skill_name, status="blocked", summary=reason)
+                self._log_event(skill_name, "BLOCKED", reason)
+                continue
+
+            # Check if this skill requires human checkpoint approval
             if skill_name in HUMAN_CHECKPOINT_SKILLS:
-                logger.info(f"⚠️  HUMAN CHECKPOINT: '{skill_name}' requires human approval")
-                self._log_event(skill_name, "CHECKPOINT", "Awaiting human approval")
+                logger.info(f"⚠️  HUMAN CHECKPOINT GATE: '{skill_name}' registered for human review.")
+                self._log_event(skill_name, "CHECKPOINT_GATE", "Human review checkpoint registered")
 
             # Run skill with each model
             for model in self.models:
                 for run_num in range(1, self.runs_per_skill + 1):
-                    run_id = f"{skill_name}_{model}_run{run_num}"
-                    logger.info(f"  Run: {run_id}")
+                    sub_run_id = f"{skill_name}_{model}_run{run_num}"
+                    logger.info(f"  Run: {sub_run_id}")
 
                     result = self._execute_skill(skill_name, model, run_num)
 
                     if skill_name not in self.skill_results:
                         self.skill_results[skill_name] = []
                     self.skill_results[skill_name].append(result)
-                    if result.get("status") in {"FAILED", "ERROR"}:
-                        self.failed_skills.append({"skill": skill_name, "run_id": run_id,
+
+                    res_status = result.get("status", "COMPLETED")
+                    if res_status in {"FAILED", "ERROR"}:
+                        self.failed_skills.append({"skill": skill_name, "run_id": sub_run_id,
                                                    "notes": result.get("notes", "")})
+                        self.run_manager.update_skill_progress(
+                            run_id, skill_name, status="failed",
+                            summary=result.get("notes", "")
+                        )
+                    else:
+                        self.run_manager.update_skill_progress(
+                            run_id, skill_name, status=res_status.lower(),
+                            summary=result.get("notes", "")
+                        )
 
                     # Run review-skill after each primary skill
                     if skill_name != "review-skill" and skill_name != "report-conglomeration":
                         self._run_review(skill_name, model, run_num)
 
-        # Step 5: Write orchestration log
+        # Step 6: Write orchestration log & finalize durable run
         self._write_orchestration_log()
+        final_status = "failed" if self.failed_skills else "completed"
+        self.run_manager.finish_run(run_id, status=final_status)
+
         if self.failed_skills:
             logger.error("\n❌ Orchestration finished with %d failed skill run(s).", len(self.failed_skills))
         else:
             logger.info("\n✅ Orchestration complete!")
         return {"status": "FAILED" if self.failed_skills else "SUCCESS",
+                "run_id": run_id,
                 "failed_skills": self.failed_skills}
 
     def _execute_skill(self, skill_name: str, model: str, run_num: int) -> dict:
@@ -219,7 +308,12 @@ class HackbotOrchestrator:
 
         try:
             if skill_name == "recon-subdomain":
-                res = self.runner.run_recon_subdomain(active_validation=self.scope_authorized)
+                res = self.runner.run_recon_subdomain(
+                    active_validation=self.scope_authorized,
+                    max_active_hosts=self.active_host_limit,
+                    root_only=self.root_only_active,
+                    https_only=self.https_only,
+                )
                 result["status"] = res.get("status", "COMPLETED")
                 result["notes"] = f"Found {res.get('subdomains', 0)} subdomains, {res.get('live_hosts', 0)} live hosts"
             elif skill_name == "api-spec-discovery":
@@ -376,6 +470,12 @@ def main():
                         help="Number of runs per skill per model")
     parser.add_argument("--review-model", default=None,
                         help="Model to use for review-skill (default: same as skill)")
+    parser.add_argument("--active-host-limit", type=int, default=20,
+                        help="Maximum hosts for recon HEAD checks (default: 20)")
+    parser.add_argument("--root-only-active", action="store_true",
+                        help="Limit active recon checks to the exact target hostname")
+    parser.add_argument("--https-only", action="store_true",
+                        help="Do not fall back to plaintext HTTP during active recon")
 
     args = parser.parse_args()
 

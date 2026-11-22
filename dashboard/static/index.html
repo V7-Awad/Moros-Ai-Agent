@@ -711,6 +711,69 @@
       from { opacity: 0; transform: translateY(8px); }
       to { opacity: 1; transform: none; }
     }
+    /* Print only the final report, never the Dashboard shell. */
+    @media print {
+      @page { margin: 16mm; }
+      html, body {
+        background: #fff !important;
+        color: #111 !important;
+        display: block !important;
+        min-height: 0 !important;
+      }
+      body::after,
+      header,
+      #appSidebar,
+      .modal-backdrop,
+      main > section:not(#tab-report),
+      #tab-report > .card:first-child {
+        display: none !important;
+      }
+      .wrap,
+      main,
+      #tab-report,
+      #reportContent {
+        display: block !important;
+        width: 100% !important;
+        max-width: none !important;
+        min-width: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border: 0 !important;
+        border-radius: 0 !important;
+        box-shadow: none !important;
+        background: #fff !important;
+      }
+      #reportContent {
+        color: #111 !important;
+        line-height: 1.55 !important;
+      }
+      #reportContent * {
+        color: #111 !important;
+        text-shadow: none !important;
+        border-color: #cfcfcf !important;
+      }
+      #reportContent pre,
+      #reportContent .ans {
+        background: #f4f4f4 !important;
+        color: #111 !important;
+        white-space: pre-wrap !important;
+        overflow-wrap: anywhere !important;
+        break-inside: avoid;
+      }
+      #reportContent h1,
+      #reportContent h2,
+      #reportContent h3,
+      #reportContent h4 {
+        break-after: avoid;
+      }
+      #reportContent table,
+      #reportContent img,
+      #reportContent blockquote {
+        break-inside: avoid;
+        max-width: 100% !important;
+      }
+      .enter { animation: none !important; }
+    }
     @media (prefers-reduced-motion: reduce) {
       * { animation: none !important; transition: none !important; }
     }
@@ -1234,10 +1297,10 @@
         <div>
           <label style="display:block; margin-bottom:4px; font-weight:600; color:var(--mut);">Skills Execution Strategy</label>
           <select id="scanSkillsSelect" class="mono" style="width:100%;">
-            <option value="all">Full Autonomous Pipeline (All 15 Skills)</option>
-            <option value="recon-subdomain,js-discover,js-analyze">Reconnaissance & JS Discovery Only</option>
-            <option value="xss-reflected,xss-dom,xss-stored,xss-blind">XSS Testing Suite Only</option>
-            <option value="ssrf-identify,ssrf-post-exploit">SSRF Pipeline Only</option>
+            <option value="all">Assessment pipeline (recon + artifact triage)</option>
+            <option value="recon-subdomain,js-discover,js-analyze">Reconnaissance & JS artifact analysis</option>
+            <option value="xss-reflected,xss-dom,xss-stored,xss-blind">XSS candidate triage (no exploit probes)</option>
+            <option value="ssrf-identify,ssrf-post-exploit">SSRF candidate triage (no exploit probes)</option>
             <option value="content-discovery">Content Discovery Only</option>
           </select>
         </div>

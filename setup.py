@@ -12,13 +12,28 @@ import argparse
 import os
 import subprocess
 import sys
+import re
 from pathlib import Path
+
+# Keep setup commands usable in Windows terminals that default to CP1252.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 PROJECT_ROOT = Path(__file__).parent.resolve()
 
 
+def validate_target_name(domain: str) -> str:
+    """Accept DNS-like labels only; target names are also filesystem paths."""
+    if not isinstance(domain, str) or not re.fullmatch(
+        r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?", domain
+    ) or ".." in domain:
+        raise ValueError("Target must be a DNS-like name without path separators")
+    return domain
+
+
 def init_target(domain: str):
     """Initialize a target directory with the required structure."""
+    domain = validate_target_name(domain)
     target_dir = PROJECT_ROOT / "targets" / domain
     output_dir = target_dir / "output"
 

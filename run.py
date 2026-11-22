@@ -91,6 +91,12 @@ Examples:
                         help="Model to use for review-skill (default: same as skill model)")
     parser.add_argument("--api-spec", default=None,
                         help="Local OpenAPI/Swagger JSON or YAML file for api-spec-discovery")
+    parser.add_argument("--active-host-limit", type=int, default=20,
+                        help="Maximum hosts for recon HEAD checks (default: 20)")
+    parser.add_argument("--root-only-active", action="store_true",
+                        help="Limit active recon checks to the exact target hostname")
+    parser.add_argument("--https-only", action="store_true",
+                        help="Do not fall back to plaintext HTTP during active recon")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show execution plan without running anything")
     parser.add_argument("--check", action="store_true",
@@ -203,6 +209,9 @@ Examples:
         runs_per_skill=args.runs_per_skill,
         review_model=args.review_model,
         api_spec=args.api_spec,
+        active_host_limit=args.active_host_limit,
+        root_only_active=args.root_only_active,
+        https_only=args.https_only,
     )
 
     try:

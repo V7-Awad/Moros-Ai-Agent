@@ -1,0 +1,2 @@
+{"timestamp": "2026-11-22T14:15:33.575523+00:00", "agent": "content-discovery", "role": "tool", "content": "[STARTED] Model: default, Run: 1", "source": "orchestrator"}
+{"timestamp": "2026-11-22T14:15:33.581070+00:00", "agent": "content-discovery", "role": "tool", "content": "[CANDIDATES_ONLY]", "source": "orchestrator"}

@@ -37,6 +37,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from tools.conversation_store import ConversationStore, safe_agent_name
 from tools.llm_client import LLMClient
+from tools.checkpoint_manager import CheckpointManager
+from tools.run_manager import RunManager
 
 # List of all 14 skills in dependency order
 ALL_SKILLS = [
@@ -76,9 +78,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.end_headers()
         self.wfile.write(body)
 
@@ -86,13 +85,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_json({"error": message, "status": "error"}, status=status)
 
     def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.end_headers()
+        self.send_error_json("Cross-origin requests are not supported", status=405)
+
+    def _is_local_browser_request(self):
+        local_names = {"127.0.0.1", "::1", "localhost"}
+        host = self.headers.get("Host", "").rsplit(":", 1)[0].strip("[]").lower()
+        origin = self.headers.get("Origin")
+        if host not in local_names:
+            return False
+        if origin:
+            origin_host = urllib.parse.urlparse(origin).hostname
+            if (origin_host or "").lower() not in local_names:
+                return False
+        return True
 
     def do_GET(self):
+        if not self._is_local_browser_request():
+            self.send_error_json("Dashboard is restricted to local browser requests", status=403)
+            return
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
@@ -106,10 +116,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.handle_static_get(path)
 
     def do_POST(self):
+        if not self._is_local_browser_request():
+            self.send_error_json("Dashboard is restricted to local browser requests", status=403)
+            return
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 
-        content_length = int(self.headers.get("Content-Length", 0))
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
+            self.send_error_json("Invalid Content-Length", status=400)
+            return
+        if content_length < 0 or content_length > 1_000_000:
+            self.send_error_json("Request body is too large", status=413)
+            return
         body_bytes = self.rfile.read(content_length) if content_length > 0 else b"{}"
 
         try:
@@ -174,6 +194,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             target_name = urllib.parse.unquote(target_match.group(1))
             sub = target_match.group(2)
 
+            try:
+                from setup import validate_target_name
+                validate_target_name(target_name)
+            except ValueError:
+                self.send_error_json("Invalid target name", status=400)
+                return
+
             target_path = TARGETS_DIR / target_name
             if not target_path.exists():
                 self.send_error_json(f"Target '{target_name}' not found", status=404)
@@ -199,6 +226,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             elif sub == "checkpoints":
                 self.send_json(self.get_target_checkpoints(target_name))
+                return
+            elif sub == "runs":
+                rm = RunManager(target_path)
+                self.send_json({"target": target_name, "runs": rm.list_runs()})
+                return
+            elif sub.startswith("runs/"):
+                run_id = sub[5:]
+                rm = RunManager(target_path)
+                run_data = rm.get_run(run_id)
+                if not run_data:
+                    self.send_error_json("Run not found", status=404)
+                    return
+                self.send_json(run_data)
                 return
             elif sub == "conversations":
                 agent = query.get("agent", ["coordinator"])[0]
@@ -236,12 +276,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_json(self.get_scan_status(target))
             return
 
+        # 6. Active runs across targets
+        if path == "/api/runs/active":
+            active_runs = []
+            if TARGETS_DIR.exists():
+                for td in TARGETS_DIR.iterdir():
+                    if td.is_dir():
+                        rm = RunManager(td)
+                        for r in rm.list_runs():
+                            if r.get("status") == "running":
+                                active_runs.append(r)
+            self.send_json({"active_runs": active_runs})
+            return
+
         self.send_error_json("Unknown API endpoint", status=404)
 
     def handle_api_post(self, path, body):
         # 1. Create target
         if path == "/api/targets/create":
-            domain = body.get("domain", "").strip()
+            domain = str(body.get("domain", "")).strip()
             if not domain:
                 self.send_error_json("Domain name is required")
                 return
@@ -249,15 +302,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             # Invoke setup script to create target folder
             from setup import init_target
             try:
+                from setup import validate_target_name
+                validate_target_name(domain)
                 init_target(domain)
                 self.send_json({"status": "success", "message": f"Target {domain} created", "target": domain})
+            except ValueError as e:
+                self.send_error_json(str(e), status=400)
             except Exception as e:
                 self.send_error_json(f"Failed to create target: {e}")
             return
 
         # 2. Start Scan
         if path == "/api/scan/start":
-            target = body.get("target", "").strip()
+            target = str(body.get("target", "")).strip()
             skills = body.get("skills", "all")
             models = body.get("models", "default")
             dry_run = body.get("dry_run", False)
@@ -266,20 +323,39 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_error_json("Target is required")
                 return
 
+            try:
+                from setup import validate_target_name
+                validate_target_name(target)
+            except ValueError:
+                self.send_error_json("Invalid target name", status=400)
+                return
+
             res = self.start_scan_job(target, skills, models, dry_run)
             self.send_json(res)
             return
 
         # 3. Stop Scan
         if path == "/api/scan/stop":
-            target = body.get("target", "").strip()
+            target = str(body.get("target", "")).strip()
+            try:
+                from setup import validate_target_name
+                validate_target_name(target)
+            except ValueError:
+                self.send_error_json("Invalid target name", status=400)
+                return
             res = self.stop_scan_job(target)
             self.send_json(res)
             return
 
         # 4. Checkpoint approval/rejection
         if path == "/api/checkpoints/action":
-            target = body.get("target", "").strip()
+            target = str(body.get("target", "")).strip()
+            try:
+                from setup import validate_target_name
+                validate_target_name(target)
+            except ValueError:
+                self.send_error_json("Invalid target name", status=400)
+                return
             checkpoint_id = body.get("checkpoint_id", "")
             action = body.get("action", "")  # "approve" or "reject"
             notes = body.get("notes", "")
@@ -295,6 +371,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             message = str(body.get("message", "")).strip()
             if not target or not message:
                 self.send_error_json("Target and message are required")
+                return
+            try:
+                from setup import validate_target_name
+                validate_target_name(target)
+            except ValueError:
+                self.send_error_json("Invalid target name", status=400)
                 return
             target_path = TARGETS_DIR / target
             if not target_path.is_dir():
@@ -313,61 +395,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "Format code snippets with markdown and cURL reproduction steps."
             )
             answer = client.complete(message, system_prompt=system_prompt)
+            source = "llm"
             if answer is None:
                 summary_data = self.get_target_summary(target)
                 findings = summary_data.get("total_findings", 0)
-                severities = summary_data.get("severities", {})
                 endpoints = summary_data.get("total_endpoints", 0)
-                msg_lower = message.lower()
+                validated = sum(1 for item in self.get_target_findings(target)
+                                if item.get("validation_status") == "validated")
+                scope_note = ("A scope document is present, but its contents and authorization were not verified."
+                              if summary_data.get("has_scope") else "No scope document was found.")
+                answer = (
+                    f"**{agent.upper()} — artifact summary for `{target}`**\n\n"
+                    f"- Endpoint inventory: {endpoints}\n"
+                    f"- Triage items: {findings} ({validated} explicitly marked validated; the rest require review)\n"
+                    f"- Scope: {scope_note}\n\n"
+                    "This chat fallback only summarizes saved artifacts. It did not run a scan, queue a directive, "
+                    "verify a vulnerability, or validate authorization. Use the scan controls only for an authorized target."
+                )
+                source = "heuristic-summary"
 
-                if any(w in msg_lower for w in ["finding", "vuln", "critical", "bug", "exploit"]):
-                    crit_count = severities.get("CRITICAL", 0)
-                    high_count = severities.get("HIGH", 0)
-                    answer = (
-                        f"**[{agent.upper()} Analysis — Target `{target}`]**\n\n"
-                        f"Currently, we have **{findings} verified findings** across all categories:\n"
-                        f"- 🔴 **Critical:** {crit_count} (Remote / Privilege Escalation)\n"
-                        f"- 🟠 **High:** {high_count} (High impact state modification)\n"
-                        f"- 🟡 **Medium:** {severities.get('MEDIUM', 0)}\n"
-                        f"- 🔵 **Low:** {severities.get('LOW', 0)}\n\n"
-                        f"All high-risk findings contain valid cURL commands for reproduction and are awaiting human approval."
-                    )
-                elif any(w in msg_lower for w in ["endpoint", "api", "route", "url"]):
-                    answer = (
-                        f"**[{agent.upper()} Inventory — Target `{target}`]**\n\n"
-                        f"I have mapped **{endpoints} unique endpoints** from client-side bundles and active spidering.\n"
-                        f"All state-changing routes (`POST`, `PUT`, `DELETE`) are isolated and checked for authentication gates."
-                    )
-                elif any(w in msg_lower for w in ["scope", "rule", "auth", "permission"]):
-                    has_scope = summary_data.get("has_scope", False)
-                    status_str = "Verified & Active" if has_scope else "Passive Recon Only (No scope-of-work file found)"
-                    answer = (
-                        f"**[{agent.upper()} Scope Verification]**\n\n"
-                        f"Target: `{target}`\n"
-                        f"Status: **{status_str}**\n\n"
-                        f"Exploitation tools and brute-forcers will halt before attacking out-of-scope hosts or unconfirmed state changes."
-                    )
-                elif any(w in msg_lower for w in ["steer", "focus", "prioritize", "scan", "check"]):
-                    answer = (
-                        f"**[Steering Directive Acknowledged by {agent.upper()}]**\n\n"
-                        f"Received instruction: *\"{message}\"*\n\n"
-                        f"Priority has been queued for target `{target}`. The next execution cycle will direct specialist attention to this vector.\n\n"
-                        f"> 💡 *Tip: You can launch an immediate targeted scan via the 'Launch Scan' button.*"
-                    )
-                else:
-                    answer = (
-                        f"**[{agent.upper()} Telemetry & Status]**\n\n"
-                        f"Assessment active on `{target}`.\n"
-                        f"- **Discovered Surface:** {endpoints} API endpoints, {summary_data.get('total_js_files', 0)} JS bundles.\n"
-                        f"- **Current Findings:** {findings} vulnerability candidates (Critical: {severities.get('CRITICAL', 0)}).\n"
-                        f"- **HITL Status:** Zero unattended exploitation.\n\n"
-                        f"You can ask me to analyze specific routes, explain reproduction payloads, or steer sub-agents.\n\n"
-                        f"*(Configure `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or local `Ollama` for full autonomous reasoning)*"
-                    )
-
-            provider = client.provider if client.is_available() else "heuristic-engine"
-            model_name = client.model if client.is_available() else "Moros Core"
-            store.append(agent, "assistant", answer, provider=provider, model=model_name, source="llm")
+            provider = client.provider if source == "llm" else "local-summary"
+            model_name = client.model if source == "llm" else "artifact-summary"
+            store.append(agent, "assistant", answer, provider=provider, model=model_name, source=source)
             self.send_json({"status": "success", "agent": agent, "provider": provider, "model": model_name, "message": answer})
             return
 
@@ -492,50 +541,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         }
 
     def get_agent_greeting(self, target_name, agent):
-        if agent == "coordinator":
-            return (
-                f"🛡️ **Moros AI Assessment Coordinator Online**\n\n"
-                f"Target: `{target_name}`\n\n"
-                f"I orchestrate the attack graph, coordinate specialist sub-agents (Recon, JS Hunter, XSS, SSRF, Auth), and enforce the Human-in-the-Loop checkpoint gate.\n\n"
-                f"You can instruct me directly to steer the assessment, prioritize specific endpoints, or ask for deep technical explanations of any findings."
-            )
-        elif agent == "recon-agent":
-            return (
-                f"🌐 **Reconnaissance Specialist Online**\n\n"
-                f"Monitoring DNS and subdomain surface for `{target_name}`. Ask me about discovered subdomains, IP ranges, or live hosts."
-            )
-        elif agent == "js-analyzer":
-            return (
-                f"⚡ **JavaScript & API Hunter Online**\n\n"
-                f"Target `{target_name}` client-side analysis ready. Ask me about discovered endpoints, extracted source-map secrets, or DOM sinks."
-            )
-        elif agent == "xss-specialist":
-            return (
-                f"🎯 **XSS Specialist Online**\n\n"
-                f"Payload generator and context validator ready for `{target_name}`. Ask me to test specific injection points or explain PoCs."
-            )
-        elif agent == "ssrf-specialist":
-            return (
-                f"☁️ **SSRF & Cloud Metadata Specialist Online**\n\n"
-                f"Out-of-band monitoring and metadata probes armed for `{target_name}`. Ask me to audit webhook endpoints or cloud pivots."
-            )
-        elif agent == "auth-race-specialist":
-            return (
-                f"🔑 **Auth & Race Condition Specialist Online**\n\n"
-                f"Multi-threaded race condition and reset brute-forcer ready for `{target_name}`."
-            )
-        elif agent == "review-verifier":
-            return (
-                f"🔍 **Review-Skill Verification Gate Online**\n\n"
-                f"I independently verify every exploit proof and eliminate false positives before findings reach your final report."
-            )
-        elif agent == "report-specialist":
-            return (
-                f"📄 **Reporting & Deliverable Specialist Online**\n\n"
-                f"I conglomerate all verified findings, tech stack fingerprints, and audit trails into the final executive report."
-            )
-        else:
-            return f"🤖 **Sub-Agent `{agent}` Online**\n\nReady to receive instructions for target `{target_name}`."
+        return (
+            f"🛡️ **Moros Artifact Assistant — {agent}**\n\n"
+            f"Target workspace: `{target_name}`\n\n"
+            "This chat can summarize saved assessment artifacts. It does not run a specialist agent, send probes, "
+            "queue scan directives, independently verify authorization, or enforce approval checkpoints. "
+            "Use the scan controls only for a target you are authorized to assess."
+        )
 
     def get_subagent_roster(self, target_name):
         target_path = TARGETS_DIR / target_name
@@ -546,9 +558,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             {
                 "id": "coordinator",
                 "name": "Coordinator Master",
-                "role": "Attack tree orchestration, HITL gate & multi-agent planner",
-                "tier": "Frontier (Claude 3.5 / GPT-4o)",
-                "status": "ACTIVE" if is_scanning else "STANDBY",
+                "role": "Dashboard chat and saved-artifact summary",
+                "tier": "Configured chat provider or local summary",
+                "status": "ACTIVE" if is_scanning else "CHAT_ONLY",
                 "icon": "shield-alert",
                 "messages_count": len(store.read("coordinator", 200)),
             },
@@ -557,7 +569,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "name": "Reconnaissance Specialist",
                 "role": "Subdomain discovery, asset mapping, DNS brute & Wayback fetch",
                 "tier": "Mid-tier (GPT-4o-mini / Heuristic)",
-                "status": "COMPLETED" if (target_path / "output" / "recon").exists() else "READY",
+                "status": "CHAT_ONLY",
                 "icon": "globe",
                 "messages_count": len(store.read("recon-agent", 200)),
             },
@@ -566,7 +578,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "name": "JavaScript & API Hunter",
                 "role": "Headless browser spider, source map unminifier, AST parser & secret scanner",
                 "tier": "Mid-tier (Claude Sonnet / Rule Engine)",
-                "status": "COMPLETED" if (target_path / "output" / "js").exists() else "READY",
+                "status": "CHAT_ONLY",
                 "icon": "code",
                 "messages_count": len(store.read("js-analyzer", 200)),
             },
@@ -575,7 +587,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "name": "XSS & Client-Side Specialist",
                 "role": "DOM, Reflected, Stored, and Blind XSS payload injection & context escape",
                 "tier": "Frontier (Claude 3.5 Sonnet)",
-                "status": "COMPLETED" if (target_path / "output" / "findings" / "xss-reflected").exists() else "READY",
+                "status": "CHAT_ONLY",
                 "icon": "zap",
                 "messages_count": len(store.read("xss-specialist", 200)),
             },
@@ -584,7 +596,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "name": "SSRF & Cloud Metadata Hunter",
                 "role": "SSRF identification, out-of-band canary interaction, AWS/GCP/K8s pivot",
                 "tier": "Frontier (GPT-4o)",
-                "status": "COMPLETED" if (target_path / "output" / "findings" / "ssrf-identify").exists() else "READY",
+                "status": "CHAT_ONLY",
                 "icon": "cloud-lightning",
                 "messages_count": len(store.read("ssrf-specialist", 200)),
             },
@@ -593,7 +605,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "name": "Auth & Race Condition Agent",
                 "role": "IdP multi-threaded race conditions & password reset rate-limit audit",
                 "tier": "Mid-tier (Fast Thread Pool)",
-                "status": "COMPLETED" if (target_path / "output" / "findings" / "idp-race-condition").exists() else "READY",
+                "status": "CHAT_ONLY",
                 "icon": "key",
                 "messages_count": len(store.read("auth-race-specialist", 200)),
             },
@@ -602,7 +614,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "name": "Review-Skill Verifier Gate",
                 "role": "False-positive pruning, independent cURL replay & proof verification",
                 "tier": "Cross-Model Verification",
-                "status": "COMPLETED" if (target_path / "output" / "logs" / "review").exists() else "READY",
+                "status": "CHAT_ONLY",
                 "icon": "check-circle",
                 "messages_count": len(store.read("review-verifier", 200)),
             },
@@ -611,7 +623,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "name": "Reporting & Synthesis Agent",
                 "role": "Executive deliverable synthesis, CVSS scoring & remediation guidance",
                 "tier": "Frontier (Claude 3.5 Sonnet)",
-                "status": "COMPLETED" if (target_path / "output" / "report").exists() else "READY",
+                "status": "CHAT_ONLY",
                 "icon": "file-text",
                 "messages_count": len(store.read("report-specialist", 200)),
             },
@@ -773,6 +785,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def get_target_endpoints(self, target_name):
         ep_file = TARGETS_DIR / target_name / "output" / "js" / "endpoints.json"
         api_file = TARGETS_DIR / target_name / "output" / "api" / "endpoints.json"
+        legacy_api_file = TARGETS_DIR / target_name / "output" / "api" / "openapi-endpoints.json"
         inventory = {"endpoints": [], "total_endpoints": 0}
         if ep_file.exists():
             try:
@@ -782,10 +795,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         endpoints = inventory.get("endpoints", [])
         for endpoint in endpoints:
             endpoint.setdefault("source", "javascript")
-        if api_file.exists():
+        if api_file.exists() or legacy_api_file.exists():
             try:
-                api_inventory = json.loads(api_file.read_text(encoding="utf-8"))
+                source_file = api_file if api_file.exists() else legacy_api_file
+                api_inventory = json.loads(source_file.read_text(encoding="utf-8"))
                 for endpoint in api_inventory.get("endpoints", []):
+                    if not isinstance(endpoint, dict):
+                        continue
                     endpoint["source"] = "openapi"
                     endpoint["url"] = endpoint.get("base_url", "").rstrip("/") + endpoint.get("path", "")
                     endpoints.append(endpoint)
@@ -827,43 +843,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def get_target_checkpoints(self, target_name):
         target_dir = TARGETS_DIR / target_name
-        output_dir = target_dir / "output"
-
-        # Checkpoints file
-        cp_file = output_dir / "logs" / "checkpoints.json"
-        checkpoints = []
-
-        if cp_file.exists():
-            try:
-                checkpoints = json.loads(cp_file.read_text(encoding="utf-8"))
-            except Exception:
-                pass
+        cp_mgr = CheckpointManager(target_name, target_dir)
+        checkpoints = cp_mgr.list_checkpoints()
 
         # If no explicit checkpoint file yet, auto-generate from state-changing endpoints
         if not checkpoints:
+            output_dir = target_dir / "output"
             ep_file = output_dir / "js" / "endpoints.json"
             if ep_file.exists():
                 try:
                     data = json.loads(ep_file.read_text(encoding="utf-8"))
                     for ep in data.get("endpoints", []):
                         if ep.get("method") in ["POST", "PUT", "DELETE"]:
-                            checkpoint_key = "|".join([
-                                str(ep.get("method", "")).upper(),
-                                str(ep.get("url", "")),
-                                str(ep.get("parameter", ep.get("param", ""))),
-                            ])
-                            checkpoint_id = hashlib.sha256(
-                                checkpoint_key.encode("utf-8")
-                            ).hexdigest()[:12]
-                            checkpoints.append({
-                                "id": f"cp-{checkpoint_id}",
-                                "type": "State-Changing Endpoint Confirmation",
-                                "target_url": ep.get("url"),
-                                "method": ep.get("method"),
-                                "reason": f"Endpoint uses {ep.get('method')} which may modify database or application state.",
-                                "status": "PENDING_APPROVAL",
-                                "created_at": datetime.now(timezone.utc).isoformat(),
-                            })
+                            url = ep.get("url") or (str(ep.get("base_url", "")).rstrip("/") + str(ep.get("path", "")))
+                            cp_mgr.create_checkpoint(
+                                checkpoint_type="State-Changing Endpoint Confirmation",
+                                target_url=url,
+                                method=ep.get("method"),
+                                reason=f"Endpoint uses {ep.get('method')} which may modify database or application state.",
+                                risk_level="HIGH",
+                                agent="dashboard_detector"
+                            )
+                    checkpoints = cp_mgr.list_checkpoints()
                 except Exception:
                     pass
 
@@ -871,24 +872,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def handle_checkpoint_decision(self, target_name, checkpoint_id, action, notes):
         target_dir = TARGETS_DIR / target_name
-        cp_file = target_dir / "output" / "logs" / "checkpoints.json"
-        checkpoints = self.get_target_checkpoints(target_name)
-
-        updated = False
-        for cp in checkpoints:
-            if cp.get("id") == checkpoint_id:
-                cp["status"] = "APPROVED" if action == "approve" else "REJECTED"
-                cp["decision_time"] = datetime.now(timezone.utc).isoformat()
-                cp["notes"] = notes
-                updated = True
-                break
-
-        if updated:
-            cp_file.parent.mkdir(parents=True, exist_ok=True)
-            cp_file.write_text(json.dumps(checkpoints, indent=2), encoding="utf-8")
-            return {"status": "success", "message": f"Checkpoint {checkpoint_id} marked as {action.upper()}"}
-
-        return {"status": "error", "message": "Checkpoint not found"}
+        cp_mgr = CheckpointManager(target_name, target_dir)
+        decided = cp_mgr.decide(checkpoint_id, action, notes, decider="dashboard_operator")
+        return {
+            "status": "success",
+            "message": f"Checkpoint {checkpoint_id} marked as {decided.get('status')}",
+            "checkpoint": decided
+        }
 
     def get_target_report(self, target_name):
         report_dir = TARGETS_DIR / target_name / "output" / "report"
@@ -913,6 +903,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def start_scan_job(self, target, skills, models, dry_run=False):
         if target in active_scans and active_scans[target]["status"] == "running":
             return {"status": "error", "message": f"A scan is already running for {target}"}
+
+        target_dir = TARGETS_DIR / target
+        initialized = not target_dir.is_dir()
+        if initialized:
+            try:
+                from setup import init_target
+                init_target(target)
+            except Exception as exc:
+                return {"status": "error", "message": f"Could not initialize target workspace: {exc}"}
 
         log_buffer = []
 
@@ -966,7 +965,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         }
         thread.start()
 
-        return {"status": "success", "message": f"Scan started for {target}", "target": target}
+        message = f"Scan started for {target}"
+        if initialized:
+            message += ". A workspace was created; without a matching readable scope-of-work note, only passive recon can run."
+        return {"status": "success", "message": message, "target": target, "initialized_target": initialized}
 
     def stop_scan_job(self, target):
         if target in active_scans and active_scans[target].get("process"):
@@ -993,6 +995,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 def run_dashboard(host="127.0.0.1", port=8080, open_browser=True, default_target=None):
     """Run the Moros AI Agent dashboard server."""
+    if host.lower() not in {"127.0.0.1", "localhost", "::1"}:
+        raise ValueError("Dashboard binds to loopback only; remote access requires authentication first")
     server_address = (host, port)
     httpd = ThreadedHTTPServer(server_address, DashboardHandler)
 

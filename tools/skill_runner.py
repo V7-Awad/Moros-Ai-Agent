@@ -28,18 +28,37 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, List
 
+tools_dir = Path(__file__).parent.resolve()
+if str(tools_dir) not in sys.path:
+    sys.path.insert(0, str(tools_dir))
+
+from agent_runtime import AgentRunner, AgentContext, AgentResult, ToolRegistry
+from checkpoint_manager import CheckpointManager
+from scoped_http import ScopedHttpClient
+
 logger = logging.getLogger("skill-runner")
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 
 class SkillRunner:
-    def __init__(self, target: str, target_dir: Path, llm_client=None):
+    def __init__(self, target: str, target_dir: Path, llm_client=None,
+                 max_http_requests: int = 40, request_delay: float = 0.4):
         self.target = target
         self.target_dir = Path(target_dir)
         self.output_dir = self.target_dir / "output"
         self.logs_dir = self.output_dir / "logs"
         self.llm = llm_client
         self._recorded_evidence_ids = None
+        self.scope_authorized = False
+        self.http = ScopedHttpClient(target, max_requests=max_http_requests, delay_seconds=request_delay)
+
+    @staticmethod
+    def _target_request_headers(user_agent: str) -> dict:
+        headers = {"User-Agent": user_agent}
+        bug_bounty_id = os.environ.get("MOROS_BUG_BOUNTY_ID", "").strip()
+        if bug_bounty_id:
+            headers["X-Bug-Bounty"] = bug_bounty_id
+        return headers
 
     @staticmethod
     def _host_is_in_root_scope(host: str, root: str) -> bool:
@@ -122,7 +141,8 @@ class SkillRunner:
 
     # ==================== SKILL 1: RECON-SUBDOMAIN ====================
 
-    def run_recon_subdomain(self, active_validation: bool = False) -> Dict[str, Any]:
+    def run_recon_subdomain(self, active_validation: bool = False, max_active_hosts: int = 20,
+                            root_only: bool = False, https_only: bool = False) -> Dict[str, Any]:
         skill = "recon-subdomain"
         recon_dir = self.output_dir / "recon"
         recon_dir.mkdir(parents=True, exist_ok=True)
@@ -175,16 +195,21 @@ class SkillRunner:
         # Step 7: Active reachability checks require an authorization document.
         live_hosts = []
         if active_validation:
-            self.log_step(skill, "step-07-live-validation.log", "Authorized active reachability checks (HEAD, max 20 hosts, 4-second timeout).")
-            for sub in sorted_subs[:20]:
-                for proto in ["https", "http"]:
+            hosts_to_check = [self.target] if root_only else sorted_subs[:max(1, max_active_hosts)]
+            protocols = ["https"] if https_only else ["https", "http"]
+            self.log_step(skill, "step-07-live-validation.log",
+                          f"Active HEAD checks: {len(hosts_to_check)} host(s), protocols={','.join(protocols)}, timeout=4s.")
+            for sub in hosts_to_check:
+                for proto in protocols:
                     test_url = f"{proto}://{sub}"
                     try:
-                        req = urllib.request.Request(test_url, headers={"User-Agent": "Mozilla/5.0 Moros-AI"}, method="HEAD")
-                        with urllib.request.urlopen(req, timeout=4) as resp:
-                            live_hosts.append({"host": sub, "url": test_url, "status": resp.status,
-                                               "server": resp.headers.get("Server", "Unknown"),
-                                               "content_type": resp.headers.get("Content-Type", "")})
+                        response = self.http.request(test_url, method="HEAD")
+                        if response.get("status") == "response" and response.get("status_code", 0) < 500:
+                            response_headers = response.get("headers", {})
+                            live_hosts.append({"host": sub, "url": response.get("url", test_url),
+                                               "status": response["status_code"],
+                                               "server": response_headers.get("server", "Unknown"),
+                                               "content_type": response_headers.get("content-type", "")})
                             break
                     except Exception:
                         continue
@@ -195,7 +220,7 @@ class SkillRunner:
         self.log_step(skill, "step-07-live-validation.log", f"Observed {len(live_hosts)} responsive hosts; an empty list means none answered the probe.")
 
         # Step 8: Recon summary
-        summary_md = f"# Reconnaissance Summary — {self.target}\n\n- Total subdomains from passive sources (including supplied root): {len(sorted_subs)}\n- Responsive hosts observed by authorized HTTP HEAD checks: {len(live_hosts)}\n- Active reachability checks: {'performed' if active_validation else 'skipped (no verified scope)'}\n\n## Observed Hosts\n"
+        summary_md = f"# Reconnaissance Summary — {self.target}\n\n- Total subdomains from passive sources (including supplied root): {len(sorted_subs)}\n- Responsive hosts observed by HTTP HEAD checks: {len(live_hosts)}\n- Active reachability checks: {'performed' if active_validation else 'skipped (no verified scope)'}\n\n## Observed Hosts\n"
         for h in live_hosts:
             summary_md += f"- **{h['url']}** (Status: {h.get('status')}, Server: {h.get('server')})\n"
         (recon_dir / "recon-summary.md").write_text(summary_md, encoding="utf-8")
@@ -212,7 +237,7 @@ class SkillRunner:
         api_dir.mkdir(parents=True, exist_ok=True)
         self.log_step(skill, "step-01-discover.log", f"Checking for OpenAPI / Swagger specs for {self.target}")
 
-        out_file = api_dir / "openapi-endpoints.json"
+        out_file = api_dir / "endpoints.json"
         endpoints = []
 
         # Check for local spec file in target folder
@@ -401,106 +426,182 @@ class SkillRunner:
         skill = "js-analyze"
         js_dir = self.output_dir / "js"
         beautified_dir = js_dir / "beautified"
+        input_target_dir = beautified_dir if beautified_dir.exists() and any(beautified_dir.glob("*.js")) else js_dir / "raw"
 
         self.log_step(skill, "step-01-verify-input.log", f"Checking beautified JS in {beautified_dir}")
 
-        # Step 3 & 4 & 11: Endpoints, Parameters & cURL extraction
-        cmd = [
-            sys.executable,
-            str(PROJECT_ROOT / "tools" / "endpoint-extractor.py"),
-            "--input-dir", str(beautified_dir if beautified_dir.exists() and any(beautified_dir.glob("*.js")) else js_dir / "raw"),
-            "--output-endpoints", str(js_dir / "endpoints.json"),
-            "--output-params", str(js_dir / "parameters.json"),
-            "--output-curl", str(js_dir / "curl-commands.sh"),
-            "--target-domain", self.target
-        ]
-        subprocess.run(cmd, capture_output=True, text=True)
-        self.log_step(skill, "step-03-endpoints.log", "Extracted endpoints and parameters.")
+        # Define tools for ReAct Agent
+        def tool_extract_endpoints():
+            cmd = [
+                sys.executable,
+                str(PROJECT_ROOT / "tools" / "endpoint-extractor.py"),
+                "--input-dir", str(input_target_dir),
+                "--output-endpoints", str(js_dir / "endpoints.json"),
+                "--output-params", str(js_dir / "parameters.json"),
+                "--output-curl", str(js_dir / "curl-commands.sh"),
+                "--target-domain", self.target
+            ]
+            subprocess.run(cmd, capture_output=True, text=True)
+            count = 0
+            ep_file = js_dir / "endpoints.json"
+            if ep_file.exists():
+                try:
+                    count = len(json.loads(ep_file.read_text(encoding="utf-8")).get("endpoints", []))
+                except Exception:
+                    pass
+            self.log_step(skill, "step-03-endpoints.log", f"Extracted {count} endpoints and parameters.")
+            return {"status": "success", "endpoints_count": count, "artifact": str(ep_file)}
 
-        # Step 10: Secret scanner
-        cmd_sec = [
-            sys.executable,
-            str(PROJECT_ROOT / "tools" / "secret-scanner.py"),
-            "--input-dir", str(js_dir / "raw"),
-            "--output", str(js_dir / "secrets-findings.json")
-        ]
-        subprocess.run(cmd_sec, capture_output=True, text=True)
-        self.log_step(skill, "step-10-secrets.log", "Scanned for hardcoded secrets and entropy.")
+        def tool_scan_secrets():
+            cmd_sec = [
+                sys.executable,
+                str(PROJECT_ROOT / "tools" / "secret-scanner.py"),
+                "--input-dir", str(js_dir / "raw"),
+                "--output", str(js_dir / "secrets-findings.json")
+            ]
+            subprocess.run(cmd_sec, capture_output=True, text=True)
+            sec_file = js_dir / "secrets-findings.json"
+            findings = []
+            if sec_file.exists():
+                try:
+                    findings = json.loads(sec_file.read_text(encoding="utf-8")).get("findings", [])
+                except Exception:
+                    pass
+            self.log_step(skill, "step-10-secrets.log", f"Scanned secrets: found {len(findings)} candidates.")
+            return {"status": "success", "findings": findings, "artifact": str(sec_file)}
 
-        # Step 5: DOM Gadgets
-        gadgets = []
-        gadget_patterns = [
-            (r'innerHTML\s*=', "innerHTML assignment"),
-            (r'document\.write\s*\(', "document.write invocation"),
-            (r'eval\s*\(', "eval execution"),
-            (r'location\.href\s*=', "location.href redirect"),
-        ]
-        for js_p in js_dir.rglob("*.js"):
-            try:
-                txt = js_p.read_text(encoding="utf-8", errors="ignore")
-                for pat, label in gadget_patterns:
-                    if re.search(pat, txt):
-                        gadgets.append({
-                            "type": label,
-                            "source_file": str(js_p.name),
-                            "risk": "MEDIUM — Unsanitized DOM sink",
-                            "severity": "AI-proposed severity: MEDIUM — pending human review"
-                        })
-            except Exception:
-                pass
+        def tool_extract_dom_gadgets():
+            gadgets = []
+            gadget_patterns = [
+                (r'innerHTML\s*=', "innerHTML assignment"),
+                (r'document\.write\s*\(', "document.write invocation"),
+                (r'eval\s*\(', "eval execution"),
+                (r'location\.href\s*=', "location.href redirect"),
+            ]
+            for js_p in js_dir.rglob("*.js"):
+                try:
+                    txt = js_p.read_text(encoding="utf-8", errors="ignore")
+                    for pat, label in gadget_patterns:
+                        if re.search(pat, txt):
+                            gadgets.append({
+                                "type": label,
+                                "source_file": str(js_p.name),
+                                "risk": "MEDIUM — Unsanitized DOM sink",
+                                "severity": "AI-proposed severity: MEDIUM — pending human review"
+                            })
+                except Exception:
+                    pass
+            gadgets_file = js_dir / "gadgets.json"
+            gadgets_file.write_text(json.dumps({"target": self.target, "gadgets": gadgets}, indent=2), encoding="utf-8")
+            self.log_step(skill, "step-05-gadgets.log", f"Identified {len(gadgets)} DOM sink gadgets.")
+            return {"status": "success", "gadgets_count": len(gadgets), "artifact": str(gadgets_file)}
 
-        (js_dir / "gadgets.json").write_text(json.dumps({"target": self.target, "gadgets": gadgets}, indent=2), encoding="utf-8")
-        self.log_step(skill, "step-05-gadgets.log", f"Identified {len(gadgets)} DOM sink gadgets.")
+        def tool_fingerprint_tech():
+            signatures = {
+                "React": ("React.createElement", "__REACT_DEVTOOLS_GLOBAL_HOOK__", "react-dom"),
+                "Vue": ("Vue.createApp", "__VUE__", "vue.runtime"),
+                "Angular": ("ng-version", "@angular/core"),
+                "jQuery": ("jQuery", "window.$"),
+            }
+            js_sources = []
+            detected_signatures = []
+            bytes_scanned = 0
+            for js_path in js_dir.rglob("*.js"):
+                if len(js_sources) >= 250 or bytes_scanned >= 20 * 1024 * 1024:
+                    break
+                try:
+                    with js_path.open("rb") as source_file:
+                        content = source_file.read(min(1024 * 1024, 20 * 1024 * 1024 - bytes_scanned))
+                    bytes_scanned += len(content)
+                    source_text = content.decode("utf-8", errors="ignore")
+                    js_sources.append(str(js_path.relative_to(js_dir)))
+                    for technology, markers in signatures.items():
+                        for marker in markers:
+                            if marker in source_text:
+                                detected_signatures.append({"technology": technology, "marker": marker,
+                                                            "source_file": str(js_path.relative_to(js_dir))})
+                except OSError as exc:
+                    self.log_step(skill, "step-09-fingerprint.log", f"Could not inspect {js_path.name}: {exc}")
 
-        # Step 9: Tech fingerprint
-        # Bound local analysis and report only signatures actually present in the files.
-        signatures = {
-            "React": ("React.createElement", "__REACT_DEVTOOLS_GLOBAL_HOOK__", "react-dom"),
-            "Vue": ("Vue.createApp", "__VUE__", "vue.runtime"),
-            "Angular": ("ng-version", "@angular/core"),
-            "jQuery": ("jQuery", "window.$"),
+            detected = sorted({item["technology"] for item in detected_signatures})
+            fingerprint = {
+                "target": self.target,
+                "frontend": {"framework": detected or "Unknown", "confidence": "signature-based" if detected else "insufficient-evidence"},
+                "backend_indicators": {"likely_framework": "Unknown", "confidence": "not-assessed"},
+                "known_misconfigs_for_stack": [],
+                "collection_status": "analyzed" if js_sources else "no-javascript-artifacts",
+                "evidence_files": js_sources,
+                "signatures": detected_signatures,
+                "bytes_scanned": bytes_scanned,
+                "truncated": len(js_sources) >= 250 or bytes_scanned >= 20 * 1024 * 1024,
+            }
+            tech_file = js_dir / "tech-fingerprint.json"
+            tech_file.write_text(json.dumps(fingerprint, indent=2), encoding="utf-8")
+            self.log_step(skill, "step-09-fingerprint.log", "Generated technology fingerprint.")
+            return {"status": "success", "frameworks": detected, "artifact": str(tech_file)}
+
+        # Register tools in ToolRegistry
+        registry = ToolRegistry()
+        registry.register("extract_endpoints", tool_extract_endpoints, "Extract HTTP endpoints, parameters, and reproduction cURL commands from JavaScript files.")
+        registry.register("scan_secrets", tool_scan_secrets, "Scan collected JavaScript files for hardcoded API keys, tokens, and credentials.")
+        registry.register("extract_dom_gadgets", tool_extract_dom_gadgets, "Search JavaScript files for hazardous DOM sinks (eval, innerHTML, document.write).")
+        registry.register("fingerprint_tech_stack", tool_fingerprint_tech, "Detect frontend frameworks and client libraries from script markers.")
+
+        def fallback_fn(ctx: AgentContext) -> AgentResult:
+            """Deterministic fallback when LLM is unavailable or unconfigured."""
+            res_ep = tool_extract_endpoints()
+            res_sec = tool_scan_secrets()
+            res_gad = tool_extract_dom_gadgets()
+            res_tech = tool_fingerprint_tech()
+
+            summary = (
+                f"# JavaScript Analysis Summary — {self.target}\n\n"
+                f"- Extracted {res_ep.get('endpoints_count', 0)} API endpoints.\n"
+                f"- Scanned {len(res_sec.get('findings', []))} secret candidates.\n"
+                f"- Found {res_gad.get('gadgets_count', 0)} DOM sinks.\n"
+                f"- Detected frameworks: {', '.join(res_tech.get('frameworks', [])) or 'None'}.\n"
+            )
+            (js_dir / "analysis-summary.md").write_text(summary, encoding="utf-8")
+            self.log_step(skill, "step-12-summary.log", "Deterministic fallback analysis completed.")
+            return AgentResult(
+                status="completed",
+                summary=f"Deterministic JS analysis completed for {self.target}",
+                findings=res_sec.get("findings", []),
+                artifacts=[res_ep.get("artifact", ""), res_sec.get("artifact", ""), res_gad.get("artifact", ""), res_tech.get("artifact", "")],
+                next_actions=["content-discovery", "xss-reflected", "ssrf-identify"]
+            )
+
+        context = AgentContext(
+            target=self.target,
+            target_dir=self.target_dir,
+            skill=skill,
+            run_id=f"js-analyze-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+        )
+
+        agent_runner = AgentRunner(llm_client=self.llm)
+        agent_result = agent_runner.run(
+            context=context,
+            tools=registry,
+            system_prompt=(
+                f"You are the JavaScript & API Hunter agent analyzing '{self.target}'. "
+                "Use the available tools to extract endpoints, scan for leaked credentials, identify DOM sinks, and fingerprint the frontend stack."
+            ),
+            user_goal=f"Analyze all JavaScript assets of {self.target}. Discover endpoints, parameters, secrets, gadgets, and tech stack.",
+            fallback_fn=fallback_fn
+        )
+
+        summary_md = js_dir / "analysis-summary.md"
+        if not summary_md.exists():
+            summary_content = f"# JavaScript Analysis Summary — {self.target}\n\n{agent_result.summary}\n"
+            summary_md.write_text(summary_content, encoding="utf-8")
+            self.log_step(skill, "step-12-summary.log", "Agent analysis summary generated.")
+
+        return {
+            "status": "SUCCESS" if agent_result.status in ["completed", "llm_unavailable"] else "FAILED",
+            "agent_status": agent_result.status,
+            "summary": agent_result.summary,
+            "findings_count": len(agent_result.findings),
         }
-        js_sources = []
-        detected_signatures = []
-        bytes_scanned = 0
-        for js_path in js_dir.rglob("*.js"):
-            if len(js_sources) >= 250 or bytes_scanned >= 20 * 1024 * 1024:
-                break
-            try:
-                with js_path.open("rb") as source_file:
-                    content = source_file.read(min(1024 * 1024, 20 * 1024 * 1024 - bytes_scanned))
-                bytes_scanned += len(content)
-                source_text = content.decode("utf-8", errors="ignore")
-                js_sources.append(str(js_path.relative_to(js_dir)))
-                for technology, markers in signatures.items():
-                    for marker in markers:
-                        if marker in source_text:
-                            detected_signatures.append({"technology": technology, "marker": marker,
-                                                        "source_file": str(js_path.relative_to(js_dir))})
-            except OSError as exc:
-                self.log_step(skill, "step-09-fingerprint.log", f"Could not inspect {js_path.name}: {exc}")
-
-        detected = sorted({item["technology"] for item in detected_signatures})
-        fingerprint = {
-            "target": self.target,
-            "frontend": {"framework": detected or "Unknown", "confidence": "signature-based" if detected else "insufficient-evidence"},
-            "backend_indicators": {"likely_framework": "Unknown", "confidence": "not-assessed"},
-            "known_misconfigs_for_stack": [],
-            "collection_status": "analyzed" if js_sources else "no-javascript-artifacts",
-            "evidence_files": js_sources,
-            "signatures": detected_signatures,
-            "bytes_scanned": bytes_scanned,
-            "truncated": len(js_sources) >= 250 or bytes_scanned >= 20 * 1024 * 1024,
-        }
-        (js_dir / "tech-fingerprint.json").write_text(json.dumps(fingerprint, indent=2), encoding="utf-8")
-        self.log_step(skill, "step-09-fingerprint.log", "Generated technology fingerprint.")
-
-        # Step 12: Summary
-        summary = f"# JavaScript Analysis Summary — {self.target}\n\n- Completed static extraction of endpoints, parameters, secrets, and gadgets.\n"
-        (js_dir / "analysis-summary.md").write_text(summary, encoding="utf-8")
-        self.log_step(skill, "step-12-summary.log", "Analysis summary generated.")
-
-        return {"status": "SUCCESS"}
 
     # ==================== SKILL 5: CONTENT-DISCOVERY ====================
 
@@ -509,28 +610,64 @@ class SkillRunner:
         cd_dir = self.output_dir / "content-discovery"
         cd_dir.mkdir(parents=True, exist_ok=True)
 
+        if not self.scope_authorized:
+            self.log_step(skill, "step-06-scan.log", "Blocked: no matching scope note; no target requests were sent.")
+            return {"status": "BLOCKED_SCOPE", "paths_checked": 0, "findings_count": 0}
+
         self.log_step(skill, "step-01-verify.log", "Prerequisites verified.")
 
-        generic_words = ["admin", "dashboard", "api", "v1", "v2", "login", "register", "docs", "swagger", ".env", ".git/HEAD", "backup.sql", "health", "config.json"]
-        framework_words = ["graphql", "metrics", "debug", "test", "staging", "internal"]
-        combined = sorted(list(set(generic_words + framework_words)))
+        # Low-impact public routes only. Sensitive files, backups, admin paths, and
+        # state-changing routes are deliberately excluded from automatic probing.
+        combined = [
+            "/", "/robots.txt", "/sitemap.xml", "/.well-known/security.txt",
+            "/openapi.json", "/swagger.json", "/api-docs", "/swagger",
+            "/docs", "/health", "/status", "/api", "/search",
+        ]
 
-        (cd_dir / "wordlist-generic.txt").write_text("\n".join(generic_words), encoding="utf-8")
-        (cd_dir / "wordlist-framework-specific.txt").write_text("\n".join(framework_words), encoding="utf-8")
+        (cd_dir / "wordlist-generic.txt").write_text("\n".join(combined), encoding="utf-8")
+        (cd_dir / "wordlist-framework-specific.txt").write_text("", encoding="utf-8")
         (cd_dir / "wordlist-combined.txt").write_text("\n".join(combined), encoding="utf-8")
 
         self.log_step(skill, "step-05-combine.log", f"Generated combined wordlist ({len(combined)} paths).")
 
-        # Current phase prepares candidates only; it must not claim that these paths were probed.
         discovered = []
         interesting = []
+        for path in combined:
+            result = self.http.request(path, method="GET")
+            if result.get("status") != "response":
+                self.log_step(skill, "step-06-scan.log", f"{path}: {result.get('status')} {result.get('error', result.get('reason', ''))}")
+                continue
+            row = {key: value for key, value in result.items() if key != "body"}
+            row["path"] = path
+            discovered.append(row)
+            if result.get("status_code") in {200, 401, 403} and path != "/":
+                interesting.append({"path": path, "status_code": result["status_code"],
+                                    "content_type": result.get("headers", {}).get("content-type", ""),
+                                    "classification": "reachable_route_for_manual_review"})
 
-        (cd_dir / "discovered-paths.json").write_text(json.dumps(discovered, indent=2), encoding="utf-8")
+        header_rows = []
+        root_response = self.http.request("/", method="GET")
+        if root_response.get("status") == "response":
+            response_headers = root_response.get("headers", {})
+            for header in ["strict-transport-security", "content-security-policy",
+                           "x-content-type-options", "x-frame-options", "referrer-policy"]:
+                header_rows.append({"header": header, "present": header in response_headers,
+                                    "value": response_headers.get(header, "")})
+
+        output = {"target": self.target, "policy": {"methods": ["GET"], "same_host_only": True,
+                  "request_budget": self.http.max_requests, "requests_used": self.http.request_count},
+                  "paths_checked": discovered, "interesting_routes": interesting,
+                  "root_security_headers": header_rows}
+        (cd_dir / "discovered-paths.json").write_text(json.dumps(output, indent=2), encoding="utf-8")
         (cd_dir / "interesting-findings.json").write_text(json.dumps(interesting, indent=2), encoding="utf-8")
-        (cd_dir / "content-discovery-summary.md").write_text(f"# Content Discovery Candidates — {self.target}\n\nPrepared {len(combined)} candidate paths. No HTTP probes were sent.", encoding="utf-8")
+        summary = (f"# Safe Content Discovery — {self.target}\n\n"
+                   f"Sent {len(discovered)} same-host GET checks; {len(interesting)} routes need manual review. "
+                   "No credentials, payloads, state-changing methods, or cross-host redirects were used.\n")
+        (cd_dir / "content-discovery-summary.md").write_text(summary, encoding="utf-8")
 
-        self.log_step(skill, "step-06-scan.log", "Prepared candidate paths only; no HTTP probes were sent.")
-        return {"status": "CANDIDATES_ONLY", "paths_prepared": len(combined)}
+        self.log_step(skill, "step-06-scan.log", f"Completed {len(discovered)} same-host GET checks; request budget used {self.http.request_count}/{self.http.max_requests}.")
+        return {"status": "COMPLETED", "paths_checked": len(discovered), "findings_count": len(interesting),
+                "requests_used": self.http.request_count}
 
     # ==================== SKILL 6-12: VULNERABILITY TESTING ====================
 
@@ -539,9 +676,13 @@ class SkillRunner:
         v_dir.mkdir(parents=True, exist_ok=True)
         self.log_step(skill_name, "step-01-verify.log", f"Starting {skill_name} testing.")
 
+        if not self.scope_authorized:
+            self.log_step(skill_name, "step-06-document.log", "Blocked: no matching scope note; no target requests were sent.")
+            return {"status": "BLOCKED_SCOPE", "findings_count": 0}
+
         # Build the candidate surface only from observed JS and imported API artifacts.
         endpoints = []
-        for ep_file in [self.output_dir / "js" / "endpoints.json", self.output_dir / "api" / "openapi-endpoints.json"]:
+        for ep_file in [self.output_dir / "js" / "endpoints.json", self.output_dir / "api" / "endpoints.json", self.output_dir / "api" / "openapi-endpoints.json"]:
             if not ep_file.exists():
                 continue
             try:
@@ -555,33 +696,21 @@ class SkillRunner:
 
         findings = []
 
-        # Enforce Design Requirements #1 & #3: Flag state-changing endpoints for human approval
-        cp_file = self.output_dir / "logs" / "checkpoints.json"
-        checkpoints = []
-        if cp_file.exists():
-            try:
-                checkpoints = json.loads(cp_file.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-
+        # Enforce Design Requirements #1 & #3: Flag state-changing endpoints for human approval via CheckpointManager
+        cp_mgr = CheckpointManager(self.target, self.target_dir)
         for ep in endpoints:
             method = ep.get("method", "GET").upper()
             url = ep.get("url") or (str(ep.get("base_url", "")).rstrip("/") + str(ep.get("path", "")))
             if method in ["POST", "PUT", "DELETE"]:
-                cp_id = f"cp-{hashlib.sha256(f'{method}:{url}'.encode()).hexdigest()[:10]}"
-                if not any(c.get("id") == cp_id for c in checkpoints):
-                    checkpoints.append({
-                        "id": cp_id,
-                        "type": "State-Changing Endpoint Confirmation",
-                        "target_url": url,
-                        "method": method,
-                        "reason": f"Endpoint requires human approval before sending {method} payload.",
-                        "status": "PENDING_APPROVAL",
-                        "created_at": datetime.now(timezone.utc).isoformat()
-                    })
-
-        cp_file.parent.mkdir(parents=True, exist_ok=True)
-        cp_file.write_text(json.dumps(checkpoints, indent=2), encoding="utf-8")
+                cp = cp_mgr.create_checkpoint(
+                    checkpoint_type="State-Changing Endpoint Confirmation",
+                    target_url=url,
+                    method=method,
+                    reason=f"Endpoint requires human approval before sending {method} payload.",
+                    risk_level="HIGH",
+                    agent=skill_name
+                )
+                self.log_step(skill_name, "step-02-checkpoint.log", f"Registered HITL checkpoint {cp['id']} for {method} {url}")
 
         # Heuristics create triage candidates. They do not prove exploitability.
         if skill_name == "xss-reflected":
@@ -589,24 +718,39 @@ class SkillRunner:
                 params = ep.get("parameters", [])
                 param_names = [p.get("name") if isinstance(p, dict) else p for p in params]
                 if ep.get("method", "GET").upper() == "GET" and param_names:
+                    param_name = str(param_names[0] or "")
+                    url = ep.get("url") or (str(ep.get("base_url", "")).rstrip("/") + str(ep.get("path", "")))
+                    parsed_url = urllib.parse.urlparse(url if "://" in url else urllib.parse.urljoin(self.http.base_url + "/", url))
+                    if not param_name or parsed_url.hostname != self.http.target or any(
+                        token in parsed_url.path.lower() for token in ["logout", "delete", "unsubscribe", "reset", "callback", "track"]
+                    ):
+                        continue
+                    marker = "MOROS_REFLECT_" + hashlib.sha256(f"{url}|{param_name}".encode()).hexdigest()[:12]
+                    probe_value = f"<moros-probe>{marker}</moros-probe>"
+                    probe = self.http.request(url, method="GET", params={param_name: probe_value})
+                    body = probe.get("body", "")
+                    if probe.get("status") != "response" or marker not in body:
+                        continue
+                    context_start = max(0, body.find(marker) - 100)
+                    context = body[context_start:body.find(marker) + len(marker) + 100]
+                    escaped = f"&lt;moros-probe&gt;{marker}&lt;/moros-probe&gt;" in body.lower()
                     evidence = self.record_candidate_evidence(
                         skill_name, "Reflected XSS", Path(ep.get("_source_artifact", ep_file)), ep,
-                        "A GET parameter exists in the endpoint inventory; reflection and script execution are unknown.",
+                        "A harmless, non-executable HTML marker was reflected in the response. This does not prove script execution.",
                     )
                     findings.append({
-                        "title": f"Potential reflected-input sink on {ep.get('url') or ep.get('path', 'unknown route')}",
+                        "title": f"Reflected input observed on {url}",
                         "type": "Reflected XSS",
-                        "url": ep.get("url") or ep.get("path", ""),
-                        "parameter": param_names[0],
+                        "url": url,
+                        "parameter": param_name,
                         "status": "candidate",
                         "validation_status": "unverified",
-                        "confidence": "low",
+                        "confidence": "medium" if not escaped else "low",
                         "evidence_ids": [evidence["evidence_id"]],
-                        "evidence": [evidence],
+                        "evidence": [{**evidence, "response_status": probe.get("status_code"),
+                                      "marker_escaped": escaped, "response_context": context}],
                         "severity": "AI-proposed severity: UNASSESSED — pending evidence and human review",
-                        "evidence": [{"kind": "endpoint_metadata", "source": str(ep.get("source", "endpoint inventory")),
-                                      "claim": "A GET parameter exists; reflection and JavaScript execution have not been tested."}],
-                        "notes": "Endpoint-shape heuristic only. No request was sent and no reflection or execution was observed."
+                        "notes": "A harmless marker was reflected. No script payload was sent or executed; manual context review is required."
                     })
         elif skill_name == "ssrf-identify":
             for ep in endpoints:
@@ -629,8 +773,6 @@ class SkillRunner:
                         "evidence_ids": [evidence["evidence_id"]],
                         "evidence": [evidence],
                         "severity": "AI-proposed severity: UNASSESSED — pending evidence and human review",
-                        "evidence": [{"kind": "endpoint_metadata", "source": str(ep.get("source", "endpoint inventory")),
-                                      "claim": "A URL-like parameter exists; server-side fetching has not been tested."}],
                         "notes": "Endpoint-shape heuristic only. No outbound request or SSRF behavior was observed."
                     })
 

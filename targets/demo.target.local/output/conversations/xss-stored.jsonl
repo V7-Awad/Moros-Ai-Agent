@@ -1,0 +1,3 @@
+{"timestamp": "2026-11-22T14:15:33.594974+00:00", "agent": "xss-stored", "role": "tool", "content": "[CHECKPOINT] Awaiting human approval", "source": "orchestrator"}
+{"timestamp": "2026-11-22T14:15:33.595737+00:00", "agent": "xss-stored", "role": "tool", "content": "[STARTED] Model: default, Run: 1", "source": "orchestrator"}
+{"timestamp": "2026-11-22T14:15:33.616370+00:00", "agent": "xss-stored", "role": "tool", "content": "[SUCCESS] Identified 0 candidate findings", "source": "orchestrator"}
