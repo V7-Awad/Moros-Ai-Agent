@@ -111,7 +111,7 @@ Examples:
     parser.add_argument("--check", action="store_true",
                         help="Check prerequisites only")
     parser.add_argument("--dashboard", action="store_true",
-                        help="Launch local web dashboard viewer (like 'strix view')")
+                        help="Launch local web dashboard viewer")
     parser.add_argument("--port", type=int, default=8080,
                         help="Dashboard server port (default: 8080)")
     parser.add_argument("--no-open", action="store_true",

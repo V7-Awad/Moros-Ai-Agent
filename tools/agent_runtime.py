@@ -171,6 +171,7 @@ class AgentRunner:
         reasoning_steps: List[str] = []
         findings_accumulated: List[Dict[str, Any]] = []
         artifacts_accumulated: List[str] = []
+        llm_failure = None
 
         step = 0
         started_at = time.monotonic()
@@ -200,7 +201,8 @@ class AgentRunner:
             )
 
             if not llm_response:
-                logger.warning(f"[{agent_id}] LLM response was empty on step {step}.")
+                llm_failure = self.llm.last_error or "empty response"
+                logger.warning(f"[{agent_id}] LLM request failed on step {step}: {llm_failure}")
                 break
 
             # Record Assistant Thought
@@ -257,10 +259,19 @@ class AgentRunner:
             history.append({"role": "user", "content": f"Observation: {obs_str[:3000]}"})
             current_prompt = f"Observation: {obs_str[:3000]}\nWhat is your next Thought and Action?"
 
-        # Fallback if loop exceeded max steps
-        summary = f"{agent_id} completed {step} analysis steps. Discovered {len(findings_accumulated)} findings."
+        # A configured key does not mean the model call succeeded. Preserve a
+        # visible failure state instead of silently marking the agent complete.
+        if llm_failure:
+            status = "llm_error"
+            summary = f"{agent_id} stopped because {self.llm.provider}/{self.llm.model} failed: {llm_failure}"
+        elif step >= max_steps:
+            status = "incomplete"
+            summary = f"{agent_id} reached its {max_steps}-step limit without a final answer."
+        else:
+            status = "incomplete"
+            summary = f"{agent_id} stopped without a final answer after {step} analysis steps."
         return AgentResult(
-            status="completed",
+            status=status,
             summary=summary,
             findings=findings_accumulated,
             artifacts=artifacts_accumulated,

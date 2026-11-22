@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Moros AI Agent — Web Dashboard Server
-Inspired by Strix (usestrix/strix) local web viewer architecture.
+Native Moros AI operations center and real-time security telemetry viewer.
 
 Provides a local web server and REST API for:
 - Managing assessment targets & scope compliance
@@ -22,7 +22,9 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -39,6 +41,9 @@ from tools.conversation_store import ConversationStore, safe_agent_name
 from tools.llm_client import LLMClient
 from tools.checkpoint_manager import CheckpointManager
 from tools.run_manager import RunManager
+from tools.skill_registry import SkillRegistry, CORE_SKILLS
+
+logger = logging.getLogger(__name__)
 
 # List of all 14 skills in dependency order
 ALL_SKILLS = [
@@ -61,6 +66,80 @@ ALL_SKILLS = [
 
 # In-memory scan manager
 active_scans = {}  # target -> {thread, status, logs, start_time, pid}
+
+
+def is_valid_discord_webhook_url(value):
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        return (
+            parsed.scheme == "https"
+            and parsed.hostname in {"discord.com", "discordapp.com"}
+            and parsed.port in (None, 443)
+            and not parsed.username
+            and not parsed.password
+            and not parsed.query
+            and not parsed.fragment
+            and re.fullmatch(r"/api/webhooks/\d+/[A-Za-z0-9._-]+", parsed.path) is not None
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def send_discord_scan_summary(target, status):
+    webhook_url = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+    if not webhook_url or not is_valid_discord_webhook_url(webhook_url):
+        return "not configured"
+
+    report_dir = TARGETS_DIR / target / "output" / "report"
+    report_data = {}
+    if report_dir.is_dir():
+        report_files = sorted(report_dir.glob("hackbot-report-*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+        if report_files:
+            try:
+                report_data = json.loads(report_files[0].read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                report_data = {}
+
+    summary = report_data.get("summary", {}) if isinstance(report_data, dict) else {}
+    findings = report_data.get("findings", []) if isinstance(report_data, dict) else []
+    if not isinstance(findings, list):
+        findings = []
+
+    lines = [
+        "**Moros AI scan finished**",
+        f"Target: `{target}`",
+        f"Status: `{status}`",
+        f"Triage items: {summary.get('triage_items', len(findings))}",
+        f"Validated: {summary.get('validated_findings', 0)} · Pending review: {summary.get('unverified_candidates', len(findings))}",
+    ]
+    if findings:
+        lines.append("Top results (titles and severity only):")
+        for finding in findings[:8]:
+            if not isinstance(finding, dict):
+                continue
+            title = re.sub(r"[\r\n`*_~|<>]", " ", str(finding.get("title", finding.get("type", "Finding"))))
+            severity = re.sub(r"[\r\n`*_~|<>]", " ", str(finding.get("severity", "Unassessed")))
+            validation = str(finding.get("validation_status", "unverified"))
+            lines.append(f"• {severity[:48]} — {title[:120]} ({validation[:32]})")
+
+    content = "\n".join(lines)
+    if len(content) > 1900:
+        content = content[:1890] + "…"
+    payload = json.dumps({"content": content, "allowed_mentions": {"parse": []}}).encode("utf-8")
+    request = urllib.request.Request(
+        webhook_url,
+        data=payload,
+        headers={"Content-Type": "application/json", "User-Agent": "Moros-AI-Scan-Notifier"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            response.read(1)
+        return "sent"
+    except urllib.error.HTTPError as exc:
+        return f"HTTP {exc.code}"
+    except Exception:
+        return "unavailable"
 
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
@@ -301,6 +380,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/config/llm":
             self.send_json(self.get_llm_config())
             return
+        if path == "/api/config/notifications":
+            self.send_json(self.get_notification_config())
+            return
 
         self.send_error_json("Unknown API endpoint", status=404)
 
@@ -344,8 +426,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_error_json("Invalid target name", status=400)
                 return
 
-            res = self.start_scan_job(target, skills, models, dry_run, scan_mode=scan_mode)
-            self.send_json(res)
+            try:
+                res = self.start_scan_job(target, skills, models, dry_run, scan_mode=scan_mode)
+                self.send_json(res)
+            except Exception as exc:
+                logger.exception("Failed to enqueue dashboard scan for %s", target)
+                self.send_json({"status": "error", "message": f"Could not start scan ({type(exc).__name__})."}, status=500)
             return
 
         # 3. Stop Scan
@@ -416,6 +502,54 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_json(res)
             return
 
+        if path == "/api/config/notifications":
+            res = self.save_notification_config(body)
+            self.send_json(res, status=200 if res.get("status") == "success" else 400)
+            return
+
+        # 8. Custom Skills Engine: Create Custom Skill
+        if path == "/api/skills/create":
+            skill_id = str(body.get("id", "")).strip()
+            title = str(body.get("title", "")).strip()
+            description = str(body.get("description", "")).strip()
+            category = str(body.get("category", "Custom Security")).strip()
+            checklist = body.get("checklist", [])
+            methodology = str(body.get("methodology", "")).strip()
+            if not skill_id or not title:
+                self.send_error_json("Skill ID and Title are required", status=400)
+                return
+            try:
+                registry = SkillRegistry()
+                created = registry.create_custom_skill(
+                    skill_id=skill_id,
+                    title=title,
+                    description=description,
+                    category=category,
+                    checklist=checklist,
+                    methodology=methodology
+                )
+                self.send_json({"status": "success", "message": f"Custom skill '{skill_id}' registered successfully", "skill": created})
+            except Exception as e:
+                self.send_error_json(str(e), status=400)
+            return
+
+        # 9. Custom Skills Engine: Delete Custom Skill
+        if path == "/api/skills/delete":
+            skill_id = str(body.get("id", "")).strip()
+            if not skill_id:
+                self.send_error_json("Skill ID is required", status=400)
+                return
+            try:
+                registry = SkillRegistry()
+                success = registry.delete_custom_skill(skill_id)
+                if success:
+                    self.send_json({"status": "success", "message": f"Skill '{skill_id}' deleted successfully"})
+                else:
+                    self.send_error_json(f"Skill '{skill_id}' not found", status=404)
+            except Exception as e:
+                self.send_error_json(str(e), status=400)
+            return
+
         self.send_error_json("Unknown API endpoint", status=404)
 
     def get_llm_config(self):
@@ -428,6 +562,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "is_available": client.is_available(),
             "has_api_key": bool(key),
         }
+
+    def get_notification_config(self):
+        return {"has_discord_webhook": bool(os.environ.get("DISCORD_WEBHOOK_URL", "").strip())}
+
+    def save_notification_config(self, body):
+        webhook_url = str(body.get("discord_webhook_url", "")).strip()
+        if not is_valid_discord_webhook_url(webhook_url):
+            return {"status": "error", "message": "Enter a valid HTTPS Discord webhook URL."}
+
+        env_file = PROJECT_ROOT / ".env"
+        try:
+            lines = env_file.read_text(encoding="utf-8").splitlines() if env_file.is_file() else []
+            lines = [line for line in lines if not line.strip().startswith("DISCORD_WEBHOOK_URL=")]
+            lines.append(f"DISCORD_WEBHOOK_URL={webhook_url}")
+            env_file.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        except OSError:
+            logger.exception("Failed to save Discord notification settings")
+            return {"status": "error", "message": "Could not save Discord settings locally."}
+
+        os.environ["DISCORD_WEBHOOK_URL"] = webhook_url
+        return {"status": "success", "message": "Discord scan notifications are configured."}
 
     def save_llm_config(self, body):
         provider = str(body.get("provider", "openai")).strip().lower()
@@ -549,7 +704,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "playwright_installed": playwright_ok,
             "active_scans_count": len(active_scans),
             "targets_count": len(list(TARGETS_DIR.glob("*"))) if TARGETS_DIR.exists() else 0,
-            "all_skills_count": len(ALL_SKILLS),
+            "all_skills_count": len(SkillRegistry().list_skills()),
         }
 
     def get_targets_list(self):
@@ -583,24 +738,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return sorted(targets, key=lambda x: x["name"])
 
     def get_skills_meta(self):
-        meta = []
-        for s in ALL_SKILLS:
-            skill_path = SKILLS_DIR / s / "SKILL.md"
-            desc = ""
-            if skill_path.exists():
-                content = skill_path.read_text(encoding="utf-8", errors="ignore")
-                # Parse description from frontmatter
-                desc_match = re.search(r"description:\s*>?\s*\n?\s*(.*?)(?:\n---|\n#)", content, re.DOTALL)
-                if desc_match:
-                    desc = desc_match.group(1).replace("\n", " ").strip()
-
-            meta.append({
-                "id": s,
-                "name": s,
-                "description": desc,
-                "has_definition": skill_path.exists(),
-            })
-        return meta
+        skills = SkillRegistry().list_skills()
+        for s in skills:
+            s["name"] = s.get("title", s["id"])
+            s["has_definition"] = True
+        return skills
 
     def get_target_summary(self, target_name):
         target_dir = TARGETS_DIR / target_name
@@ -1072,7 +1214,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             pass
 
         statuses = []
-        for s in ALL_SKILLS:
+        registry = SkillRegistry()
+        all_skills = registry.list_skills()
+        for s_obj in all_skills:
+            s = s_obj["id"]
             skill_log_dir = logs_dir / s
             has_logs = skill_log_dir.exists() and any(skill_log_dir.glob("*.log"))
 
@@ -1107,6 +1252,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             statuses.append({
                 "skill": s,
+                "name": s_obj.get("title", s),
+                "title": s_obj.get("title", s),
+                "category": s_obj.get("category", "General"),
+                "description": s_obj.get("description", ""),
+                "is_custom": s_obj.get("is_custom", False),
                 "state": state,
                 "review_status": review_status,
                 "logs_count": len(log_files),
@@ -1190,7 +1340,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "category": "secrets",
                         "severity": raw_sev,
                         "severity_level": sev_lvl,
-                        "endpoint": s.get("source_file", ""),
+                        # A local artifact path is provenance, never a target URL.
+                        "endpoint": s.get("url", ""),
                         "parameter": s.get("pattern_name", ""),
                         "payload": s.get("value_preview", ""),
                         "curl_command": "",
@@ -1380,6 +1531,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
                 active_scans[target]["status"] = "completed" if proc.returncode == 0 else "failed"
                 log_buffer.append(f"\n[Finished with exit code {proc.returncode}]\n")
+                notification = send_discord_scan_summary(target, active_scans[target]["status"])
+                if notification != "not configured":
+                    log_buffer.append(f"[Discord] Scan summary notification: {notification}.\n")
             except Exception as e:
                 active_scans[target]["status"] = "error"
                 log_buffer.append(f"\n[Execution error: {e}]\n")

@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import math
@@ -88,6 +89,11 @@ def is_benign(value: str) -> bool:
     return False
 
 
+def redacted_context(line: str, value: str) -> str:
+    """Keep useful surrounding evidence without persisting the credential itself."""
+    return line.strip().replace(value, "[REDACTED]")[:200]
+
+
 def scan_file(filepath: Path, min_entropy: float = 4.5,
               min_length: int = 16, max_length: int = 500) -> list:
     """Scan a single file for secrets."""
@@ -112,16 +118,20 @@ def scan_file(filepath: Path, min_entropy: float = 4.5,
                 "type": pattern_name,
                 "detection_method": "regex",
                 "pattern_name": pattern_name,
-                "value_preview": value_preview,
+                "value_preview": f"{value[:4]}…{value[-2:]}" if len(value) > 8 else "[redacted]",
+                "value_length": len(value),
+                "value_fingerprint": hashlib.sha256(value.encode("utf-8")).hexdigest(),
                 "source_file": str(filepath),
                 "line_number": line_num,
-                "context": lines[line_num - 1].strip()[:200] if line_num <= len(lines) else "",
+                "context": redacted_context(lines[line_num - 1], value) if line_num <= len(lines) else "",
                 "severity": "Triage Severity: MEDIUM — pending human review",
             })
 
     # Method 2: High-entropy string detection
     # Find quoted strings
-    string_pattern = re.compile(r"""(['"])([^'"]{16,500})\1""")
+    # Entropy is useful for compact token-like values, not arbitrary quoted
+    # prose or code fragments found in JSON-LD and minified JavaScript.
+    string_pattern = re.compile(r"""(['"])([A-Za-z0-9_./+=-]{20,200})\1""")
     for match in string_pattern.finditer(content):
         value = match.group(2)
 
@@ -134,7 +144,8 @@ def scan_file(filepath: Path, min_entropy: float = 4.5,
         entropy = shannon_entropy(value)
         if entropy >= min_entropy:
             line_num = content[:match.start()].count("\n") + 1
-            value_preview = value[:20] + "..." if len(value) > 20 else value
+            value_preview = f"{value[:4]}…{value[-2:]}"
+            value_fingerprint = hashlib.sha256(value.encode("utf-8")).hexdigest()
 
             # Check it wasn't already found by regex
             already_found = any(
@@ -148,9 +159,11 @@ def scan_file(filepath: Path, min_entropy: float = 4.5,
                     "detection_method": "entropy",
                     "entropy_score": round(entropy, 2),
                     "value_preview": value_preview,
+                    "value_length": len(value),
+                    "value_fingerprint": value_fingerprint,
                     "source_file": str(filepath),
                     "line_number": line_num,
-                    "context": lines[line_num - 1].strip()[:200] if line_num <= len(lines) else "",
+                    "context": redacted_context(lines[line_num - 1], value) if line_num <= len(lines) else "",
                     "severity": "Triage Severity: LOW — pending human review",
                 })
 

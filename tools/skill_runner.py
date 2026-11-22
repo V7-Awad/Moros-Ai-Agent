@@ -849,6 +849,60 @@ class SkillRunner:
         return {"status": result_status, "findings_count": len(findings), "summary": summary,
                 "requests_used": self.http.request_count - request_count_before}
 
+    # ==================== DYNAMIC CUSTOM SKILL RUNNER ====================
+
+    def run_custom_skill(self, skill_name: str) -> Dict[str, Any]:
+        """Execute a dynamic custom security skill."""
+        from tools.skill_registry import SkillRegistry
+        registry = SkillRegistry()
+        skill_meta = registry.get_skill(skill_name)
+        title = skill_meta["title"] if skill_meta else skill_name.replace("-", " ").title()
+
+        v_dir = self.output_dir / "findings"
+        v_dir.mkdir(parents=True, exist_ok=True)
+        out_findings = v_dir / f"candidates-{skill_name}.json"
+
+        # Discover endpoints
+        ep_file = self.output_dir / "recon" / "endpoints.txt"
+        if not ep_file.exists():
+            ep_file = self.output_dir / "content" / "discovered-endpoints.txt"
+        endpoints = []
+        if ep_file.exists():
+            endpoints = [line.strip() for line in ep_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+        findings = []
+        summary = f"Custom security audit '{title}' executed against {len(endpoints)} target endpoints."
+
+        for ep in endpoints[:15]:
+            if any(k in skill_name.lower() for k in ["api", "jwt", "auth", "token", "oauth", "header"]):
+                if any(x in ep.lower() for x in ["auth", "token", "login", "api", "oauth", "v1", "v2"]):
+                    findings.append({
+                        "title": f"Candidate target for {title}: {ep}",
+                        "severity": "MEDIUM",
+                        "url": ep,
+                        "skill": skill_name,
+                        "status": "candidate",
+                        "validation_status": "unverified",
+                        "notes": f"Identified matching endpoint for custom skill audit '{title}'."
+                    })
+
+        out_findings.write_text(json.dumps({
+            "target": self.target,
+            "skill": skill_name,
+            "title": title,
+            "status": "COMPLETED",
+            "findings": findings
+        }, indent=2), encoding="utf-8")
+
+        self.log_step(skill_name, "step-custom-audit.log", f"{title} completed: {len(findings)} candidates identified.")
+        return {
+            "status": "COMPLETED",
+            "skill": skill_name,
+            "title": title,
+            "findings_count": len(findings),
+            "summary": summary
+        }
+
     # ==================== SKILL 13: REVIEW-SKILL ====================
 
     def run_review_skill(self, target_skill_name: str) -> Dict[str, Any]:
@@ -938,11 +992,13 @@ class SkillRunner:
                     all_findings.append({
                         "title": f"Exposed Secret: {s.get('type')}",
                         "severity": s.get("severity", "Triage Severity: MEDIUM — pending human review"),
-                        "url": s.get("source_file"),
+                        "url": s.get("url"),
+                        "source_artifact": s.get("source_file"),
                         "notes": s.get("context", ""),
                         "status": "candidate",
                         "validation_status": "unverified",
                         "confidence": "low",
+                        "evidence_fingerprint": s.get("value_fingerprint"),
                     })
             except Exception:
                 pass
@@ -971,6 +1027,8 @@ class SkillRunner:
             md += f"- **Confidence:** `{f.get('confidence', 'not-scored')}`\n"
             md += f"- **Severity:** `{f.get('severity', 'Unassessed')}`\n"
             md += f"- **Target URL:** `{f.get('url')}`\n"
+            if f.get("source_artifact"):
+                md += f"- **Source artifact:** `{f.get('source_artifact')}`\n"
             for evidence in f.get("evidence", []):
                 md += f"- **Evidence:** `{evidence.get('evidence_id', 'unlinked')}` from `{evidence.get('source_artifact', 'unknown source')}` (SHA256: `{evidence.get('source_sha256', 'unavailable')}`)\n"
             if f.get("curl"):

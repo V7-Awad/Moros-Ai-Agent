@@ -980,7 +980,7 @@
             <strong>Skills Graph</strong>
             <small>Orchestration chain</small>
           </div>
-          <span class="nav-badge">15</span>
+          <span class="nav-badge" id="navSkillsCount">15</span>
         </div>
         <div class="part" id="tabBtn-findings" onclick="switchTab('findings')">
           <span class="chip">04</span>
@@ -1159,9 +1159,15 @@
 
       <!-- ==================== TAB 2: AGENT GRAPH & SKILLS ==================== -->
       <section id="tab-pipeline" style="display:none;" class="enter">
-        <div class="card" style="margin-bottom: 20px;">
-          <h1 style="margin:0 0 4px; font:700 20px 'Space Grotesk', system-ui, sans-serif; color:#fff;">Agent Multi-Skill Coordination Graph</h1>
-          <p class="hint" style="margin:0;">15 specialized micro-skills orchestrated with strict completion verification (Review-Skill)</p>
+        <div class="card" style="margin-bottom: 20px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+          <div>
+            <h1 style="margin:0 0 4px; font:700 20px 'Space Grotesk', system-ui, sans-serif; color:#fff;">Extensible Multi-Skill Orchestration Graph</h1>
+            <p class="hint" style="margin:0;">Dynamic security micro-skills orchestrated with ReAct loop & completion verification (Review-Skill)</p>
+          </div>
+          <button onclick="openNewSkillModal()" class="cta" style="padding:8px 16px; font-size:13px; display:inline-flex; align-items:center; gap:8px;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            Add Custom Skill
+          </button>
         </div>
         <div class="card" id="skillsTimeline">
           <!-- Populated dynamically with .sec timeline items -->
@@ -1382,7 +1388,7 @@
           <label style="display:block; margin-bottom:4px; font-weight:600; color:var(--mut);">Scan Profile / Execution Mode</label>
           <select id="scanModeSelect" class="mono" style="width:100%;">
             <option value="quick">Quick Scan (Recon, JS AST & Fast Endpoint Triage)</option>
-            <option value="deep">Deep Full Audit (All 14 Skills, Exploit Probes & Race Suite)</option>
+            <option value="deep">Deep Full Audit (All Registered Skills, Exploit Probes & Race Suite)</option>
             <option value="passive">Passive OSINT (Zero Active Probes, Wayback & Cert Logs)</option>
           </select>
         </div>
@@ -1424,6 +1430,57 @@
       <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:20px; padding-top:14px; border-top:1px solid var(--line);">
         <button onclick="closeModal('newTargetModal')" class="ghost">Cancel</button>
         <button onclick="submitNewTarget()" class="btn">Initialize</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. New Custom Skill Modal -->
+  <div id="newSkillModal" class="modal-backdrop hidden">
+    <div class="modal-box" style="max-width: 600px;">
+      <div class="modal-header">
+        <h3>Create New Custom Security Skill</h3>
+        <button class="modal-close" onclick="closeModal('newSkillModal')">&times;</button>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:14px; font-size:13px;">
+        <div class="note" style="border-left-color:var(--cyan);">
+          <b>Dynamic Custom Skill Engine:</b> Create unlimited custom offensive security skills. Once registered, Moros dynamically incorporates the skill into its ReAct orchestration pipeline, sub-agent assignments, and completion review gates.
+        </div>
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
+          <div>
+            <label style="display:block; margin-bottom:4px; font-weight:600; color:var(--mut);">Skill Identifier (slug)</label>
+            <input type="text" id="customSkillId" class="mono" style="width:100%;" placeholder="e.g. sqli-advanced, idor-audit">
+            <small class="hint">Alphanumeric and hyphens only.</small>
+          </div>
+          <div>
+            <label style="display:block; margin-bottom:4px; font-weight:600; color:var(--mut);">Category</label>
+            <select id="customSkillCategory" class="mono" style="width:100%;">
+              <option value="Server-Side Vulnerabilities">Server-Side Vulnerabilities</option>
+              <option value="Authentication & Session">Authentication & Session</option>
+              <option value="Client-Side Audit">Client-Side Audit</option>
+              <option value="API & Business Logic">API & Business Logic</option>
+              <option value="Cloud & Infrastructure">Cloud & Infrastructure</option>
+              <option value="Custom Security">Custom Security</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <label style="display:block; margin-bottom:4px; font-weight:600; color:var(--mut);">Skill Title / Display Name</label>
+          <input type="text" id="customSkillTitle" style="width:100%;" placeholder="e.g. Advanced SQL Injection Hunter">
+        </div>
+        <div>
+          <label style="display:block; margin-bottom:4px; font-weight:600; color:var(--mut);">Description & Objectives</label>
+          <textarea id="customSkillDesc" rows="3" style="width:100%; font-family:var(--font-sans);" placeholder="Describe the vulnerability class, detection criteria, and objectives..."></textarea>
+        </div>
+        <div>
+          <label style="display:block; margin-bottom:4px; font-weight:600; color:var(--mut);">Verification Checklist (One per line)</label>
+          <textarea id="customSkillChecklist" rows="3" class="mono" style="width:100%; font-size:12px;" placeholder="Inspect target reflection for syntax errors&#10;Verify time-based differential delay&#10;Generate reproducible cURL PoC"></textarea>
+          <small class="hint">Checklist items are strictly validated by the Review-Skill verification gate.</small>
+        </div>
+        <div id="newSkillResult" style="display:none; padding:10px 14px; border-radius:8px; font-size:12px;"></div>
+      </div>
+      <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:20px; padding-top:14px; border-top:1px solid var(--line);">
+        <button onclick="closeModal('newSkillModal')" class="ghost">Cancel</button>
+        <button onclick="submitNewCustomSkill()" class="btn" id="submitSkillBtn">Register Custom Skill</button>
       </div>
     </div>
   </div>
@@ -1549,18 +1606,18 @@
         const response = await fetch('/api/config/llm');
         const config = await response.json();
         const label = config.is_available
-          ? `LLM ${config.provider}/${config.model || 'default'}`
+          ? `LLM CONFIGURED · ${config.provider}/${config.model || 'default'}`
           : 'LLM OFFLINE';
         if (indicator) {
           indicator.textContent = label;
           indicator.style.color = config.is_available ? 'var(--ok)' : 'var(--warn)';
         }
         if (notice) notice.textContent = config.is_available
-          ? `Agent reasoning enabled: ${config.provider}/${config.model || 'default'}`
+          ? `Model configured: ${config.provider}/${config.model || 'default'}. Run Test Connection to verify access before scanning.`
           : 'No model is connected. Moros will use deterministic checks only; configure a model before an agentic scan.';
         const modalStatus = document.getElementById('llmCurrentStatus');
         if (modalStatus) modalStatus.textContent = config.is_available
-          ? `Connected: ${config.provider}/${config.model || 'default'}. Moros can use the configured model for agent decisions.`
+          ? `Configured: ${config.provider}/${config.model || 'default'}. Connection has not been verified; use Test Connection before scanning.`
           : 'No model is connected. Add a provider key or configure local Ollama, then test the connection. Until then, scans use deterministic checks only.';
         return config;
       } catch (error) {
@@ -1613,6 +1670,7 @@
       await refreshLlmStatus();
       await fetchSystemInfo();
       await fetchTargets();
+      await populateSkillsDropdown();
 
       const urlParams = new URLSearchParams(window.location.search);
       const urlTarget = urlParams.get('target');
@@ -1909,12 +1967,143 @@
       if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
     }
 
-    // --- Skills Timeline ---
+    // --- Skills Timeline & Dynamic Custom Skill Engine ---
+    function openNewSkillModal() {
+      document.getElementById('customSkillId').value = '';
+      document.getElementById('customSkillTitle').value = '';
+      document.getElementById('customSkillDesc').value = '';
+      document.getElementById('customSkillChecklist').value = '';
+      const resEl = document.getElementById('newSkillResult');
+      if (resEl) resEl.style.display = 'none';
+      openModal('newSkillModal');
+    }
+
+    async function submitNewCustomSkill() {
+      const id = document.getElementById('customSkillId').value.trim();
+      const title = document.getElementById('customSkillTitle').value.trim();
+      const category = document.getElementById('customSkillCategory').value;
+      const desc = document.getElementById('customSkillDesc').value.trim();
+      const checklistText = document.getElementById('customSkillChecklist').value.trim();
+      const checklist = checklistText ? checklistText.split('\n').map(s => s.trim()).filter(Boolean) : [];
+
+      const resEl = document.getElementById('newSkillResult');
+      const btn = document.getElementById('submitSkillBtn');
+
+      if (!id || !title) {
+        if (resEl) {
+          resEl.style.display = 'block';
+          resEl.style.background = 'rgba(255, 77, 94, .15)';
+          resEl.style.color = '#ffb3ba';
+          resEl.style.border = '1px solid rgba(255, 77, 94, .4)';
+          resEl.textContent = 'Skill ID and Display Title are required.';
+        }
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = 'Registering…';
+
+      try {
+        const res = await fetch('/api/skills/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: id,
+            title: title,
+            category: category,
+            description: desc,
+            checklist: checklist
+          })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+          closeModal('newSkillModal');
+          await fetchSkillsStatus();
+          await populateSkillsDropdown();
+        } else {
+          if (resEl) {
+            resEl.style.display = 'block';
+            resEl.style.background = 'rgba(255, 77, 94, .15)';
+            resEl.style.color = '#ffb3ba';
+            resEl.style.border = '1px solid rgba(255, 77, 94, .4)';
+            resEl.textContent = data.message || data.error || 'Failed to create skill.';
+          }
+        }
+      } catch (err) {
+        if (resEl) {
+          resEl.style.display = 'block';
+          resEl.style.background = 'rgba(255, 77, 94, .15)';
+          resEl.style.color = '#ffb3ba';
+          resEl.style.border = '1px solid rgba(255, 77, 94, .4)';
+          resEl.textContent = 'Network or server error: ' + err;
+        }
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Register Custom Skill';
+      }
+    }
+
+    async function deleteCustomSkill(skillId) {
+      if (!confirm(`Are you sure you want to delete custom skill "${skillId}"?`)) return;
+      try {
+        const res = await fetch('/api/skills/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: skillId })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+          await fetchSkillsStatus();
+          await populateSkillsDropdown();
+        } else {
+          alert(data.message || data.error || 'Failed to delete skill.');
+        }
+      } catch (err) {
+        alert('Error deleting skill: ' + err);
+      }
+    }
+
+    async function populateSkillsDropdown() {
+      try {
+        const res = await fetch('/api/skills');
+        const skills = await res.json();
+        const sel = document.getElementById('scanSkillsSelect');
+        if (!sel) return;
+        const currentVal = sel.value;
+        const customSkills = skills.filter(s => s.is_custom);
+        let customGroup = '';
+        if (customSkills.length > 0) {
+          customGroup = `<optgroup label="Custom Security Skills (${customSkills.length})">
+            ${customSkills.map(s => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.title || s.name)} (${escapeHtml(s.id)})</option>`).join('')}
+          </optgroup>`;
+        }
+        sel.innerHTML = `
+          <option value="all">Full Pipeline (All ${skills.length} Registered Skills)</option>
+          <option value="recon-subdomain,js-discover,js-analyze">Reconnaissance & JS AST Analysis</option>
+          <option value="xss-reflected,xss-stored,xss-dom">XSS Suite (Reflected, Stored, DOM)</option>
+          <option value="ssrf-identify,ssrf-post-exploit">SSRF Candidate Triage</option>
+          <option value="content-discovery">Content Discovery Only</option>
+          ${customGroup}
+        `;
+        if (currentVal) sel.value = currentVal;
+      } catch (e) {
+        console.error("Failed to populate skills dropdown:", e);
+      }
+    }
+
     async function fetchSkillsStatus() {
       try {
         const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/skills`);
         const skills = await res.json();
         const container = document.getElementById('skillsTimeline');
+
+        const countEl = document.getElementById('navSkillsCount');
+        if (countEl) countEl.textContent = skills.length;
+
+        if (!skills || skills.length === 0) {
+          container.innerHTML = '<div class="card"><p class="hint">No skills registered.</p></div>';
+          return;
+        }
 
         container.innerHTML = skills.map((s, idx) => {
           let secClass = "sec";
@@ -1936,15 +2125,33 @@
             badge = `<span class="tag warn">BLOCKED</span>`;
           }
 
+          const isCustom = s.is_custom;
+          const typeBadge = isCustom 
+            ? `<span class="tag warn" style="font-size:10px; padding:1px 6px;">CUSTOM</span>` 
+            : `<span class="tag info" style="font-size:10px; padding:1px 6px;">CORE</span>`;
+          const catBadge = s.category ? `<span class="tag low" style="font-size:10px; padding:1px 6px;">${escapeHtml(s.category)}</span>` : '';
+          const deleteBtn = isCustom 
+            ? `<button onclick="deleteCustomSkill('${escapeHtml(s.skill)}')" class="ghost" style="padding:2px 8px; font-size:11px; color:var(--bad); border-color:rgba(255,77,94,0.3); margin-left:6px;" title="Delete Custom Skill">&times; Delete</button>`
+            : '';
+
           return `
-            <div class="${secClass}">
+            <div class="${secClass}" style="position:relative;">
               <div class="dot">${idx + 1}</div>
-              <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:6px;">
-                <div>
-                  <h3 class="mono">${escapeHtml(s.skill)}</h3>
-                  <small>Logs: ${s.logs_count} files &bull; ${escapeHtml(s.review_status)}</small>
+              <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:8px;">
+                <div style="flex:1; min-width:240px;">
+                  <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                    <h3 class="mono" style="margin:0; font-size:14px; font-weight:700; color:#fff;">${escapeHtml(s.title || s.name || s.skill)}</h3>
+                    <code style="color:var(--cyan); font-size:11px;">${escapeHtml(s.skill)}</code>
+                    ${typeBadge}
+                    ${catBadge}
+                    ${deleteBtn}
+                  </div>
+                  ${s.description ? `<p style="margin:4px 0 6px; font-size:12px; color:var(--mut); line-height:1.4;">${escapeHtml(s.description)}</p>` : ''}
+                  <small style="color:var(--mut);">Logs: ${s.logs_count || 0} files &bull; Review: ${escapeHtml(s.review_status || 'unreviewed')}</small>
                 </div>
-                ${badge}
+                <div>
+                  ${badge}
+                </div>
               </div>
             </div>
           `;
@@ -2127,7 +2334,7 @@
       }
     }
 
-    // --- Multi-Agent Console & Dialogue (Strix Architecture) ---
+    // --- Multi-Agent Console & Dialogue ---
     let currentAgent = "coordinator";
     let activeRoster = [];
 
@@ -2648,7 +2855,7 @@
       if (badge && cfg) {
         const p = (cfg.provider || 'none').toUpperCase();
         const m = cfg.model ? ` (${cfg.model.split('/').pop()})` : '';
-        badge.textContent = cfg.is_available ? `LLM: ${p}${m}` : 'LLM OFFLINE';
+        badge.textContent = cfg.is_available ? `LLM CONFIGURED: ${p}${m}` : 'LLM OFFLINE';
         badge.style.color = cfg.is_available ? 'var(--ok)' : 'var(--warn)';
       }
     }

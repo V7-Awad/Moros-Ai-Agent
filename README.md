@@ -22,7 +22,7 @@
 
 ## ⚡ Executive Summary
 
-**MOROS AI** is an advanced, modular, agentic web penetration testing system designed for authorized dynamic (black-box) security assessments. Rather than relying on a single monolithic prompt, Moros coordinates **15 specialized micro-skills** via an explicit **ReAct (Reasoning + Action)** decision loop, structured tool registries, and sub-agent session lifecycles.
+**MOROS AI** is an advanced, modular, agentic web penetration testing system designed for authorized dynamic (black-box) security assessments. Rather than relying on a single monolithic prompt, Moros coordinates an **extensible multi-skill engine (unlimited custom skills + core built-in suites)** via an explicit **ReAct (Reasoning + Action)** decision loop, dynamic skill discovery registries, and sub-agent session lifecycles.
 
 Moros strictly enforces an **evidence-first result model**: candidates are tied to cryptographically verified SHA-256 artifact hashes, state-changing endpoints are held by blocking human gates, and all operations can be driven through an interactive, full-screen **Neon Cyber Web Dashboard**.
 
@@ -33,12 +33,12 @@ Moros strictly enforces an **evidence-first result model**: candidates are tied 
 - 🧠 **Autonomous ReAct Agent Runtime**: Real decision loop (`Thought` ➔ `Action` ➔ `Observation` ➔ `Final Answer`) with timeout-bounded tool calls and explicit `LLM_UNAVAILABLE` fallback.
 - ⚡ **Interactive Sub-Agent Directives**: Send direct operational instructions to specialist sub-agents (Recon, JS Hunter, XSS, SSRF, Auth/Race, Verifier, Reporting). Sub-agents execute registered tool chains, stream live observations, and record actions in durable sessions.
 - 📊 **OASIS SARIF 2.1.0 Export**: Standardized vulnerability export (`targets/<target>/output/report/findings.sarif`) with CWE mapping, STRIDE threat tags, and security-severity scores for direct ingestion into GitHub Code Scanning Alerts (`upload-sarif`) and ASPM platforms.
-- 🧭 **Multi-Tier Scan Profiles**: Execute targeted assessments using `--scan-mode quick` (fast surface recon & AST discovery), `--scan-mode deep` (full 14-skill exploit suite), or `--scan-mode passive` (zero active probing, purely OSINT & cert logs).
+- 🧭 **Multi-Tier Scan Profiles**: Execute targeted assessments using `--scan-mode quick` (fast surface recon & AST discovery), `--scan-mode deep` (full exploit suite & race audits), or `--scan-mode passive` (zero active probing, purely OSINT & cert logs).
 - 🎛️ **In-Dashboard LLM & API Management**: Switch models, configure endpoints, and validate API connections (DeepSeek, OpenAI, Anthropic Claude, Groq, Gemini, OpenRouter, Ollama, LM Studio, vLLM) directly inside the Web UI.
 - 🛑 **Enforceable Blocking Human-in-the-Loop (HITL)**: Deterministic approval gates (`WAITING_APPROVAL`) that genuinely suspend worker threads before executing state-changing actions (`POST`, `PUT`, `DELETE`, password resets, race conditions) until authorized by the operator.
 - 🖥️ **Full-Screen Neon Cyber Web Dashboard**: Ultra-responsive fluid monitoring interface featuring live multi-agent chat, tool terminal streams, PoC reproduction cards, and visual pipeline graphs.
 - 🧬 **Sub-Agent Session Tracking**: Child agent lifecycle tracking (`agents.jsonl`) recording runtime metrics, model allocations, and finding provenance.
-- 📦 **15 Modular Security Skills**: Subdomain intelligence, headless browser JS crawling, AST parameter extraction, secret scanning, content discovery, XSS (reflected/stored/DOM/blind), SSRF exploitation, and IdP race audits.
+- 📦 **Extensible Multi-Skill Architecture (Unlimited Custom Skills)**: Core offensive suites (subdomain intelligence, headless browser JS crawling, AST parameter extraction, secret scanning, content discovery, XSS suites, SSRF exploitation, IdP race audits) plus **dynamic operator-created custom skills** registered instantly via Web Dashboard or filesystem.
 - 🔒 **Scope & Compliance Gating**: Mandatory scope-of-work validation (`scope-of-work.md` / `.pdf`) before offensive execution; runs strictly in passive mode when unverified.
 - 🧪 **Comprehensive Automated Test Suite**: 100% test coverage across agent loops, blocking gates, durable runs, SARIF export, and sub-agent chat (`pytest`).
 
@@ -207,37 +207,46 @@ Safety and authorization are non-negotiable architectural requirements. Unlike p
 
 ---
 
-## 🧩 Adding Custom Micro-Skills
+## 🧩 Dynamic Custom Skills Engine (Unlimited Extensibility)
 
-Moros AI is designed for rapid modular extension:
+Moros AI is not restricted to a fixed set of checks. Operators can register an **unlimited number of custom security skills** dynamically via the Web Dashboard or CLI, and the ReAct orchestrator auto-discovers them instantly into the assessment pipeline:
 
-### Step 1: Create Skill Metadata
-Create `skills/<new-skill-name>/SKILL.md` defining the skill objective and methodology checklist.
+### Method 1: Web Dashboard (1-Click UI)
+1. Navigate to the **Skills Graph** tab in the Web Dashboard.
+2. Click **[+ Add Custom Skill]**.
+3. Fill in the Skill Identifier (e.g. `idor-audit`, `jwt-bypass`, `sqli-advanced`), Title, Category, Description, and Checklist.
+4. Click **Register Custom Skill**. The skill is immediately available for single-skill runs or full assessment pipelines.
 
-### Step 2: Implement Execution & Register Tools
-In `tools/skill_runner.py`, define the execution method and expose tools through `ToolRegistry`:
+### Method 2: Programmatic Python / CLI
 ```python
-def run_custom_audit(self) -> Dict[str, Any]:
-    registry = ToolRegistry()
-    registry.register("audit_tool", my_tool_func, "Executes specific security check")
-    
-    agent = AgentRunner(llm_client=self.llm)
-    context = AgentContext(target=self.target, target_dir=self.target_dir, skill="custom-audit", run_id="run-1")
-    
-    result = agent.run(
-        context=context,
-        tools=registry,
-        system_prompt="You are a specialized security agent.",
-        user_goal=f"Assess target {self.target}."
-    )
-    return {"status": "SUCCESS", "findings_count": len(result.findings)}
+from tools.skill_registry import SkillRegistry
+
+registry = SkillRegistry()
+registry.create_custom_skill(
+    skill_id="idor-audit",
+    title="Insecure Direct Object Reference Hunter",
+    category="Authentication & Session",
+    description="Tests REST and GraphQL endpoints for parameter tampering and horizontal privilege escalation.",
+    checklist=[
+        "Identify numeric and GUID entity IDs in request parameters",
+        "Replay requests with alternate tenant tokens",
+        "Verify data disclosure without authorized session",
+    ]
+)
 ```
 
-### Step 3: Register Dependencies in Orchestrator
-In `tools/hackbot_orchestrator.py`:
-- Add the skill name to `SKILL_ORDER`.
-- Define prerequisites in `SKILL_DEPENDENCIES` (e.g., `{"custom-audit": ["js-analyze"]}`).
-- Add the dispatch branch in `_execute_skill()`.
+### Method 3: Filesystem Auto-Discovery
+Simply create a folder under `skills/<skill-id>/` containing a `SKILL.md` file. Moros automatically discovers the folder, parses the frontmatter, and schedules it within the ReAct execution chain:
+
+```text
+skills/
+├── recon-subdomain/
+├── api-spec-discovery/
+├── ...
+└── idor-audit/
+    ├── SKILL.md
+    └── manifest.json
+```
 
 ---
 

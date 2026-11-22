@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 dashboard.py — Moros AI Web Dashboard Launcher
-Inspired by Strix's `strix view` command.
+Native standalone launcher for the Moros AI operations center.
 
 Usage:
     python dashboard.py

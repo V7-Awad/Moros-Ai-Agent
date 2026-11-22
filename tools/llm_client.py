@@ -180,7 +180,7 @@ class LLMClient:
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=60) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            return data["choices"][0]["message"]["content"]
+        return data["choices"][0]["message"]["content"]
 
     def _call_anthropic(self, prompt: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
         url = "https://api.anthropic.com/v1/messages"
@@ -229,8 +229,18 @@ class LLMClient:
             },
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raw_error = exc.read(4096).decode("utf-8", errors="replace")
+            try:
+                parsed_error = json.loads(raw_error)
+                error = parsed_error.get("error", parsed_error)
+                details = error.get("message", raw_error) if isinstance(error, dict) else str(error)
+            except json.JSONDecodeError:
+                details = raw_error or exc.reason
+            raise RuntimeError(f"Gemini API HTTP {exc.code}: {str(details)[:400]}") from None
         if data.get("status") != "completed":
             details = data.get("errors") or data.get("status") or "no completed response"
             raise RuntimeError(f"Gemini interaction did not complete: {details}")

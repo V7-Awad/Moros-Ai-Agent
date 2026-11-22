@@ -39,23 +39,31 @@ logging.basicConfig(
 )
 logger = logging.getLogger("hackbot-orchestrator")
 
-# Skill execution order (dependency chain)
-SKILL_ORDER = [
-    "recon-subdomain",         # 1. Discover attack surface
-    "api-spec-discovery",      # Import supplied API specifications
-    "js-discover",             # 2. Collect all JavaScript
-    "js-analyze",              # 3. Analyze JavaScript
-    "content-discovery",       # 4. Find hidden files/dirs
-    "xss-reflected",           # 5. Reflected XSS
-    "xss-stored",              # 6. Stored XSS
-    "xss-dom",                 # 7. DOM XSS
-    "xss-blind",               # 8. Blind XSS
-    "ssrf-identify",           # 9. SSRF identification
-    "ssrf-post-exploit",       # 10. SSRF post-exploitation
-    "idp-race-condition",      # 11. IdP redirect race
-    "auth-password-reset-bruteforce",  # 12. Auth brute-force
-    "report-conglomeration",   # 13. Final report (always last)
-]
+from tools.skill_registry import SkillRegistry
+
+# Dynamic Skill execution order (dependency chain)
+def get_dynamic_skill_order() -> List[str]:
+    try:
+        return SkillRegistry().get_execution_order()
+    except Exception:
+        return [
+            "recon-subdomain",
+            "api-spec-discovery",
+            "js-discover",
+            "js-analyze",
+            "content-discovery",
+            "xss-reflected",
+            "xss-stored",
+            "xss-dom",
+            "xss-blind",
+            "ssrf-identify",
+            "ssrf-post-exploit",
+            "idp-race-condition",
+            "auth-password-reset-bruteforce",
+            "report-conglomeration",
+        ]
+
+SKILL_ORDER = get_dynamic_skill_order()
 
 # Skills that require specific prior skills to have completed
 SKILL_DEPENDENCIES = {
@@ -375,7 +383,10 @@ class HackbotOrchestrator:
                 result["status"] = res.get("status", "COMPLETED")
                 result["notes"] = f"Generated report with {res.get('findings_count', 0)} findings"
             else:
-                result["status"] = "COMPLETED"
+                # Dynamic custom skill execution
+                res = self.runner.run_custom_skill(skill_name)
+                result["status"] = res.get("status", "COMPLETED")
+                result["notes"] = res.get("summary", f"Custom skill {skill_name} completed.")
         except Exception as e:
             logger.error(f"Error executing skill {skill_name}: {e}")
             result["status"] = "FAILED"
