@@ -112,14 +112,13 @@
       border: 1.5px solid rgba(0, 229, 255, .45);
       flex-shrink: 0;
     }
-    .brand {
-      font: 700 20px 'Space Grotesk', system-ui, sans-serif;
-      letter-spacing: .4px;
-      color: #fff;
-    }
-    .brand span {
-      color: var(--cyan);
-      text-shadow: 0 0 12px var(--cyan-glow);
+    .brand-wordmark {
+      width: 132px;
+      height: 30px;
+      object-fit: contain;
+      object-position: center;
+      display: block;
+      filter: drop-shadow(0 0 8px rgba(0, 119, 255, .42));
     }
     .target-picker {
       display: flex;
@@ -798,7 +797,7 @@
       <!-- Brand Element with Official MOROS Logo -->
       <div class="brand-wrap" onclick="switchTab('overview')">
         <img src="logo.png" alt="MOROS" class="brand-logo">
-        <span class="brand">MOROS <span>AI</span></span>
+        <img src="moros-wordmark.png" alt="MOROS" class="brand-wordmark">
       </div>
 
       <!-- Target Selector -->
@@ -837,8 +836,16 @@
             <small>Metrics & fingerprint</small>
           </div>
         </div>
-        <div class="part" id="tabBtn-pipeline" onclick="switchTab('pipeline')">
+        <div class="part" id="tabBtn-conversations" onclick="switchTab('conversations')">
           <span class="chip">02</span>
+          <div>
+            <strong>AI Agents & Chat</strong>
+            <small>Live console & sub-agents</small>
+          </div>
+          <span class="nav-badge" style="color:var(--cyan); border-color:var(--cyan);">LIVE</span>
+        </div>
+        <div class="part" id="tabBtn-pipeline" onclick="switchTab('pipeline')">
+          <span class="chip">03</span>
           <div>
             <strong>Skills Graph</strong>
             <small>Orchestration chain</small>
@@ -846,7 +853,7 @@
           <span class="nav-badge">15</span>
         </div>
         <div class="part" id="tabBtn-findings" onclick="switchTab('findings')">
-          <span class="chip">03</span>
+          <span class="chip">04</span>
           <div>
             <strong>Findings & PoCs</strong>
             <small>Verified vulnerabilities</small>
@@ -854,7 +861,7 @@
           <span class="nav-badge bad" id="navFindingsCount">0</span>
         </div>
         <div class="part" id="tabBtn-endpoints" onclick="switchTab('endpoints')">
-          <span class="chip">04</span>
+          <span class="chip">05</span>
           <div>
             <strong>Endpoints & APIs</strong>
             <small>Discovered routes</small>
@@ -862,7 +869,7 @@
           <span class="nav-badge" id="navEndpointsCount">0</span>
         </div>
         <div class="part" id="tabBtn-checkpoints" onclick="switchTab('checkpoints')">
-          <span class="chip">05</span>
+          <span class="chip">06</span>
           <div>
             <strong>HITL Checkpoints</strong>
             <small>Human approval gate</small>
@@ -870,14 +877,14 @@
           <span class="nav-badge warn" id="navCheckpointsBadge">HITL</span>
         </div>
         <div class="part" id="tabBtn-terminal" onclick="switchTab('terminal')">
-          <span class="chip">06</span>
+          <span class="chip">07</span>
           <div>
             <strong>Live Terminal</strong>
             <small>Streaming execution logs</small>
           </div>
         </div>
         <div class="part" id="tabBtn-report" onclick="switchTab('report')">
-          <span class="chip">07</span>
+          <span class="chip">08</span>
           <div>
             <strong>Final Report</strong>
             <small>Conglomerated audit</small>
@@ -937,9 +944,9 @@
         <!-- Metric Score Cards -->
         <div class="stats-grid">
           <div class="stat-card">
-            <span class="label">Total Findings</span>
+            <span class="label">Triage Items</span>
             <div id="statTotalFindings" class="score">0</div>
-            <span class="sub">Across all skills</span>
+            <span class="sub">Candidates and validated results</span>
           </div>
           <div class="stat-card crit">
             <span class="label" style="color:var(--bad);">Critical</span>
@@ -1031,13 +1038,13 @@
         </div>
       </section>
 
-      <!-- ==================== TAB 3: FINDINGS & EXPLOITS ==================== -->
+      <!-- ==================== TAB 3: TRIAGE & EVIDENCE ==================== -->
       <section id="tab-findings" style="display:none;" class="enter">
         <div class="card" style="margin-bottom: 20px;">
           <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
             <div>
-              <h1 style="margin:0 0 4px; font:700 20px 'Space Grotesk', system-ui, sans-serif; color:#fff;">Discovered Vulnerabilities & Exploit Evidence</h1>
-              <p class="hint" style="margin:0;">All findings include verified PoC curl commands and context</p>
+              <h1 style="margin:0 0 4px; font:700 20px 'Space Grotesk', system-ui, sans-serif; color:#fff;">Triage Candidates & Evidence</h1>
+              <p class="hint" style="margin:0;">Candidates are unverified until behavior is reproduced and reviewed</p>
             </div>
             <!-- Severity Filter Buttons -->
             <div style="display:flex; gap:6px; flex-wrap:wrap;">
@@ -1046,6 +1053,7 @@
               <button onclick="filterFindings('HIGH')" class="ghost filter-btn" data-filter="HIGH" style="color:var(--high);">High</button>
               <button onclick="filterFindings('MEDIUM')" class="ghost filter-btn" data-filter="MEDIUM" style="color:var(--warn);">Medium</button>
               <button onclick="filterFindings('LOW')" class="ghost filter-btn" data-filter="LOW" style="color:var(--blue);">Low</button>
+              <button onclick="filterFindings('UNASSESSED')" class="ghost filter-btn" data-filter="UNASSESSED">Unassessed</button>
             </div>
           </div>
         </div>
@@ -1118,7 +1126,79 @@
         <div class="terminal-box" id="terminalBox"><pre id="terminalOutput" style="margin:0; font-family:inherit;">Listening for agent execution logs...</pre></div>
       </section>
 
-      <!-- ==================== TAB 7: REPORT CONGLOMERATION ==================== -->
+      <!-- ==================== TAB 2: AI AGENTS & SUB-AGENTS CHAT ==================== -->
+      <section id="tab-conversations" style="display:none;" class="enter">
+        <div class="card" style="margin-bottom: 20px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+            <div>
+              <div style="display:flex; align-items:center; gap:10px; margin-bottom:4px;">
+                <h1 style="margin:0; font:700 22px 'Space Grotesk', system-ui, sans-serif; color:#fff;">AI Multi-Agent Command Console</h1>
+                <span class="pill ok"><b>MULTI-TIER LIVE</b></span>
+              </div>
+              <p class="hint" style="margin:0;">Interactive dialogue, live reasoning stream, and direct steering across specialized sub-agents (inspired by Strix architecture)</p>
+            </div>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <button onclick="fetchConversations()" class="ghost" style="padding:6px 14px; font-size:12px;">Refresh Stream</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Two Column Fluid Layout: Left Roster (310px) + Right Chat & Thought Stream (1fr) -->
+        <div style="display:grid; grid-template-columns: 310px minmax(0, 1fr); gap: 20px; align-items:start;">
+          
+          <!-- Left: Sub-Agents Roster Card -->
+          <div class="card" style="padding:16px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; padding-bottom:8px; border-bottom:1px solid var(--line);">
+              <h2 style="font-size:12px; text-transform:uppercase; letter-spacing:.08em; margin:0; color:var(--mut);">Sub-Agent Roster</h2>
+              <span class="hint mono" id="rosterCountBadge">8 Agents</span>
+            </div>
+            <div id="subagentsList" class="parts" style="gap:8px;">
+              <!-- Dynamically populated roster items -->
+            </div>
+          </div>
+
+          <!-- Right: Chat Dialogue & Thought Stream Card -->
+          <div class="card" style="display:flex; flex-direction:column; height: 720px; padding:0; overflow:hidden;">
+            <!-- Chat Header -->
+            <div style="padding:14px 18px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; background:rgba(6,6,6,.9);">
+              <div style="display:flex; align-items:center; gap:12px;">
+                <div id="activeAgentAvatar" style="width:36px; height:36px; border-radius:50%; background:linear-gradient(135deg,var(--blue),var(--cyan)); display:grid; place-items:center; box-shadow:0 0 14px var(--blue-glow); font-size:18px; flex-shrink:0;">🛡️</div>
+                <div>
+                  <div style="display:flex; align-items:center; gap:8px;">
+                    <strong id="activeAgentName" style="font:700 15px 'Space Grotesk', system-ui, sans-serif; color:#fff;">Coordinator Master</strong>
+                    <span id="activeAgentStatusBadge" class="tag ok" style="padding:2px 8px; font-size:10px;">ACTIVE</span>
+                  </div>
+                  <div id="activeAgentRole" class="hint" style="font-size:11px; margin-top:2px;">Attack tree orchestration & multi-agent planner</div>
+                </div>
+              </div>
+              <div class="mono" style="font-size:11px; color:var(--cyan); text-align:right;" id="activeAgentTier">Frontier (Claude 3.5 / GPT-4o)</div>
+            </div>
+
+            <!-- Messages Stream Area -->
+            <div id="conversationMessages" style="flex:1; overflow-y:auto; padding:18px; display:flex; flex-direction:column; gap:14px; background:#050505;">
+              <div class="hint" style="text-align:center; padding:20px;">Loading agent conversation...</div>
+            </div>
+
+            <!-- Steering Quick Prompts -->
+            <div style="padding:8px 14px; border-top:1px solid var(--line); background:rgba(8,8,8,.95); display:flex; gap:6px; overflow-x:auto;">
+              <button onclick="setPromptAndSend('Prioritize authentication and login endpoints for security review')" class="ghost" style="padding:4px 10px; font-size:11px; white-space:nowrap;">⚡ Prioritize Auth APIs</button>
+              <button onclick="setPromptAndSend('Explain critical findings and how to reproduce them with curl')" class="ghost" style="padding:4px 10px; font-size:11px; white-space:nowrap;">🔍 Explain Critical Findings</button>
+              <button onclick="setPromptAndSend('Verify scope compliance and ensure no out-of-scope targets are probed')" class="ghost" style="padding:4px 10px; font-size:11px; white-space:nowrap;">🛡️ Scope Compliance</button>
+              <button onclick="setPromptAndSend('Scan for SSRF vulnerabilities and cloud metadata leaks')" class="ghost" style="padding:4px 10px; font-size:11px; white-space:nowrap;">☁️ Probe for SSRF</button>
+              <button onclick="setPromptAndSend('Summarize discovered secrets and sensitive tokens from JS bundles')" class="ghost" style="padding:4px 10px; font-size:11px; white-space:nowrap;">🔑 Check Secrets</button>
+            </div>
+
+            <!-- Chat Input Area -->
+            <div style="padding:12px 16px; border-top:1px solid var(--line); background:rgba(6,6,6,.95); display:flex; gap:10px; align-items:center;">
+              <input type="text" id="conversationInput" placeholder="Send instruction or ask the agent... (Press Enter to send)" style="flex:1; padding:9px 14px; font-size:13px;" onkeydown="if(event.key === 'Enter') sendAgentMessage(event)">
+              <button id="btnSendChat" onclick="sendAgentMessage(event)" class="btn" style="padding:9px 20px;">Send Directive</button>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- ==================== TAB 8: REPORT CONGLOMERATION ==================== -->
       <section id="tab-report" style="display:none;" class="enter">
         <div class="card" style="margin-bottom: 20px;">
           <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
@@ -1205,11 +1285,6 @@
     </div>
   </div>
 
-  <!-- ==================== FOOTER SIGNATURE ==================== -->
-  <footer class="by">
-    <span>By <b>Raider</b></span>
-  </footer>
-
   <!-- ==================== CORE SCRIPT (100% OFFLINE) ==================== -->
   <script>
     let currentTarget = "";
@@ -1221,7 +1296,7 @@
 
     // --- Tab Navigation ---
     function switchTab(tabId) {
-      const tabs = ['overview', 'pipeline', 'findings', 'endpoints', 'checkpoints', 'terminal', 'report'];
+      const tabs = ['overview', 'pipeline', 'findings', 'endpoints', 'checkpoints', 'terminal', 'conversations', 'report'];
       tabs.forEach(t => {
         const el = document.getElementById(`tab-${t}`);
         const btn = document.getElementById(`tabBtn-${t}`);
@@ -1237,6 +1312,10 @@
         activeEl.classList.add('enter');
       }
       if (activeBtn) activeBtn.classList.add('active');
+
+      if (tabId === 'conversations') {
+        fetchConversations();
+      }
 
       // Close mobile sidebar if open
       const sb = document.getElementById('appSidebar');
@@ -1397,6 +1476,7 @@
       await fetchEndpoints();
       await fetchCheckpoints();
       await fetchLogsList();
+      await fetchConversations();
       await fetchReport();
     }
 
@@ -1552,7 +1632,7 @@
                 </div>
                 <div class="mono" style="font-size:12px; color:var(--mut);">${escapeHtml(f.endpoint || 'Global Scope')}</div>
               </div>
-              <span class="pill" style="font-size:11px;">PROVISIONAL AI FINDING</span>
+              <span class="pill" style="font-size:11px;">${escapeHtml((f.validation_status || 'unverified').toUpperCase())} · ${escapeHtml((f.confidence || 'not-scored').toUpperCase())}</span>
             </div>
 
             ${f.payload ? `
@@ -1579,6 +1659,7 @@
             <div id="${findingId}" class="ans" style="display:none; margin-top:10px;">
               <h4 style="margin:0 0 6px; font-size:13px; color:var(--cyan);">Remediation & Technical Evidence</h4>
               <p style="margin:0; font-size:13px; color:#cbd5e1; line-height:1.6;">${escapeHtml(f.details || 'No extended details recorded.')}</p>
+              ${f.evidence_ids && f.evidence_ids.length ? `<p class="mono" style="margin:8px 0 0; font-size:11px; color:var(--cyan);">Evidence IDs: ${escapeHtml(f.evidence_ids.join(', '))}</p>` : ''}
             </div>
           </div>
         `;
@@ -1799,6 +1880,202 @@
         }
       } catch (e) {
         // Silent poll error
+      }
+    }
+
+    // --- Multi-Agent Console & Dialogue (Strix Architecture) ---
+    let currentAgent = "coordinator";
+    let activeRoster = [];
+
+    async function fetchConversations() {
+      const container = document.getElementById('conversationMessages');
+      if (!container || !currentTarget) return;
+
+      try {
+        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/conversations?agent=${encodeURIComponent(currentAgent)}`);
+        const data = await res.json();
+        
+        // Update roster
+        if (data.roster && data.roster.length > 0) {
+          activeRoster = data.roster;
+          renderRoster(data.roster);
+          const badge = document.getElementById('rosterCountBadge');
+          if (badge) badge.textContent = `${data.roster.length} Agents`;
+        }
+
+        // Update active agent header
+        const agentMeta = activeRoster.find(a => a.id === currentAgent) || {
+          name: currentAgent.toUpperCase(),
+          role: "Specialist Sub-Agent",
+          tier: "Configured Engine",
+          status: "READY"
+        };
+        const nameEl = document.getElementById('activeAgentName');
+        const roleEl = document.getElementById('activeAgentRole');
+        const tierEl = document.getElementById('activeAgentTier');
+        const badgeEl = document.getElementById('activeAgentStatusBadge');
+        const avatarEl = document.getElementById('activeAgentAvatar');
+
+        if (nameEl) nameEl.textContent = agentMeta.name;
+        if (roleEl) roleEl.textContent = agentMeta.role;
+        if (tierEl) tierEl.textContent = agentMeta.tier;
+        if (badgeEl) {
+          badgeEl.textContent = agentMeta.status;
+          badgeEl.className = agentMeta.status === "ACTIVE" ? "tag ok" : (agentMeta.status === "COMPLETED" ? "tag info" : "tag low");
+        }
+        if (avatarEl) {
+          avatarEl.textContent = getAgentEmoji(currentAgent);
+        }
+
+        // Render messages
+        const messages = data.messages || [];
+        renderMessages(messages);
+      } catch (e) {
+        console.error("Conversation fetch error:", e);
+      }
+    }
+
+    function getAgentEmoji(agentId) {
+      if (agentId === "coordinator") return "🛡️";
+      if (agentId === "recon-agent") return "🌐";
+      if (agentId === "js-analyzer") return "⚡";
+      if (agentId === "xss-specialist") return "🎯";
+      if (agentId === "ssrf-specialist") return "☁️";
+      if (agentId === "auth-race-specialist") return "🔑";
+      if (agentId === "review-verifier") return "🔍";
+      if (agentId === "report-specialist") return "📄";
+      return "🤖";
+    }
+
+    function renderRoster(roster) {
+      const list = document.getElementById('subagentsList');
+      if (!list) return;
+
+      list.innerHTML = roster.map(a => {
+        const isSelected = a.id === currentAgent;
+        const emoji = getAgentEmoji(a.id);
+        const statusColor = a.status === "ACTIVE" ? "var(--ok)" : (a.status === "COMPLETED" ? "var(--mut)" : "var(--cyan)");
+
+        return `
+          <div class="part ${isSelected ? 'active' : ''}" onclick="selectAgent('${escapeJs(a.id)}')" style="padding:10px 12px; cursor:pointer;">
+            <div style="width:30px; height:30px; border-radius:6px; background:#070707; border:1px solid var(--line); display:grid; place-items:center; font-size:14px; flex-shrink:0;">
+              ${emoji}
+            </div>
+            <div style="overflow:hidden; flex:1;">
+              <strong style="font-size:13px; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; color:#fff;">${escapeHtml(a.name)}</strong>
+              <small style="font-size:11px; display:block; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; color:var(--mut);">${escapeHtml(a.role)}</small>
+            </div>
+            <span class="mono" style="font-size:10px; color:${statusColor}; font-weight:700;">${escapeHtml(a.status)}</span>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function selectAgent(agentId) {
+      currentAgent = agentId;
+      fetchConversations();
+    }
+
+    function renderMessages(messages) {
+      const container = document.getElementById('conversationMessages');
+      if (!container) return;
+
+      if (messages.length === 0) {
+        container.innerHTML = `<p class="hint" style="text-align:center; padding:20px;">No messages yet. Send an instruction to begin dialogue with this agent.</p>`;
+        return;
+      }
+
+      container.innerHTML = messages.map(m => {
+        const isUser = m.role === 'user';
+        if (isUser) {
+          return `
+            <div style="display:flex; justify-content:flex-end; gap:10px; margin-left:60px;">
+              <div style="background:linear-gradient(135deg, rgba(2, 119, 255, .28), rgba(2, 119, 255, .12)); border:1px solid rgba(2, 119, 255, .45); border-radius:12px; padding:12px 16px; color:#fff; font-size:13px; box-shadow:0 0 16px rgba(2, 119, 255, .15);">
+                <div style="display:flex; justify-content:space-between; gap:12px; margin-bottom:4px; font-size:11px;">
+                  <strong style="color:var(--cyan);">OPERATOR</strong>
+                  <span class="hint mono">${escapeHtml(m.timestamp ? m.timestamp.slice(11, 19) : '')}</span>
+                </div>
+                <div style="white-space:pre-wrap;">${escapeHtml(m.content)}</div>
+              </div>
+              <div style="width:32px; height:32px; border-radius:50%; background:var(--blue); display:grid; place-items:center; font-size:14px; flex-shrink:0;">👤</div>
+            </div>
+          `;
+        } else {
+          const emoji = getAgentEmoji(m.agent || currentAgent);
+          return `
+            <div style="display:flex; justify-content:flex-start; gap:10px; margin-right:60px;">
+              <div style="width:32px; height:32px; border-radius:50%; background:linear-gradient(135deg,var(--blue),var(--cyan)); display:grid; place-items:center; font-size:14px; flex-shrink:0; box-shadow:0 0 10px var(--blue-glow);">${emoji}</div>
+              <div style="background:rgba(11, 11, 11, .9); border:1px solid var(--line); border-radius:12px; padding:14px 18px; color:#cbd5e1; font-size:13px; line-height:1.6; flex:1;">
+                <div style="display:flex; justify-content:space-between; gap:12px; margin-bottom:6px; font-size:11px;">
+                  <strong style="color:var(--cyan); letter-spacing:.04em;">${escapeHtml((m.agent || currentAgent).toUpperCase())} &bull; <span class="mono" style="color:var(--mut);">${escapeHtml(m.model || m.provider || 'Core')}</span></strong>
+                  <span class="hint mono">${escapeHtml(m.timestamp ? m.timestamp.slice(11, 19) : '')}</span>
+                </div>
+                <div>${renderOfflineMarkdown(m.content)}</div>
+              </div>
+            </div>
+          `;
+        }
+      }).join('');
+
+      container.scrollTop = container.scrollHeight;
+    }
+
+    async function sendAgentMessage(event) {
+      if (event) event.preventDefault();
+      const input = document.getElementById('conversationInput');
+      const btn = document.getElementById('btnSendChat');
+      const message = (input.value || '').trim();
+      if (!currentTarget || !message) return;
+
+      input.value = '';
+      input.disabled = true;
+      if (btn) btn.textContent = 'Thinking...';
+
+      // Optimistically append user message to container
+      const container = document.getElementById('conversationMessages');
+      if (container) {
+        const tempDiv = document.createElement('div');
+        tempDiv.style.cssText = "display:flex; justify-content:flex-end; gap:10px; margin-left:60px;";
+        tempDiv.innerHTML = `
+          <div style="background:linear-gradient(135deg, rgba(2, 119, 255, .28), rgba(2, 119, 255, .12)); border:1px solid rgba(2, 119, 255, .45); border-radius:12px; padding:12px 16px; color:#fff; font-size:13px;">
+            <div style="display:flex; justify-content:space-between; gap:12px; margin-bottom:4px; font-size:11px;">
+              <strong style="color:var(--cyan);">OPERATOR</strong>
+              <span class="hint mono">just now</span>
+            </div>
+            <div style="white-space:pre-wrap;">${escapeHtml(message)}</div>
+          </div>
+          <div style="width:32px; height:32px; border-radius:50%; background:var(--blue); display:grid; place-items:center; font-size:14px; flex-shrink:0;">👤</div>
+        `;
+        container.appendChild(tempDiv);
+        container.scrollTop = container.scrollHeight;
+      }
+
+      try {
+        const res = await fetch('/api/conversations/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target: currentTarget, agent: currentAgent, message: message })
+        });
+        const data = await res.json();
+        if (data.status !== 'success') {
+          alert(data.error || data.message || 'Failed to send message');
+        } else {
+          await fetchConversations();
+        }
+      } catch (e) {
+        alert('Chat request failed: ' + e);
+      } finally {
+        input.disabled = false;
+        if (btn) btn.textContent = 'Send Directive';
+        input.focus();
+      }
+    }
+
+    function setPromptAndSend(text) {
+      const input = document.getElementById('conversationInput');
+      if (input) {
+        input.value = text;
+        sendAgentMessage();
       }
     }
 

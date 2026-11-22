@@ -41,6 +41,12 @@ class SkillRunner:
         self.llm = llm_client
         self._recorded_evidence_ids = None
 
+    @staticmethod
+    def _host_is_in_root_scope(host: str, root: str) -> bool:
+        host = str(host).strip().lower().rstrip(".")
+        root = str(root).strip().lower().rstrip(".")
+        return bool(root) and (host == root or host.endswith("." + root))
+
     def record_candidate_evidence(self, skill: str, finding_type: str, artifact_path: Path,
                                   endpoint: dict, claim: str) -> dict:
         """Record a content-addressed source reference; endpoint metadata is not exploit proof."""
@@ -135,7 +141,7 @@ class SkillRunner:
                     name = item.get("name_value", "")
                     for sub in name.split("\n"):
                         sub = sub.strip().lower().lstrip("*.")
-                        if sub.endswith(self.target) and sub:
+                        if self._host_is_in_root_scope(sub, self.target):
                             subdomains.add(sub)
             self.log_step(skill, "step-02-ct-logs.log", f"crt.sh returned {len(subdomains)} unique subdomains.")
         except Exception as e:
@@ -151,7 +157,7 @@ class SkillRunner:
                 for row in rows[1:]:
                     parsed = urllib.parse.urlparse(row[0])
                     host = parsed.netloc.split(":")[0].lower()
-                    if host.endswith(self.target) and host:
+                    if self._host_is_in_root_scope(host, self.target):
                         subdomains.add(host)
             self.log_step(skill, "step-03-web-archives.log", f"Total subdomains after archives: {len(subdomains)}")
         except Exception as e:
@@ -230,12 +236,24 @@ class SkillRunner:
                 except Exception as e:
                     self.log_step(skill, "step-02-import.log", f"Import error: {e}")
 
-        if not imported and not out_file.exists():
-            out_file.write_text(json.dumps({
-                "target": self.target, "status": "NO_SPEC_PROVIDED",
-                "total_endpoints": 0, "endpoints": [],
-            }, indent=2), encoding="utf-8")
-            self.log_step(skill, "step-02-import.log", "No local specification found; no endpoints were inferred or fabricated.")
+        if not imported:
+            # Preserve only an inventory that names a real source document. Replace legacy
+            # fallback inventories (which had no provenance) with an explicit empty state.
+            has_provenance = False
+            if out_file.is_file():
+                try:
+                    prior = json.loads(out_file.read_text(encoding="utf-8"))
+                    has_provenance = bool(prior.get("source_file"))
+                except (OSError, json.JSONDecodeError):
+                    pass
+            if not has_provenance:
+                out_file.write_text(json.dumps({
+                    "target": self.target, "status": "NO_SPEC_PROVIDED",
+                    "total_endpoints": 0, "endpoints": [],
+                }, indent=2), encoding="utf-8")
+                self.log_step(skill, "step-02-import.log", "No local specification found; no endpoints were inferred or fabricated.")
+            else:
+                self.log_step(skill, "step-02-import.log", "No new local specification found; retained the existing source-linked inventory.")
 
         return {"status": "SUCCESS" if imported else "NO_SPEC", "imported": imported, "endpoints": 0}
 

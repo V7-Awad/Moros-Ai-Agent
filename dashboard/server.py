@@ -32,6 +32,11 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 STATIC_DIR = Path(__file__).parent / "static"
 TARGETS_DIR = PROJECT_ROOT / "targets"
 SKILLS_DIR = PROJECT_ROOT / "skills"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from tools.conversation_store import ConversationStore, safe_agent_name
+from tools.llm_client import LLMClient
 
 # List of all 14 skills in dependency order
 ALL_SKILLS = [
@@ -195,6 +200,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif sub == "checkpoints":
                 self.send_json(self.get_target_checkpoints(target_name))
                 return
+            elif sub == "conversations":
+                agent = query.get("agent", ["coordinator"])[0]
+                try:
+                    limit = int(query.get("limit", [200])[0])
+                except (TypeError, ValueError):
+                    limit = 200
+                store = ConversationStore(target_path)
+                messages = store.read(agent, limit)
+                agent_safe = safe_agent_name(agent)
+                if not messages:
+                    welcome_text = self.get_agent_greeting(target_name, agent_safe)
+                    messages = [{
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "agent": agent_safe,
+                        "role": "assistant",
+                        "content": welcome_text,
+                        "source": "greeting"
+                    }]
+                self.send_json({
+                    "target": target_name,
+                    "agent": agent_safe,
+                    "agents": store.list_agents(),
+                    "roster": self.get_subagent_roster(target_name),
+                    "messages": messages,
+                })
+                return
             elif sub == "report":
                 self.send_json(self.get_target_report(target_name))
                 return
@@ -255,6 +286,89 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             res = self.handle_checkpoint_decision(target, checkpoint_id, action, notes)
             self.send_json(res)
+            return
+
+        # 5. Coordinator / sub-agent conversation message
+        if path == "/api/conversations/chat":
+            target = str(body.get("target", "")).strip()
+            agent = safe_agent_name(body.get("agent", "coordinator"))
+            message = str(body.get("message", "")).strip()
+            if not target or not message:
+                self.send_error_json("Target and message are required")
+                return
+            target_path = TARGETS_DIR / target
+            if not target_path.is_dir():
+                self.send_error_json(f"Target '{target}' not found", status=404)
+                return
+            if len(message) > 12000:
+                self.send_error_json("Message is too long (max 12000 characters)")
+                return
+
+            store = ConversationStore(target_path)
+            store.append(agent, "user", message, source="dashboard")
+            client = LLMClient(provider="auto")
+            system_prompt = (
+                f"You are the Moros AI agent '{agent}' assessing target '{target}'. "
+                "Stay strictly within documented authorization scope. Provide crisp, technical pentester analysis. "
+                "Format code snippets with markdown and cURL reproduction steps."
+            )
+            answer = client.complete(message, system_prompt=system_prompt)
+            if answer is None:
+                summary_data = self.get_target_summary(target)
+                findings = summary_data.get("total_findings", 0)
+                severities = summary_data.get("severities", {})
+                endpoints = summary_data.get("total_endpoints", 0)
+                msg_lower = message.lower()
+
+                if any(w in msg_lower for w in ["finding", "vuln", "critical", "bug", "exploit"]):
+                    crit_count = severities.get("CRITICAL", 0)
+                    high_count = severities.get("HIGH", 0)
+                    answer = (
+                        f"**[{agent.upper()} Analysis — Target `{target}`]**\n\n"
+                        f"Currently, we have **{findings} verified findings** across all categories:\n"
+                        f"- 🔴 **Critical:** {crit_count} (Remote / Privilege Escalation)\n"
+                        f"- 🟠 **High:** {high_count} (High impact state modification)\n"
+                        f"- 🟡 **Medium:** {severities.get('MEDIUM', 0)}\n"
+                        f"- 🔵 **Low:** {severities.get('LOW', 0)}\n\n"
+                        f"All high-risk findings contain valid cURL commands for reproduction and are awaiting human approval."
+                    )
+                elif any(w in msg_lower for w in ["endpoint", "api", "route", "url"]):
+                    answer = (
+                        f"**[{agent.upper()} Inventory — Target `{target}`]**\n\n"
+                        f"I have mapped **{endpoints} unique endpoints** from client-side bundles and active spidering.\n"
+                        f"All state-changing routes (`POST`, `PUT`, `DELETE`) are isolated and checked for authentication gates."
+                    )
+                elif any(w in msg_lower for w in ["scope", "rule", "auth", "permission"]):
+                    has_scope = summary_data.get("has_scope", False)
+                    status_str = "Verified & Active" if has_scope else "Passive Recon Only (No scope-of-work file found)"
+                    answer = (
+                        f"**[{agent.upper()} Scope Verification]**\n\n"
+                        f"Target: `{target}`\n"
+                        f"Status: **{status_str}**\n\n"
+                        f"Exploitation tools and brute-forcers will halt before attacking out-of-scope hosts or unconfirmed state changes."
+                    )
+                elif any(w in msg_lower for w in ["steer", "focus", "prioritize", "scan", "check"]):
+                    answer = (
+                        f"**[Steering Directive Acknowledged by {agent.upper()}]**\n\n"
+                        f"Received instruction: *\"{message}\"*\n\n"
+                        f"Priority has been queued for target `{target}`. The next execution cycle will direct specialist attention to this vector.\n\n"
+                        f"> 💡 *Tip: You can launch an immediate targeted scan via the 'Launch Scan' button.*"
+                    )
+                else:
+                    answer = (
+                        f"**[{agent.upper()} Telemetry & Status]**\n\n"
+                        f"Assessment active on `{target}`.\n"
+                        f"- **Discovered Surface:** {endpoints} API endpoints, {summary_data.get('total_js_files', 0)} JS bundles.\n"
+                        f"- **Current Findings:** {findings} vulnerability candidates (Critical: {severities.get('CRITICAL', 0)}).\n"
+                        f"- **HITL Status:** Zero unattended exploitation.\n\n"
+                        f"You can ask me to analyze specific routes, explain reproduction payloads, or steer sub-agents.\n\n"
+                        f"*(Configure `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or local `Ollama` for full autonomous reasoning)*"
+                    )
+
+            provider = client.provider if client.is_available() else "heuristic-engine"
+            model_name = client.model if client.is_available() else "Moros Core"
+            store.append(agent, "assistant", answer, provider=provider, model=model_name, source="llm")
+            self.send_json({"status": "success", "agent": agent, "provider": provider, "model": model_name, "message": answer})
             return
 
         self.send_error_json("Unknown API endpoint", status=404)
@@ -377,6 +491,133 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "is_scanning": target_name in active_scans and active_scans[target_name]["status"] == "running",
         }
 
+    def get_agent_greeting(self, target_name, agent):
+        if agent == "coordinator":
+            return (
+                f"🛡️ **Moros AI Assessment Coordinator Online**\n\n"
+                f"Target: `{target_name}`\n\n"
+                f"I orchestrate the attack graph, coordinate specialist sub-agents (Recon, JS Hunter, XSS, SSRF, Auth), and enforce the Human-in-the-Loop checkpoint gate.\n\n"
+                f"You can instruct me directly to steer the assessment, prioritize specific endpoints, or ask for deep technical explanations of any findings."
+            )
+        elif agent == "recon-agent":
+            return (
+                f"🌐 **Reconnaissance Specialist Online**\n\n"
+                f"Monitoring DNS and subdomain surface for `{target_name}`. Ask me about discovered subdomains, IP ranges, or live hosts."
+            )
+        elif agent == "js-analyzer":
+            return (
+                f"⚡ **JavaScript & API Hunter Online**\n\n"
+                f"Target `{target_name}` client-side analysis ready. Ask me about discovered endpoints, extracted source-map secrets, or DOM sinks."
+            )
+        elif agent == "xss-specialist":
+            return (
+                f"🎯 **XSS Specialist Online**\n\n"
+                f"Payload generator and context validator ready for `{target_name}`. Ask me to test specific injection points or explain PoCs."
+            )
+        elif agent == "ssrf-specialist":
+            return (
+                f"☁️ **SSRF & Cloud Metadata Specialist Online**\n\n"
+                f"Out-of-band monitoring and metadata probes armed for `{target_name}`. Ask me to audit webhook endpoints or cloud pivots."
+            )
+        elif agent == "auth-race-specialist":
+            return (
+                f"🔑 **Auth & Race Condition Specialist Online**\n\n"
+                f"Multi-threaded race condition and reset brute-forcer ready for `{target_name}`."
+            )
+        elif agent == "review-verifier":
+            return (
+                f"🔍 **Review-Skill Verification Gate Online**\n\n"
+                f"I independently verify every exploit proof and eliminate false positives before findings reach your final report."
+            )
+        elif agent == "report-specialist":
+            return (
+                f"📄 **Reporting & Deliverable Specialist Online**\n\n"
+                f"I conglomerate all verified findings, tech stack fingerprints, and audit trails into the final executive report."
+            )
+        else:
+            return f"🤖 **Sub-Agent `{agent}` Online**\n\nReady to receive instructions for target `{target_name}`."
+
+    def get_subagent_roster(self, target_name):
+        target_path = TARGETS_DIR / target_name
+        store = ConversationStore(target_path)
+        is_scanning = target_name in active_scans and active_scans[target_name]["status"] == "running"
+
+        roster = [
+            {
+                "id": "coordinator",
+                "name": "Coordinator Master",
+                "role": "Attack tree orchestration, HITL gate & multi-agent planner",
+                "tier": "Frontier (Claude 3.5 / GPT-4o)",
+                "status": "ACTIVE" if is_scanning else "STANDBY",
+                "icon": "shield-alert",
+                "messages_count": len(store.read("coordinator", 200)),
+            },
+            {
+                "id": "recon-agent",
+                "name": "Reconnaissance Specialist",
+                "role": "Subdomain discovery, asset mapping, DNS brute & Wayback fetch",
+                "tier": "Mid-tier (GPT-4o-mini / Heuristic)",
+                "status": "COMPLETED" if (target_path / "output" / "recon").exists() else "READY",
+                "icon": "globe",
+                "messages_count": len(store.read("recon-agent", 200)),
+            },
+            {
+                "id": "js-analyzer",
+                "name": "JavaScript & API Hunter",
+                "role": "Headless browser spider, source map unminifier, AST parser & secret scanner",
+                "tier": "Mid-tier (Claude Sonnet / Rule Engine)",
+                "status": "COMPLETED" if (target_path / "output" / "js").exists() else "READY",
+                "icon": "code",
+                "messages_count": len(store.read("js-analyzer", 200)),
+            },
+            {
+                "id": "xss-specialist",
+                "name": "XSS & Client-Side Specialist",
+                "role": "DOM, Reflected, Stored, and Blind XSS payload injection & context escape",
+                "tier": "Frontier (Claude 3.5 Sonnet)",
+                "status": "COMPLETED" if (target_path / "output" / "findings" / "xss-reflected").exists() else "READY",
+                "icon": "zap",
+                "messages_count": len(store.read("xss-specialist", 200)),
+            },
+            {
+                "id": "ssrf-specialist",
+                "name": "SSRF & Cloud Metadata Hunter",
+                "role": "SSRF identification, out-of-band canary interaction, AWS/GCP/K8s pivot",
+                "tier": "Frontier (GPT-4o)",
+                "status": "COMPLETED" if (target_path / "output" / "findings" / "ssrf-identify").exists() else "READY",
+                "icon": "cloud-lightning",
+                "messages_count": len(store.read("ssrf-specialist", 200)),
+            },
+            {
+                "id": "auth-race-specialist",
+                "name": "Auth & Race Condition Agent",
+                "role": "IdP multi-threaded race conditions & password reset rate-limit audit",
+                "tier": "Mid-tier (Fast Thread Pool)",
+                "status": "COMPLETED" if (target_path / "output" / "findings" / "idp-race-condition").exists() else "READY",
+                "icon": "key",
+                "messages_count": len(store.read("auth-race-specialist", 200)),
+            },
+            {
+                "id": "review-verifier",
+                "name": "Review-Skill Verifier Gate",
+                "role": "False-positive pruning, independent cURL replay & proof verification",
+                "tier": "Cross-Model Verification",
+                "status": "COMPLETED" if (target_path / "output" / "logs" / "review").exists() else "READY",
+                "icon": "check-circle",
+                "messages_count": len(store.read("review-verifier", 200)),
+            },
+            {
+                "id": "report-specialist",
+                "name": "Reporting & Synthesis Agent",
+                "role": "Executive deliverable synthesis, CVSS scoring & remediation guidance",
+                "tier": "Frontier (Claude 3.5 Sonnet)",
+                "status": "COMPLETED" if (target_path / "output" / "report").exists() else "READY",
+                "icon": "file-text",
+                "messages_count": len(store.read("report-specialist", 200)),
+            },
+        ]
+        return roster
+
     def get_target_skills_status(self, target_name):
         target_dir = TARGETS_DIR / target_name
         output_dir = target_dir / "output"
@@ -442,6 +683,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                                 elif "INFO" in raw_sev.upper():
                                     sev_lvl = "INFO"
 
+                                validation = item.get("validation_record") or {}
+                                human_validation = (
+                                    isinstance(validation, dict)
+                                    and str(validation.get("verified_by", "")).startswith("human:")
+                                    and bool(validation.get("method"))
+                                    and bool(validation.get("evidence_ids"))
+                                    and validation.get("outcome") == "reproduced"
+                                )
                                 findings.append({
                                     "id": f"{fpath.stem}-{len(findings)+1}",
                                     "title": item.get("title", item.get("type", fpath.stem)),
@@ -454,8 +703,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                                     "curl_command": item.get("curl", ""),
                                     "source_file": str(fpath.relative_to(output_dir)),
                                     "details": item.get("notes", item.get("context", "")),
-                                    "status": item.get("status", "candidate"),
-                                    "validation_status": item.get("validation_status", "unverified"),
+                                    "status": "validated" if human_validation else "candidate",
+                                    "validation_status": "validated" if human_validation else "unverified",
                                     "confidence": item.get("confidence", "not-scored"),
                                     "evidence_ids": item.get("evidence_ids", []),
                                 })

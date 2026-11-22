@@ -29,6 +29,7 @@ if str(tools_dir) not in sys.path:
 
 from llm_client import LLMClient
 from skill_runner import SkillRunner
+from conversation_store import ConversationStore
 
 logging.basicConfig(
     level=logging.INFO,
@@ -104,6 +105,7 @@ class HackbotOrchestrator:
         output_base = self.target_dir / "output"
         for subdir in ["recon", "js", "content-discovery", "findings", "logs", "report", "api"]:
             (output_base / subdir).mkdir(parents=True, exist_ok=True)
+        self.conversations = ConversationStore(self.target_dir)
 
         # Initialize LLM client and real skill execution engine
         self.llm = LLMClient(provider=self.models[0] if self.models else "auto")
@@ -323,12 +325,20 @@ class HackbotOrchestrator:
 
     def _log_event(self, skill: str, status: str, details: str):
         """Log an orchestration event."""
+        timestamp = datetime.now(timezone.utc).isoformat()
         self.execution_log.append({
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": timestamp,
             "skill": skill,
             "status": status,
             "details": details,
         })
+        # Keep a human-readable agent timeline alongside the structured log.
+        self.conversations.append(
+            skill,
+            "tool",
+            f"[{status}] {details}" if details else f"[{status}]",
+            source="orchestrator",
+        )
 
     def _write_orchestration_log(self):
         """Write the full orchestration log to disk."""

@@ -26,7 +26,7 @@ The system enforces this by **requiring a `scope-of-work` file** in every target
 
 Moros AI is NOT one giant agent that "hacks everything." It is a collection of **15 small, single-purpose skills** orchestrated by a harness, with built-in self-review and human checkpoints.
 
-Moros uses an evidence-first result model: endpoint heuristics create unverified triage candidates, source artifacts receive SHA-256-linked evidence IDs, and reports distinguish candidates from independently validated findings. Missing inputs are reported as missing; the pipeline does not invent sample endpoints or evidence to make a run look complete. See [the agent differentiation note](docs/agent-differentiation.md).
+Moros uses an evidence-first result model: endpoint heuristics create unverified triage candidates, candidate source artifacts receive SHA-256-linked evidence IDs, and reports distinguish candidates from independently validated findings. Missing inputs are reported as missing; the pipeline does not invent sample endpoints or evidence to make a run look complete. See [the agent differentiation note](docs/agent-differentiation.md).
 
 ```
 ┌─────────────────────────────────────────────────┐
