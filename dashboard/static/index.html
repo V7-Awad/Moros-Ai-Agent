@@ -308,6 +308,7 @@
       top: 86px;
       max-height: calc(100vh - 106px);
       overflow-y: auto;
+      overflow-x: hidden;
       display: flex;
       flex-direction: column;
       gap: 16px;
@@ -385,20 +386,13 @@
       background: rgba(2, 119, 255, .12);
       color: #fff;
     }
-    .part > div:nth-child(2) {
-      min-width: 0;
-      flex: 1;
-    }
     .part strong {
       display: block;
       font: 600 14px 'Space Grotesk', system-ui, sans-serif;
-      white-space: nowrap;
     }
     .part small {
-      display: block;
       color: var(--mut);
       font-size: 11px;
-      white-space: nowrap;
     }
     .nav-badge {
       margin-left: auto;

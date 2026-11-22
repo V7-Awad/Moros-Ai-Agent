@@ -853,7 +853,7 @@ class SkillRunner:
 
     def run_custom_skill(self, skill_name: str) -> Dict[str, Any]:
         """Execute a dynamic custom security skill."""
-        from tools.skill_registry import SkillRegistry
+        from skill_registry import SkillRegistry
         registry = SkillRegistry()
         skill_meta = registry.get_skill(skill_name)
         title = skill_meta["title"] if skill_meta else skill_name.replace("-", " ").title()
@@ -1046,7 +1046,7 @@ class SkillRunner:
         # Generate SARIF 2.1.0 sidecar for GitHub Code Scanning and CI/CD
         sarif_file = report_dir / "findings.sarif"
         try:
-            from tools.sarif_exporter import write_sarif_report
+            from sarif_exporter import write_sarif_report
             write_sarif_report(sarif_file, all_findings, target=self.target)
         except Exception as e:
             self.log_step(skill, "step-08-sarif-error.log", f"SARIF export failed: {e}")

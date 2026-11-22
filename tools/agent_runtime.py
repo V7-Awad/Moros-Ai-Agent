@@ -13,14 +13,20 @@ Implements Priority 0 & Priority 1 of the Moros AI Architecture:
 import json
 import logging
 import re
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from tools.conversation_store import ConversationStore, safe_agent_name
-from tools.llm_client import LLMClient
+# Ensure sibling modules are importable when run from any working directory.
+_tools_dir = Path(__file__).parent.resolve()
+if str(_tools_dir) not in sys.path:
+    sys.path.insert(0, str(_tools_dir))
+
+from conversation_store import ConversationStore, safe_agent_name
+from llm_client import LLMClient
 
 logger = logging.getLogger("agent-runtime")
 

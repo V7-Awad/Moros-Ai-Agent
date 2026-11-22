@@ -21,6 +21,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import List
 
 # Import LLM client and Skill execution runner
 tools_dir = Path(__file__).parent.resolve()
@@ -39,7 +40,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("hackbot-orchestrator")
 
-from tools.skill_registry import SkillRegistry
+from skill_registry import SkillRegistry
 
 # Dynamic Skill execution order (dependency chain)
 def get_dynamic_skill_order() -> List[str]:
