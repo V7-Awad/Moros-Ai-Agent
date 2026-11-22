@@ -175,16 +175,16 @@
     .pill.bad b { color: var(--bad); }
 
     .prog {
-      height: 2px;
-      background: rgba(2, 119, 255, .15);
+      height: 1.5px;
+      background: rgba(255, 255, 255, .04);
       width: 100%;
     }
     .prog i {
       display: block;
       height: 100%;
       width: 0%;
-      background: linear-gradient(90deg, var(--blue), var(--cyan));
-      box-shadow: 0 0 12px var(--cyan);
+      background: linear-gradient(90deg, rgba(2, 119, 255, .35), rgba(0, 229, 255, .45), rgba(2, 119, 255, .35));
+      box-shadow: 0 0 5px rgba(0, 229, 255, .2);
       transition: width .4s ease;
     }
 
@@ -424,11 +424,16 @@
       font: 600 12px Inter, system-ui, sans-serif;
       display: inline-grid;
       place-items: center;
-      transition: .2s;
+      transition: all .2s ease;
       flex-shrink: 0;
     }
     .chip:hover { border-color: var(--blue); color: #fff; }
-    .chip.cur { border-color: var(--cyan); color: #fff; box-shadow: inset 0 0 0 1px var(--cyan); }
+    .part.active .chip {
+      border-color: var(--cyan);
+      background: rgba(0, 229, 255, .14);
+      color: #fff;
+      box-shadow: inset 0 0 0 1px var(--cyan), 0 0 8px rgba(0, 229, 255, .25);
+    }
     .chip.ok { background: rgba(25, 230, 176, .12); border-color: rgba(25, 230, 176, .5); color: var(--ok); }
     .chip.bad { background: rgba(255, 77, 94, .14); border-color: rgba(255, 77, 94, .6); color: var(--bad); }
 
@@ -678,6 +683,9 @@
       padding: 24px;
       width: 100%;
       max-width: 540px;
+      max-height: calc(100vh - 32px);
+      overflow-y: auto;
+      overscroll-behavior: contain;
       box-shadow: 0 0 45px var(--blue-glow);
       animation: rise .25s ease both;
     }
@@ -952,7 +960,7 @@
       <div class="h2" style="margin-top:0;">OPERATIONS</div>
       <nav class="parts">
         <div class="part active" id="tabBtn-overview" onclick="switchTab('overview')">
-          <span class="chip cur">01</span>
+          <span class="chip">01</span>
           <div>
             <strong>Overview</strong>
             <small>Metrics & fingerprint</small>
@@ -1462,6 +1470,19 @@
           <small id="currentKeyMasked" style="display:block; margin-top:4px; color:var(--mut);"></small>
         </div>
         <div id="llmTestResult" style="display:none; padding:10px 14px; border-radius:8px; font-size:12px;"></div>
+        <div class="note" style="border-left-color:var(--cyan);">
+          <b>Discord scan notifications</b>
+          <p style="margin:4px 0 0;">After a scan finishes, MOROS sends the target, status, counts, and up to 8 finding titles/severities. Raw evidence and secrets are excluded. No test message is sent when saving.</p>
+        </div>
+        <div>
+          <label for="discordWebhookInput" style="display:block; margin-bottom:4px; font-weight:600; color:var(--mut);">Discord Webhook URL</label>
+          <input type="password" id="discordWebhookInput" class="mono" style="width:100%;" placeholder="https://discord.com/api/webhooks/…">
+          <small id="discordWebhookStatus" class="hint" style="display:block; margin-top:4px;">Checking notification settings…</small>
+          <div id="discordWebhookResult" style="display:none; margin-top:8px; padding:8px 10px; border-radius:7px; font-size:12px;"></div>
+        </div>
+        <div style="display:flex; justify-content:flex-end;">
+          <button type="button" onclick="saveDiscordWebhook()" class="ghost" style="font-size:12px;">Save Discord Webhook</button>
+        </div>
       </div>
       <div style="display:flex; justify-content:space-between; align-items:center; margin-top:20px; padding-top:14px; border-top:1px solid var(--line);">
         <button onclick="testLlmConnection()" class="ghost" id="testLlmBtn">Test Connection</button>
@@ -2383,10 +2404,10 @@
           currentTarget = target;
           await refreshTargetData();
         } else {
-          alert(data.message || "Failed to start scan");
+          alert(data.message || data.error || "Failed to start scan");
         }
       } catch (e) {
-        alert("Scan launch error: " + e);
+        alert("Dashboard API request failed: " + e);
       }
     }
 
@@ -2458,6 +2479,56 @@
         onLlmProviderChange();
       } catch (e) {
         console.error("Failed to load LLM config:", e);
+      }
+      await loadDiscordWebhookStatus();
+    }
+
+    async function loadDiscordWebhookStatus() {
+      const status = document.getElementById('discordWebhookStatus');
+      try {
+        const res = await fetch('/api/config/notifications');
+        const data = await res.json();
+        status.textContent = data.has_discord_webhook
+          ? 'Webhook is configured and hidden.'
+          : 'No webhook configured.';
+      } catch (e) {
+        status.textContent = 'Could not load notification settings.';
+      }
+    }
+
+    async function saveDiscordWebhook() {
+      const input = document.getElementById('discordWebhookInput');
+      const result = document.getElementById('discordWebhookResult');
+      const webhookUrl = input.value.trim();
+      result.style.display = 'block';
+      result.style.background = 'rgba(241, 194, 107, 0.15)';
+      result.style.color = '#ffe6b0';
+      result.style.border = '1px solid rgba(241, 194, 107, 0.4)';
+      result.textContent = 'Saving notification settings locally…';
+      try {
+        const res = await fetch('/api/config/notifications', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ discord_webhook_url: webhookUrl })
+        });
+        const data = await res.json();
+        result.textContent = data.message || data.error || 'Could not save Discord settings.';
+        if (data.status === 'success') {
+          result.style.background = 'rgba(25, 230, 176, 0.15)';
+          result.style.color = '#b9f7e6';
+          result.style.border = '1px solid rgba(25, 230, 176, 0.4)';
+          input.value = '';
+          await loadDiscordWebhookStatus();
+        } else {
+          result.style.background = 'rgba(255, 77, 94, 0.15)';
+          result.style.color = '#ffb3ba';
+          result.style.border = '1px solid rgba(255, 77, 94, 0.4)';
+        }
+      } catch (e) {
+        result.style.background = 'rgba(255, 77, 94, 0.15)';
+        result.style.color = '#ffb3ba';
+        result.style.border = '1px solid rgba(255, 77, 94, 0.4)';
+        result.textContent = 'Could not contact the local dashboard.';
       }
     }
 
