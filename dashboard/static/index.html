@@ -385,13 +385,20 @@
       background: rgba(2, 119, 255, .12);
       color: #fff;
     }
+    .part > div:nth-child(2) {
+      min-width: 0;
+      flex: 1;
+    }
     .part strong {
       display: block;
       font: 600 14px 'Space Grotesk', system-ui, sans-serif;
+      white-space: nowrap;
     }
     .part small {
+      display: block;
       color: var(--mut);
       font-size: 11px;
+      white-space: nowrap;
     }
     .nav-badge {
       margin-left: auto;
@@ -970,7 +977,7 @@
           <span class="chip">02</span>
           <div>
             <strong>AI Agents & Chat</strong>
-            <small>Live console & sub-agents</small>
+            <small>Live console & agents</small>
           </div>
           <span class="nav-badge" style="color:var(--cyan); border-color:var(--cyan);">LIVE</span>
         </div>
@@ -986,7 +993,7 @@
           <span class="chip">04</span>
           <div>
             <strong>Findings & Triage</strong>
-            <small>Candidates and validated findings</small>
+            <small>Validated findings</small>
           </div>
           <span class="nav-badge bad" id="navFindingsCount">0</span>
         </div>
@@ -1002,15 +1009,15 @@
           <span class="chip">06</span>
           <div>
             <strong>Manual Decisions</strong>
-            <small>Manual decision records</small>
+            <small>Approval gates</small>
           </div>
-          <span class="nav-badge warn" id="navCheckpointsBadge">DECISIONS</span>
+          <span class="nav-badge warn" id="navCheckpointsBadge">CLEAR</span>
         </div>
         <div class="part" id="tabBtn-terminal" onclick="switchTab('terminal')">
           <span class="chip">07</span>
           <div>
             <strong>Live Terminal</strong>
-            <small>Streaming execution logs</small>
+            <small>Streaming logs</small>
           </div>
         </div>
         <div class="part" id="tabBtn-report" onclick="switchTab('report')">
