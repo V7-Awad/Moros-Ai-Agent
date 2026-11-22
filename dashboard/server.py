@@ -294,6 +294,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_json({"active_runs": active_runs})
             return
 
+        # 7. Current LLM configuration
+        if path == "/api/config/llm":
+            self.send_json(self.get_llm_config())
+            return
+
         self.send_error_json("Unknown API endpoint", status=404)
 
     def handle_api_post(self, path, body):
@@ -425,7 +430,133 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_json({"status": "success", "agent": agent, "provider": provider, "model": model_name, "message": answer})
             return
 
+        # 6. Save LLM Configuration directly from Dashboard
+        if path == "/api/config/llm":
+            res = self.save_llm_config(body)
+            self.send_json(res)
+            return
+
+        # 7. Test LLM Connection from Dashboard
+        if path == "/api/config/llm/test":
+            res = self.test_llm_config(body)
+            self.send_json(res)
+            return
+
         self.send_error_json("Unknown API endpoint", status=404)
+
+    def get_llm_config(self):
+        client = LLMClient(provider="auto")
+        key = client.api_key or ""
+        masked_key = (key[:4] + "*" * max(0, len(key) - 8) + key[-4:]) if len(key) >= 10 else ("*" * len(key) if key else "")
+        return {
+            "provider": client.provider,
+            "model": client.model,
+            "base_url": client.base_url or "",
+            "is_available": client.is_available(),
+            "has_api_key": bool(key),
+            "masked_key": masked_key,
+        }
+
+    def save_llm_config(self, body):
+        provider = str(body.get("provider", "openai")).strip().lower()
+        model = str(body.get("model", "")).strip()
+        api_key = str(body.get("api_key", "")).strip()
+        base_url = str(body.get("base_url", "")).strip()
+
+        env_file = PROJECT_ROOT / ".env"
+        env_lines = []
+        if env_file.is_file():
+            try:
+                env_lines = env_file.read_text(encoding="utf-8").splitlines()
+            except Exception:
+                pass
+
+        env_dict = {}
+        for line in env_lines:
+            line_str = line.strip()
+            if line_str and not line_str.startswith("#") and "=" in line_str:
+                k, v = line_str.split("=", 1)
+                env_dict[k.strip()] = v.strip().strip('"').strip("'")
+
+        # Map according to provider
+        if provider == "deepseek":
+            if api_key:
+                env_dict["DEEPSEEK_API_KEY"] = api_key
+            env_dict["DEEPSEEK_MODEL"] = model or "deepseek-chat"
+        elif provider == "groq":
+            if api_key:
+                env_dict["GROQ_API_KEY"] = api_key
+            env_dict["GROQ_MODEL"] = model or "llama-3.3-70b-versatile"
+        elif provider == "anthropic":
+            if api_key:
+                env_dict["ANTHROPIC_API_KEY"] = api_key
+            env_dict["ANTHROPIC_MODEL"] = model or "claude-3-5-sonnet-20241022"
+        elif provider == "gemini":
+            if api_key:
+                env_dict["GEMINI_API_KEY"] = api_key
+            env_dict["GEMINI_MODEL"] = model or "gemini-1.5-flash"
+        elif provider == "openrouter":
+            if api_key:
+                env_dict["OPENROUTER_API_KEY"] = api_key
+            env_dict["OPENROUTER_MODEL"] = model or "meta-llama/llama-3.1-8b-instruct"
+        elif provider == "ollama":
+            env_dict["OLLAMA_BASE_URL"] = base_url or "http://localhost:11434"
+            env_dict["OLLAMA_MODEL"] = model or "llama3"
+        elif provider == "custom" or base_url:
+            if base_url:
+                env_dict["OPENAI_BASE_URL"] = base_url
+            if api_key:
+                env_dict["OPENAI_API_KEY"] = api_key
+            env_dict["OPENAI_MODEL"] = model or "default"
+        else:  # standard openai
+            if api_key:
+                env_dict["OPENAI_API_KEY"] = api_key
+            env_dict["OPENAI_MODEL"] = model or "gpt-4o-mini"
+
+        # Apply to live os.environ
+        for k, v in env_dict.items():
+            os.environ[k] = v
+
+        # Write back to .env
+        out_content = "# Moros AI Environment Configuration (Saved from Dashboard)\n"
+        for k, v in env_dict.items():
+            out_content += f"{k}={v}\n"
+        env_file.write_text(out_content, encoding="utf-8")
+
+        return {
+            "status": "success",
+            "message": "LLM configuration saved to .env and activated successfully",
+            "config": self.get_llm_config()
+        }
+
+    def test_llm_config(self, body):
+        provider = str(body.get("provider", "openai")).strip().lower()
+        model = str(body.get("model", "")).strip() or None
+        api_key = str(body.get("api_key", "")).strip() or None
+        base_url = str(body.get("base_url", "")).strip() or None
+
+        if provider == "deepseek":
+            base_url = "https://api.deepseek.com/v1"
+            model = model or "deepseek-chat"
+            provider = "openai"
+        elif provider == "groq":
+            base_url = "https://api.groq.com/openai/v1"
+            model = model or "llama-3.3-70b-versatile"
+            provider = "openai"
+        elif provider == "custom":
+            provider = "openai"
+
+        try:
+            client = LLMClient(provider=provider, model=model, api_key=api_key, base_url=base_url)
+            if not client.is_available():
+                return {"status": "error", "message": "LLM credentials missing or incomplete"}
+            resp = client.complete("Ping. Respond with 'PONG' only.", max_tokens=15)
+            if resp:
+                return {"status": "success", "message": f"Connected to {client.provider}/{client.model}! Response: {resp.strip()}"}
+            else:
+                return {"status": "error", "message": f"Connection failed: {client.provider} returned empty response"}
+        except Exception as e:
+            return {"status": "error", "message": f"Connection test failed: {e}"}
 
     # ==================== DATA COLLECTORS ====================
 
@@ -718,7 +849,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         items = content if isinstance(content, list) else content.get("findings", [content])
                         for item in items:
                             if isinstance(item, dict) and ("type" in item or "title" in item or "url" in item):
-                                raw_sev = item.get("severity", "AI-proposed severity: UNASSESSED — pending evidence and human review")
+                                raw_sev = item.get("severity", "Triage Severity: UNASSESSED — pending evidence and human review")
                                 sev_lvl = "UNASSESSED" if "UNASSESSED" in raw_sev.upper() else "MEDIUM"
                                 if "CRITICAL" in raw_sev.upper():
                                     sev_lvl = "CRITICAL"
@@ -763,7 +894,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             try:
                 s_data = json.loads(secrets_file.read_text(encoding="utf-8"))
                 for s in s_data.get("findings", []):
-                    raw_sev = s.get("severity", "AI-proposed severity: MEDIUM — pending human review")
+                    raw_sev = s.get("severity", "Triage Severity: MEDIUM — pending human review")
                     sev_lvl = "MEDIUM"
                     if "HIGH" in raw_sev.upper():
                         sev_lvl = "HIGH"
@@ -800,7 +931,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "id": f"gadget-{len(findings)+1}",
                         "title": f"Dangerous Sink: {g.get('type')}",
                         "category": "dom-xss",
-                        "severity": "AI-proposed severity: MEDIUM — pending human review",
+                        "severity": "Triage Severity: MEDIUM — pending human review",
                         "severity_level": "MEDIUM",
                         "endpoint": g.get("source_file", ""),
                         "parameter": g.get("controllable_source", ""),
@@ -935,6 +1066,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "--target", target,
                 "--skills", skills,
                 "--models", models,
+                "--scan-mode", "quick",
+                "--https-only",
+                "--max-http-requests", "40",
+                "--request-delay", "0.4",
             ]
             if dry_run:
                 cmd.append("--dry-run")
@@ -947,6 +1082,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     bufsize=1,
                     cwd=str(PROJECT_ROOT),
                 )

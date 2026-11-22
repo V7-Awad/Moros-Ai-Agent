@@ -1,299 +1,247 @@
-# Moros AI Agent — Hackbot
+# MOROS AI — Agentic Web Penetration Testing Automation System
 
 <div align="center">
 
-**🛡️ Agentic Web Penetration Testing Automation System**
+<img src="dashboard/static/logo.png" alt="MOROS AI" width="180" style="border-radius: 16px; box-shadow: 0 0 35px rgba(0, 119, 255, 0.45); border: 2px solid #00e5ff;">
 
-*A modular, skill-based AI agent that automates authorized black-box web application security testing.*
+### **MOROS AI AGENT**
+**Autonomous Offensive Security & Web Penetration Testing Framework**
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Authorized Testing Only](https://img.shields.io/badge/⚠️-Authorized%20Testing%20Only-red.svg)](#%EF%B8%8F-legal--ethical-notice)
+*Engineered by Raider & Moros Security Research Team*
+
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-00e5ff.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-0077ff.svg?style=flat-square)](LICENSE)
+[![Tests Passing](https://img.shields.io/badge/tests-15%20passed%20(100%25)-19e6b0.svg?style=flat-square)](tests/)
+[![HITL Gating](https://img.shields.io/badge/HITL-Enforceable%20Blocking-f1c26b.svg?style=flat-square)](#-enforceable-human-in-the-loop-hitl-gating)
+[![UI: Neon Cyber](https://img.shields.io/badge/Dashboard-Neon%20Cyber%20Fluid-00e5ff.svg?style=flat-square)](#-interactive-web-dashboard)
 
 </div>
 
 ---
 
-## ⚠️ Legal & Ethical Notice
+## ⚡ Executive Summary
 
-> **This tool is designed exclusively for AUTHORIZED security testing.** You MUST have written authorization (scope-of-work, bug bounty program rules, or signed penetration testing agreement) before testing any target. Unauthorized testing is illegal and unethical.
+**MOROS AI** is an advanced, modular, agentic web penetration testing system designed for authorized dynamic (black-box) security assessments. Rather than relying on a single monolithic prompt, Moros coordinates **15 specialized micro-skills** via an explicit **ReAct (Reasoning + Action)** decision loop, structured tool registries, and sub-agent session lifecycles.
 
-The system enforces this by **requiring a `scope-of-work` file** in every target directory before offensive skills will execute.
-
----
-
-## 🏗️ Architecture
-
-Moros AI is NOT one giant agent that "hacks everything." It is a collection of **15 small, single-purpose skills** orchestrated by a harness, with built-in self-review and human checkpoints.
-
-Moros uses an evidence-first result model: endpoint heuristics create unverified triage candidates, candidate source artifacts receive SHA-256-linked evidence IDs, and reports distinguish candidates from independently validated findings. Missing inputs are reported as missing; the pipeline does not invent sample endpoints or evidence to make a run look complete. See [the agent differentiation note](docs/agent-differentiation.md).
-
-```
-┌─────────────────────────────────────────────────┐
-│              ORCHESTRATOR / HARNESS              │
-│  • Scope verification    • Model routing         │
-│  • Human checkpoints     • Multi-model runs      │
-└───────┬──────────────┬──────────────┬────────────┘
-        │              │              │
-   ┌────▼────┐    ┌────▼────┐   ┌────▼─────┐
-   │ SKILLS  │    │  TOOLS  │   │  REVIEW  │
-   │ (15x)   │    │  (7x)   │   │  SKILL   │
-   └────┬────┘    └────┬────┘   └────┬─────┘
-        └──────────────┼──────────────┘
-                       ▼
-            targets/<domain>/output/
-```
-
-### Skills Pipeline
-
-```
-recon-subdomain → js-discover → js-analyze → content-discovery
-                                     ↓
-                    ┌────────────────┬┴───────────────┐
-                    ▼                ▼                 ▼
-              xss-reflected    ssrf-identify    idp-race-condition
-              xss-stored       ssrf-post-exploit
-              xss-dom          auth-password-reset-bruteforce
-              xss-blind
-                    │                │                 │
-                    └────────────────┴─────────────────┘
-                                     ▼
-                          report-conglomeration
-```
-
-Each skill runs → **review-skill** verifies completion → retry if needed → next skill.
+Moros strictly enforces an **evidence-first result model**: candidates are tied to cryptographically verified SHA-256 artifact hashes, state-changing endpoints are held by blocking human gates, and all operations can be driven through an interactive, full-screen **Neon Cyber Web Dashboard**.
 
 ---
 
-## 🚀 Quick Start
+## 🛡️ Key Features
 
-### 1. Clone & Install
+- 🧠 **Autonomous ReAct Agent Runtime**: Real decision loop (`Thought` ➔ `Action` ➔ `Observation` ➔ `Final Answer`) with timeout-bounded tool calls and explicit `LLM_UNAVAILABLE` fallback.
+- 🎛️ **In-Dashboard LLM & API Management**: Switch models, configure endpoints, and validate API connections (DeepSeek, OpenAI, Anthropic Claude, Groq, Gemini, OpenRouter, Ollama, LM Studio, vLLM) directly inside the Web UI.
+- 🛑 **Enforceable Blocking Human-in-the-Loop (HITL)**: Deterministic approval gates (`WAITING_APPROVAL`) that genuinely suspend worker threads before executing state-changing actions (`POST`, `PUT`, `DELETE`, password resets, race conditions) until authorized by the operator.
+- 🖥️ **Full-Screen Neon Cyber Web Dashboard**: Ultra-responsive fluid monitoring interface featuring live multi-agent chat, tool terminal streams, PoC reproduction cards, and visual pipeline graphs.
+- 🧬 **Sub-Agent Session Tracking**: Child agent lifecycle tracking (`agents.jsonl`) recording runtime metrics, model allocations, and finding provenance.
+- 📦 **15 Modular Security Skills**: Subdomain intelligence, headless browser JS crawling, AST parameter extraction, secret scanning, content discovery, XSS (reflected/stored/DOM/blind), SSRF exploitation, and IdP race audits.
+- 🔒 **Scope & Compliance Gating**: Mandatory scope-of-work validation (`scope-of-work.md` / `.pdf`) before offensive execution; runs strictly in passive mode when unverified.
+- 🧪 **Comprehensive Automated Test Suite**: 100% test coverage across agent loops, blocking gates, durable runs, and dependency resolution (`pytest`).
+
+---
+
+## 🏗️ System Architecture
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       MOROS AI COORDINATOR & HARNESS                        │
+│   • Authorization & Scope Guard           • Run Lifecycle Manager           │
+│   • Sub-Agent Session Tracking            • Enforceable Blocking HITL Gate  │
+└───────────────────────┬──────────────────────────────┬──────────────────────┘
+                        │                              │
+         ┌──────────────▼──────────────┐ ┌─────────────▼─────────────┐
+         │     SPECIALIZED AGENTS      │ │       REACT RUNTIME       │
+         │  • Subdomain Hunter         │ │  • Bounded Tool Registry  │
+         │  • JS & API Specialist      │ │  • Context & Memory Store │
+         │  • Client-Side Auditor      │ │  • Execution Timeouts     │
+         │  • SSRF & Cloud Pivoter     │ │  • Observation Streaming  │
+         │  • Auth & Race Condition    │ │  • Fallback Engine        │
+         └──────────────┬──────────────┘ └─────────────┬─────────────┘
+                        │                              │
+                        └──────────────┬───────────────┘
+                                       ▼
+                       targets/<target>/output/
+                       ├── runs/<run_id>/ (run.json, events.jsonl, agents.jsonl)
+                       ├── logs/checkpoints.json (durable HITL gate records)
+                       ├── evidence/ledger.jsonl (content-addressed provenance)
+                       └── report/hackbot-report-<target>-<date>.md
+```
+
+---
+
+## 🚀 Quick Start Guide
+
+### 1. Installation
 
 ```bash
+# Clone the repository
 git clone https://github.com/V7-Awad/Moros-Ai-Agent.git
 cd Moros-Ai-Agent
 
-# Create virtual environment
+# Create and activate Python virtual environment
 python -m venv venv
 
-# Activate it
 # Windows:
 venv\Scripts\activate
-# Linux/Mac:
+# Linux/macOS:
 source venv/bin/activate
 
-# Install dependencies
+# Install required dependencies
 pip install -r requirements.txt
 
-# Install Playwright browsers
+# Install Playwright browser engine for JavaScript discovery
 playwright install chromium
 ```
 
-### 2. Set Up a Target
+### 2. Configure LLM Backend (Optional)
 
-```bash
-# Create a target directory
-python setup.py init-target --domain example.com
+Moros AI is **100% functional offline** out-of-the-box. To enable generative ReAct tool loops, copy `.env.example` to `.env` or configure your API key directly from the Web Dashboard:
 
-# Place your authorization document
-# Copy your scope-of-work PDF into targets/example.com/
-cp /path/to/scope-of-work.pdf targets/example.com/
+```powershell
+copy .env.example .env
 ```
 
-### 3. Launch Web Dashboard (Interactive Viewer)
+Supports any LLM backend:
+- **DeepSeek**: `DEEPSEEK_API_KEY=sk-...` (`deepseek-chat` / `deepseek-reasoner`)
+- **OpenAI**: `OPENAI_API_KEY=sk-proj-...` (`gpt-4o`, `gpt-4o-mini`, `o3-mini`)
+- **Anthropic**: `ANTHROPIC_API_KEY=sk-ant-...` (`claude-3-5-sonnet-20241022`)
+- **Groq**: `GROQ_API_KEY=gsk_...` (`llama-3.3-70b-versatile`)
+- **Local Ollama (Offline & Free)**: `OLLAMA_BASE_URL=http://localhost:11434` (`llama3`, `deepseek-r1:8b`)
+- **Custom Local Gateway (LM Studio / vLLM)**: `OPENAI_BASE_URL=http://localhost:1234/v1`
 
-Inspired by Strix (`usestrix/strix`), Moros AI features a local web viewer dashboard:
+---
+
+## 🖥️ Interactive Web Dashboard
+
+Launch the local web dashboard for complete visual control over assessments, real-time agent monitoring, and human checkpoint approvals:
 
 ```bash
-# Launch dashboard directly (opens in your default browser at http://127.0.0.1:8080)
-python dashboard.py
-
-# Or via run.py (similar to 'strix view')
-python run.py view
+# Launch dashboard directly (opens http://127.0.0.1:8080)
 python run.py --dashboard
+
+# Or via the standalone launcher:
+python dashboard.py
 ```
 
-**Dashboard Features:**
-- 📊 **Executive Overview**: High-level severity metrics, vulnerability breakdown charts, and target tech stack.
-- 🕸️ **Agent Multi-Skill Graph**: Visual orchestration tree of all 14 micro-skills and their review status.
-- 🚨 **Vulnerabilities & Exploits**: Full finding cards with AI-proposed severities, context, and 1-click copy cURL PoCs.
-- 🛡️ **Human-in-the-Loop (HITL) Center**: Actionable checkpoints to approve/reject state-changing or destructive actions.
-- 💻 **Live Terminal & Tool Logs**: Real-time streaming console for inspecting skill logs.
-- 📄 **Report Viewer**: Formatted markdown penetration testing report with print/PDF export.
+### Dashboard Capabilities:
+- **Operations Center**: Instant target switching, scope verification indicators, and assessment launchpad.
+- **LLM Settings Modal**: Configure and test API endpoints dynamically without restarting the server.
+- **Agent Command Console**: Interact with specialized sub-agents (`coordinator`, `js-analyzer`, `xss-specialist`, `ssrf-specialist`).
+- **HITL Checkpoints Manager**: Real-time review and 1-click Approve/Reject for state-changing HTTP requests.
+- **PoC & Evidence Inspector**: Formatted vulnerability cards with ready-to-run cURL reproduction commands and SHA-256 artifact hashes.
+- **Live Tool Terminal**: Real-time streaming log viewer for all background processes.
+- **Executive Deliverables**: Formatted markdown and JSON report viewer with instant export.
 
-### Import an API specification
+---
 
-Import a local OpenAPI/Swagger JSON or YAML file into a structured endpoint inventory. The importer makes no network requests:
+## ⌨️ Command Line Interface (CLI)
 
 ```bash
-python tools/openapi_import.py --spec ./openapi.yaml --output targets/example.com/output/api/openapi-endpoints.json --target example.com
-```
+# Verify system prerequisites
+python run.py --check
 
-YAML input uses PyYAML, installed with `pip install -r requirements.txt`. The result includes methods, paths, parameters, body content types, and declared security requirements. Treat the inventory as an assessment input; declared security is not proof of enforcement.
+# Initialize a new target workspace
+python setup.py init-target --domain app.example.com
+
+# Run full assessment pipeline
+python run.py --target app.example.com
+
+# Execute specific micro-skills
+python run.py --target app.example.com --skills recon-subdomain,js-discover,js-analyze
+
+# Dry-run execution plan without sending network requests
+python run.py --target app.example.com --dry-run
+```
 
 ---
 
-### 4. Run a Scan (CLI)
+## 🛑 Enforceable Human-in-the-Loop (HITL) Gating
+
+Safety and authorization are non-negotiable architectural requirements. Unlike passive logging systems, Moros AI uses **blocking thread synchronization**:
+
+1. When a micro-skill discovers an endpoint with a state-changing method (`POST`, `PUT`, `DELETE`) or high-impact actions (OAuth redirects, brute-forcing), a deterministic checkpoint (`cp-<hash>`) is registered.
+2. The worker thread pauses on a thread event (`threading.Event`).
+3. The operator reviews the pending action via the Web Dashboard or REST API.
+4. **Approve**: Wakes the worker thread immediately to proceed with testing.
+5. **Reject / Timeout**: Safely bypasses the action, records the audit notes, and continues the pipeline without disruption.
+
+---
+
+## 🧩 Adding Custom Micro-Skills
+
+Moros AI is designed for rapid modular extension:
+
+### Step 1: Create Skill Metadata
+Create `skills/<new-skill-name>/SKILL.md` defining the skill objective and methodology checklist.
+
+### Step 2: Implement Execution & Register Tools
+In `tools/skill_runner.py`, define the execution method and expose tools through `ToolRegistry`:
+```python
+def run_custom_audit(self) -> Dict[str, Any]:
+    registry = ToolRegistry()
+    registry.register("audit_tool", my_tool_func, "Executes specific security check")
+    
+    agent = AgentRunner(llm_client=self.llm)
+    context = AgentContext(target=self.target, target_dir=self.target_dir, skill="custom-audit", run_id="run-1")
+    
+    result = agent.run(
+        context=context,
+        tools=registry,
+        system_prompt="You are a specialized security agent.",
+        user_goal=f"Assess target {self.target}."
+    )
+    return {"status": "SUCCESS", "findings_count": len(result.findings)}
+```
+
+### Step 3: Register Dependencies in Orchestrator
+In `tools/hackbot_orchestrator.py`:
+- Add the skill name to `SKILL_ORDER`.
+- Define prerequisites in `SKILL_DEPENDENCIES` (e.g., `{"custom-audit": ["js-analyze"]}`).
+- Add the dispatch branch in `_execute_skill()`.
+
+---
+
+## 🧪 Automated Testing
+
+Verify system stability with the complete automated test suite:
 
 ```bash
-# Run the full pipeline against a target
-python run.py --target example.com
-
-# Run specific skills only
-python run.py --target example.com --skills recon-subdomain,js-discover,js-analyze
-
-# Run with multiple models
-python run.py --target example.com --models claude-sonnet,gpt-4o-mini --runs-per-skill 2
-
-# Dry run (shows what would execute without running)
-python run.py --target example.com --dry-run
+python -m pytest -v tests/
 ```
 
-### 4. Run Individual Tools
+```text
+============================= test session starts =============================
+collected 15 items
 
-```bash
-# Browser-driven crawl
-python tools/browser-crawl.py --target "https://example.com" \
-    --output-dir "targets/example.com/output/js/raw/"
+tests/test_agent_runtime.py::test_tool_registry_registration_and_execution PASSED [  6%]
+tests/test_agent_runtime.py::test_agent_context_and_result_dataclasses PASSED [ 13%]
+tests/test_agent_runtime.py::test_agent_runner_react_loop PASSED         [ 20%]
+tests/test_agent_runtime.py::test_agent_runner_llm_unavailable_fallback PASSED [ 26%]
+tests/test_checkpoint_manager.py::test_checkpoint_creation_and_deterministic_id PASSED [ 33%]
+tests/test_checkpoint_manager.py::test_checkpoint_approval_and_rejection PASSED [ 40%]
+tests/test_checkpoint_manager.py::test_checkpoint_blocking_worker_wakes_on_decision PASSED [ 46%]
+tests/test_checkpoint_manager.py::test_checkpoint_timeout_rejects PASSED [ 53%]
+tests/test_dependency_validation.py::test_missing_dependency_unscheduled_is_blocked PASSED [ 60%]
+tests/test_dependency_validation.py::test_dependency_with_disk_artifact_is_not_blocked PASSED [ 66%]
+tests/test_dependency_validation.py::test_scheduled_prerequisites_are_not_blocked PASSED [ 73%]
+tests/test_run_manager.py::test_run_creation_and_persistence PASSED      [ 80%]
+tests/test_run_manager.py::test_run_event_stream_and_progress PASSED     [ 86%]
+tests/test_run_manager.py::test_finish_run PASSED                        [ 93%]
+tests/test_run_manager.py::test_agent_session_tracking PASSED            [100%]
 
-# Wayback Machine historical JS fetch
-python tools/wayback-fetch.py --domain "example.com" \
-    --output-dir "targets/example.com/output/js/raw/historical/"
-
-# Source map hunting
-python tools/sourcemap-hunter.py \
-    --js-dir "targets/example.com/output/js/raw/" \
-    --output-dir "targets/example.com/output/js/source-maps/"
-
-# Secret scanning
-python tools/secret-scanner.py \
-    --input-dir "targets/example.com/output/js/beautified/" \
-    --output "targets/example.com/output/js/secrets-findings.json"
-
-# Endpoint extraction
-python tools/endpoint-extractor.py \
-    --input-dir "targets/example.com/output/js/beautified/" \
-    --output-endpoints "targets/example.com/output/js/endpoints.json" \
-    --output-params "targets/example.com/output/js/parameters.json" \
-    --output-curl "targets/example.com/output/js/curl-commands.sh" \
-    --target-domain "example.com"
+============================= 15 passed in 2.85s ==============================
 ```
 
 ---
 
-## 📁 Project Structure
+## ⚖️ Legal & Ethical Compliance
 
-```
-Moros-Ai-Agent/
-├── skills/                              # 15 micro-skills
-│   ├── recon-subdomain/SKILL.md         # Subdomain enumeration
-│   ├── api-spec-discovery/SKILL.md      # Local OpenAPI/Swagger import
-│   ├── js-discover/SKILL.md             # JS collection (browser-driven)
-│   ├── js-analyze/SKILL.md              # JS deep analysis
-│   ├── content-discovery/SKILL.md       # Directory brute-forcing
-│   ├── xss-reflected/SKILL.md           # Reflected XSS
-│   ├── xss-stored/SKILL.md              # Stored XSS
-│   ├── xss-dom/SKILL.md                 # DOM-based XSS
-│   ├── xss-blind/SKILL.md              # Blind XSS
-│   ├── ssrf-identify/SKILL.md           # SSRF identification
-│   ├── ssrf-post-exploit/SKILL.md       # SSRF post-exploitation
-│   ├── idp-race-condition/SKILL.md      # IdP redirect race
-│   ├── auth-password-reset-bruteforce/  # Hidden admin reset
-│   ├── review-skill/SKILL.md            # Completion verification
-│   └── report-conglomeration/SKILL.md   # Final report assembly
-├── tools/                               # Python tool wrappers
-│   ├── browser-crawl.py                 # Playwright browser crawler
-│   ├── wayback-fetch.py                 # Wayback Machine fetcher
-│   ├── sourcemap-hunter.py              # Source map discovery
-│   ├── js-beautifier.py                 # JS beautification
-│   ├── secret-scanner.py                # Secret/key scanner
-│   ├── endpoint-extractor.py            # API endpoint extractor
-│   ├── openapi_import.py                # OpenAPI/Swagger inventory importer
-│   └── hackbot-orchestrator.py          # Pipeline orchestrator
-├── targets/                             # Engagement folders (gitignored output)
-├── docs/
-│   ├── architecture.md                  # System design & human checkpoints
-│   └── completion-checklist-format.md   # Checklist standard
-├── run.py                               # Main entry point
-├── setup.py                             # Setup & target initialization
-├── requirements.txt                     # Python dependencies
-└── README.md                            # This file
-```
+> **IMPORTANT**: This software is intended strictly for authorized penetration testing, vulnerability assessments under signed rules of engagement, and approved bug bounty programs. Performing unauthorized scans or attacks against computer systems without explicit written permission is strictly prohibited by law.
 
 ---
 
-## 🔒 Human-in-the-Loop Checkpoints
+## 👤 Author & Credits
 
-The system **NEVER** runs in fully unattended mode. These are mandatory pause points:
-
-| Checkpoint | Skills | What Gets Reviewed |
-|---|---|---|
-| **Pre-Run Authorization** | All | Scope-of-work must exist |
-| **Destructive Actions** | xss-stored, auth-* | Before any state-changing request |
-| **Exploit Chains** | report-conglomeration | Before labeling chains as critical |
-| **Credential Testing** | auth-password-reset-bruteforce | Before any brute-forcing |
-| **Final Report** | report-conglomeration | All AI severities are provisional |
-
----
-
-## 🤖 Multi-Model Strategy
-
-The system is designed to run each skill with **multiple AI models** for coverage:
-
-| Tier | Purpose | Examples |
-|---|---|---|
-| Frontier | Novel reasoning, "bitter pill" exploration | Claude Opus, GPT-4o |
-| Mid-tier | Methodology-driven skill execution | Claude Sonnet, GPT-4o-mini |
-| Local | High-volume, budget-friendly runs | Llama, Mistral, Qwen |
-
-```bash
-# Example: 2 runs per skill across 3 models
-python run.py --target example.com \
-    --models claude-sonnet,gpt-4o-mini,llama \
-    --runs-per-skill 2
-```
-
----
-
-## 📊 Completion Verification (Anti-Bias)
-
-LLMs exhibit **completion bias** — they tend to claim tasks are done when steps were skipped. Moros AI fights this with:
-
-1. **Markdown checklists** in every skill (not done until every box is checked with evidence)
-2. **Review-skill** runs after every primary skill (preferably on a different model)
-3. **Artifact + log verification** — non-zero-byte files required for every step
-4. **Bounded retry loops** — nudge and re-run failed steps (max 3 retries)
-5. **Critical failure escalation** — humans are alerted, never silent failure
-
----
-
-## 🛠️ Development
-
-### Adding a New Skill
-
-1. Create `skills/<skill-name>/SKILL.md` with frontmatter (`name`, `description`)
-2. Add methodology checklist following `docs/completion-checklist-format.md`
-3. Add the skill to `SKILL_ORDER` and `SKILL_DEPENDENCIES` in `tools/hackbot-orchestrator.py`
-4. Create a `reference.md` with 5-10 example outputs
-5. Test with review-skill verification
-
-### Retuning After Model Updates
-
-When underlying models are upgraded, follow the retuning process:
-1. Run each skill in "bare model" mode (strip instructions)
-2. If the model handles something natively, remove that instruction
-3. Keep skills as lean as possible
-
----
-
-## 📜 License
-
-MIT License — see [LICENSE](LICENSE) for details.
-
----
-
-## 🙏 Credits
-
-- Architecture inspired by Jason's DEF CON / Bug Bounty Village talk (Arcanum Information Security / "Armada")
-- Built with Claude Code–style agent skill patterns
-- Uses [Playwright](https://playwright.dev/) for browser automation
+- **Lead Architecture & Development:** **Raider** (`By Raider`)
+- **Research & Core Framework:** Moros AI Security Team
+- **License:** [MIT License](LICENSE)

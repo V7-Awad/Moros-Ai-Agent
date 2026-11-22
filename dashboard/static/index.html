@@ -874,6 +874,10 @@
 
       <!-- Right Header Actions & Stats -->
       <div class="stats">
+        <button onclick="openLlmModal()" class="ghost" style="padding: 6px 14px; font-size: 12px; display: inline-flex; align-items: center; gap: 6px;" title="Configure LLM & API Keys">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span id="llmStatusIndicator">LLM Settings</span>
+        </button>
         <span id="scopeBadge" class="pill warn hide-sm"><b>SCOPE NOTE FOUND</b></span>
         <span id="scanStatusBadge" class="pill"><b>IDLE</b></span>
         <button onclick="openModal('newScanModal')" class="btn">
@@ -1048,7 +1052,7 @@
                 <canvas id="vulnChart" width="240" height="220"></canvas>
               </div>
             </div>
-            <div class="hint" style="text-align:center; margin-top:12px;">All severities are AI-proposed and provisional until confirmed.</div>
+            <div class="hint" style="text-align:center; margin-top:12px;">All candidate findings require operator verification before final deliverable sign-off.</div>
           </div>
 
           <!-- Tech Stack Fingerprint Card -->
@@ -1196,9 +1200,9 @@
             <div>
               <div style="display:flex; align-items:center; gap:10px; margin-bottom:4px;">
                 <h1 style="margin:0; font:700 22px 'Space Grotesk', system-ui, sans-serif; color:#fff;">AI Multi-Agent Command Console</h1>
-                <span class="pill ok"><b>MULTI-TIER LIVE</b></span>
+                <span class="pill warn"><b>MODEL-DRIVEN WHEN CONFIGURED</b></span>
               </div>
-              <p class="hint" style="margin:0;">Interactive dialogue, live reasoning stream, and direct steering across specialized sub-agents (inspired by Strix architecture)</p>
+              <p class="hint" style="margin:0;">Skill execution and conversation history. Live model reasoning requires a configured provider; specialist entries are not independent parallel agents yet.</p>
             </div>
             <div style="display:flex; gap:8px; align-items:center;">
               <button onclick="fetchConversations()" class="ghost" style="padding:6px 14px; font-size:12px;">Refresh Stream</button>
@@ -1290,6 +1294,9 @@
         <button class="modal-close" onclick="closeModal('newScanModal')">&times;</button>
       </div>
       <div style="display:flex; flex-direction:column; gap:14px; font-size:13px;">
+        <div id="llmCurrentStatus" class="note" style="border-left-color:var(--warn);">
+          Model status is being checked…
+        </div>
         <div>
           <label style="display:block; margin-bottom:4px; font-weight:600; color:var(--mut);">Target Domain</label>
           <input type="text" id="scanTargetInput" class="mono" style="width:100%;" placeholder="example.com">
@@ -1307,10 +1314,9 @@
         <div>
           <label style="display:block; margin-bottom:4px; font-weight:600; color:var(--mut);">Model Tier / Provider</label>
           <select id="scanModelSelect" class="mono" style="width:100%;">
-            <option value="default">Default Configured Harness</option>
-            <option value="claude-sonnet,gpt-4o-mini">Multi-Model Tier (Claude + OpenAI)</option>
-            <option value="open-weight-local">Local / Open-Weight (via OpenCode)</option>
+            <option value="default">Use configured provider & model</option>
           </select>
+          <small id="scanLlmNotice" class="hint">Checking configured model…</small>
         </div>
         <div style="display:flex; align-items:center; gap:8px;">
           <input type="checkbox" id="scanDryRunCheck">
@@ -1344,6 +1350,59 @@
       <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:20px; padding-top:14px; border-top:1px solid var(--line);">
         <button onclick="closeModal('newTargetModal')" class="ghost">Cancel</button>
         <button onclick="submitNewTarget()" class="btn">Initialize</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. LLM Model & API Settings Modal -->
+  <div id="llmModal" class="modal-backdrop hidden">
+    <div class="modal-box" style="max-width: 580px;">
+      <div class="modal-header">
+        <h3>LLM Model & API Settings</h3>
+        <button class="modal-close" onclick="closeModal('llmModal')">&times;</button>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:14px; font-size:13px;">
+        <div class="note" style="border-left-color: var(--blue);">
+          <b>Universal LLM Engine:</b>
+          <p style="margin: 4px 0 0;">Configure your preferred LLM backend directly from the Dashboard. Settings are saved to <code>.env</code> and activated immediately.</p>
+        </div>
+        <div>
+          <label style="display:block; margin-bottom:4px; font-weight:600; color:var(--mut);">Provider</label>
+          <select id="llmProviderSelect" class="mono" style="width:100%;" onchange="onLlmProviderChange()">
+            <option value="deepseek">DeepSeek (deepseek-chat / deepseek-reasoner)</option>
+            <option value="openai">OpenAI (GPT-4o, GPT-4o-mini, o3-mini)</option>
+            <option value="anthropic">Anthropic Claude (Claude 3.5 Sonnet)</option>
+            <option value="groq">Groq (Llama 3.3 70B, Qwen)</option>
+            <option value="gemini">Google Gemini (Gemini 1.5 Flash / Pro)</option>
+            <option value="openrouter">OpenRouter (Multi-model Gateway)</option>
+            <option value="ollama">Ollama (Local / Offline 100%)</option>
+            <option value="custom">Custom OpenAI-Compatible (LM Studio / vLLM / LocalAI)</option>
+          </select>
+        </div>
+        <div>
+          <label style="display:block; margin-bottom:4px; font-weight:600; color:var(--mut);">Model Name / ID</label>
+          <input type="text" id="llmModelInput" class="mono" style="width:100%;" placeholder="deepseek-chat">
+        </div>
+        <div id="llmBaseUrlWrap">
+          <label style="display:block; margin-bottom:4px; font-weight:600; color:var(--mut);">API Base URL (Optional for standard providers)</label>
+          <input type="text" id="llmBaseUrlInput" class="mono" style="width:100%;" placeholder="https://api.deepseek.com/v1">
+        </div>
+        <div id="llmApiKeyWrap">
+          <label style="display:block; margin-bottom:4px; font-weight:600; color:var(--mut);">API Key</label>
+          <div style="display:flex; gap:8px;">
+            <input type="password" id="llmApiKeyInput" class="mono" style="flex:1;" placeholder="sk-...">
+            <button type="button" class="ghost" style="padding:6px 12px; font-size:12px;" onclick="toggleApiKeyVisibility()">Show</button>
+          </div>
+          <small id="currentKeyMasked" style="display:block; margin-top:4px; color:var(--mut);"></small>
+        </div>
+        <div id="llmTestResult" style="display:none; padding:10px 14px; border-radius:8px; font-size:12px;"></div>
+      </div>
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-top:20px; padding-top:14px; border-top:1px solid var(--line);">
+        <button onclick="testLlmConnection()" class="ghost" id="testLlmBtn">Test Connection</button>
+        <div style="display:flex; gap:8px;">
+          <button onclick="closeModal('llmModal')" class="ghost">Cancel</button>
+          <button onclick="saveLlmSettings()" class="btn">Save & Apply</button>
+        </div>
       </div>
     </div>
   </div>
@@ -1396,6 +1455,34 @@
     function openModal(id) { document.getElementById(id).classList.remove('hidden'); }
     function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
 
+    async function refreshLlmStatus() {
+      const indicator = document.getElementById('llmStatusIndicator');
+      const notice = document.getElementById('scanLlmNotice');
+      try {
+        const response = await fetch('/api/config/llm');
+        const config = await response.json();
+        const label = config.is_available
+          ? `LLM ${config.provider}/${config.model || 'default'}`
+          : 'LLM OFFLINE';
+        if (indicator) {
+          indicator.textContent = label;
+          indicator.style.color = config.is_available ? 'var(--ok)' : 'var(--warn)';
+        }
+        if (notice) notice.textContent = config.is_available
+          ? `Agent reasoning enabled: ${config.provider}/${config.model || 'default'}`
+          : 'No model is connected. Moros will use deterministic checks only; configure a model before an agentic scan.';
+        const modalStatus = document.getElementById('llmCurrentStatus');
+        if (modalStatus) modalStatus.textContent = config.is_available
+          ? `Connected: ${config.provider}/${config.model || 'default'}. Moros can use the configured model for agent decisions.`
+          : 'No model is connected. Add a provider key or configure local Ollama, then test the connection. Until then, scans use deterministic checks only.';
+        return config;
+      } catch (error) {
+        if (indicator) indicator.textContent = 'LLM STATUS ERROR';
+        if (notice) notice.textContent = 'Could not read model status from the local dashboard.';
+        return null;
+      }
+    }
+
     // --- Two-Step Confirmation Helper ---
     function handleTwoStepAction(btn, actionFn, defaultText, confirmText) {
       if (btn.dataset.confirming === "true") {
@@ -1436,6 +1523,7 @@
 
     // --- Initialization ---
     async function init() {
+      await refreshLlmStatus();
       await fetchSystemInfo();
       await fetchTargets();
 
@@ -1935,7 +2023,7 @@
           badge.innerHTML = "<b>SCANNING...</b>";
         } else {
           badge.className = "pill";
-          badge.innerHTML = "<b>IDLE</b>";
+          badge.innerHTML = `<b>${escapeHtml((data.status || 'idle').toUpperCase())}</b>`;
         }
 
         const logSel = document.getElementById('logFileSelect');
@@ -2210,6 +2298,8 @@
 
       closeModal('newScanModal');
       switchTab('terminal');
+      const liveLog = document.getElementById('logFileSelect');
+      if (liveLog) liveLog.value = 'LIVE';
 
       try {
         const res = await fetch('/api/scan/start', {
@@ -2273,7 +2363,166 @@
       });
     }
 
-    window.onload = init;
+    // ==================== LLM & MODEL SETTINGS (FROM DASHBOARD) ====================
+    async function openLlmModal() {
+      openModal('llmModal');
+      document.getElementById('llmTestResult').style.display = 'none';
+      try {
+        const res = await fetch('/api/config/llm');
+        const data = await res.json();
+        if (data.provider && data.provider !== 'none') {
+          document.getElementById('llmProviderSelect').value = data.provider;
+        }
+        if (data.model) {
+          document.getElementById('llmModelInput').value = data.model;
+        }
+        if (data.base_url) {
+          document.getElementById('llmBaseUrlInput').value = data.base_url;
+        }
+        if (data.has_api_key) {
+          document.getElementById('currentKeyMasked').textContent = "Current active key: " + data.masked_key;
+        } else {
+          document.getElementById('currentKeyMasked').textContent = "No API key configured yet.";
+        }
+        onLlmProviderChange();
+      } catch (e) {
+        console.error("Failed to load LLM config:", e);
+      }
+    }
+
+    function onLlmProviderChange() {
+      const p = document.getElementById('llmProviderSelect').value;
+      const modelIn = document.getElementById('llmModelInput');
+      const urlIn = document.getElementById('llmBaseUrlInput');
+      const keyWrap = document.getElementById('llmApiKeyWrap');
+
+      if (p === 'deepseek') {
+        urlIn.placeholder = "https://api.deepseek.com/v1";
+        if (!modelIn.value || modelIn.value === 'gpt-4o-mini' || modelIn.value === 'llama3') modelIn.value = 'deepseek-chat';
+        keyWrap.style.display = 'block';
+      } else if (p === 'openai') {
+        urlIn.placeholder = "https://api.openai.com/v1";
+        if (!modelIn.value || modelIn.value === 'deepseek-chat') modelIn.value = 'gpt-4o-mini';
+        keyWrap.style.display = 'block';
+      } else if (p === 'anthropic') {
+        urlIn.placeholder = "https://api.anthropic.com/v1";
+        if (!modelIn.value || modelIn.value === 'deepseek-chat') modelIn.value = 'claude-3-5-sonnet-20241022';
+        keyWrap.style.display = 'block';
+      } else if (p === 'groq') {
+        urlIn.placeholder = "https://api.groq.com/openai/v1";
+        if (!modelIn.value || modelIn.value === 'deepseek-chat') modelIn.value = 'llama-3.3-70b-versatile';
+        keyWrap.style.display = 'block';
+      } else if (p === 'gemini') {
+        urlIn.placeholder = "https://generativelanguage.googleapis.com";
+        if (!modelIn.value || modelIn.value === 'deepseek-chat') modelIn.value = 'gemini-1.5-flash';
+        keyWrap.style.display = 'block';
+      } else if (p === 'openrouter') {
+        urlIn.placeholder = "https://openrouter.ai/api/v1";
+        if (!modelIn.value || modelIn.value === 'deepseek-chat') modelIn.value = 'meta-llama/llama-3.1-8b-instruct';
+        keyWrap.style.display = 'block';
+      } else if (p === 'ollama') {
+        urlIn.placeholder = "http://localhost:11434";
+        if (!urlIn.value) urlIn.value = "http://localhost:11434";
+        if (!modelIn.value || modelIn.value === 'deepseek-chat') modelIn.value = 'llama3';
+        keyWrap.style.display = 'none';
+      } else if (p === 'custom') {
+        urlIn.placeholder = "http://localhost:1234/v1";
+        keyWrap.style.display = 'block';
+      }
+    }
+
+    function toggleApiKeyVisibility() {
+      const input = document.getElementById('llmApiKeyInput');
+      input.type = input.type === 'password' ? 'text' : 'password';
+    }
+
+    async function testLlmConnection() {
+      const resultDiv = document.getElementById('llmTestResult');
+      resultDiv.style.display = 'block';
+      resultDiv.style.background = 'rgba(241, 194, 107, 0.15)';
+      resultDiv.style.color = '#ffe6b0';
+      resultDiv.style.border = '1px solid rgba(241, 194, 107, 0.4)';
+      resultDiv.textContent = 'Testing connection to model...';
+
+      const provider = document.getElementById('llmProviderSelect').value;
+      const model = document.getElementById('llmModelInput').value.trim();
+      const apiKey = document.getElementById('llmApiKeyInput').value.trim();
+      const baseUrl = document.getElementById('llmBaseUrlInput').value.trim();
+
+      try {
+        const res = await fetch('/api/config/llm/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider, model, api_key: apiKey, base_url: baseUrl })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+          resultDiv.style.background = 'rgba(25, 230, 176, 0.15)';
+          resultDiv.style.color = '#b9f7e6';
+          resultDiv.style.border = '1px solid rgba(25, 230, 176, 0.4)';
+          resultDiv.textContent = data.message;
+        } else {
+          resultDiv.style.background = 'rgba(255, 77, 94, 0.15)';
+          resultDiv.style.color = '#ffb3ba';
+          resultDiv.style.border = '1px solid rgba(255, 77, 94, 0.4)';
+          resultDiv.textContent = data.message || 'Connection failed';
+        }
+      } catch (e) {
+        resultDiv.style.background = 'rgba(255, 77, 94, 0.15)';
+        resultDiv.style.color = '#ffb3ba';
+        resultDiv.style.border = '1px solid rgba(255, 77, 94, 0.4)';
+        resultDiv.textContent = 'Test error: ' + e;
+      }
+    }
+
+    async function saveLlmSettings() {
+      const provider = document.getElementById('llmProviderSelect').value;
+      const model = document.getElementById('llmModelInput').value.trim();
+      const apiKey = document.getElementById('llmApiKeyInput').value.trim();
+      const baseUrl = document.getElementById('llmBaseUrlInput').value.trim();
+
+      try {
+        const res = await fetch('/api/config/llm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider, model, api_key: apiKey, base_url: baseUrl })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+          alert('Model & API configuration saved and active!');
+          closeModal('llmModal');
+          document.getElementById('llmApiKeyInput').value = '';
+          updateLlmBadge(data.config);
+        } else {
+          alert('Failed to save configuration: ' + (data.message || 'Unknown error'));
+        }
+      } catch (e) {
+        alert('Save error: ' + e);
+      }
+    }
+
+    function updateLlmBadge(cfg) {
+      const badge = document.getElementById('llmStatusIndicator');
+      if (badge && cfg) {
+        const p = (cfg.provider || 'none').toUpperCase();
+        const m = cfg.model ? ` (${cfg.model.split('/').pop()})` : '';
+        badge.textContent = cfg.is_available ? `LLM: ${p}${m}` : 'LLM OFFLINE';
+        badge.style.color = cfg.is_available ? 'var(--ok)' : 'var(--warn)';
+      }
+    }
+
+    async function refreshLlmBadge() {
+      try {
+        const res = await fetch('/api/config/llm');
+        const data = await res.json();
+        updateLlmBadge(data);
+      } catch (e) {}
+    }
+
+    window.onload = () => {
+      init();
+      refreshLlmBadge();
+    };
   </script>
 </body>
 </html>

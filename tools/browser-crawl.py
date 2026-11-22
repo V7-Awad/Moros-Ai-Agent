@@ -46,9 +46,19 @@ class BrowserCrawler:
     def __init__(self, target: str, output_dir: str, max_depth: int = 10,
                  user_agent: str = None, capture_traffic: bool = True,
                  click_interactive: bool = True, follow_links: bool = True,
-                 timeout_ms: int = 30000):
+                 timeout_ms: int = 30000, safe_mode: bool = False,
+                 max_requests: int = 100, request_delay: float = 0.4,
+                 max_pages: int = 20):
         self.target = target
         self.target_domain = urlparse(target).netloc
+        self.target_hostname = (urlparse(target).hostname or "").lower().rstrip(".")
+        self.safe_mode = safe_mode
+        self.max_requests = max(1, int(max_requests))
+        self.max_pages = max(1, int(max_pages))
+        self.request_count = 0
+        self.request_delay = max(0.0, float(request_delay))
+        self._request_lock = None
+        self._last_request_at = 0.0
         self.output_dir = Path(output_dir)
         self.max_depth = max_depth
         self.user_agent = user_agent or (
@@ -77,6 +87,7 @@ class BrowserCrawler:
         logger.info(f"Output directory: {self.output_dir}")
         logger.info(f"Max depth: {self.max_depth}")
 
+        self._request_lock = asyncio.Lock()
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
@@ -117,12 +128,31 @@ class BrowserCrawler:
     async def _handle_route(self, route):
         """Intercept and log all network traffic."""
         request = route.request
+        parsed = urlparse(request.url)
+        if self.safe_mode:
+            if (parsed.hostname or "").lower().rstrip(".") != self.target_hostname:
+                await route.abort()
+                return
+            if request.method not in {"GET", "HEAD"}:
+                await route.abort()
+                return
+            async with self._request_lock:
+                if self.request_count >= self.max_requests:
+                    await route.abort()
+                    return
+                wait_for = self.request_delay - (time.monotonic() - self._last_request_at)
+                if wait_for > 0:
+                    await asyncio.sleep(wait_for)
+                self.request_count += 1
+                self._last_request_at = time.monotonic()
+        safe_headers = {key: ("[REDACTED]" if key.lower() in {"authorization", "cookie", "proxy-authorization"} else value)
+                        for key, value in dict(request.headers).items()}
         self.traffic_log.append({
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "method": request.method,
             "url": request.url,
             "resource_type": request.resource_type,
-            "headers": dict(request.headers),
+            "headers": safe_headers,
         })
         await route.continue_()
 
@@ -160,7 +190,7 @@ class BrowserCrawler:
 
     async def _crawl_page(self, page, url: str, depth: int):
         """Crawl a single page and extract scripts."""
-        if depth > self.max_depth:
+        if depth > self.max_depth or len(self.visited_urls) >= self.max_pages:
             return
         if url in self.visited_urls:
             return
@@ -174,7 +204,7 @@ class BrowserCrawler:
         logger.info(f"Crawling [{depth}]: {url}")
 
         try:
-            response = await page.goto(url, wait_until="networkidle",
+            response = await page.goto(url, wait_until="domcontentloaded",
                                         timeout=self.timeout_ms)
             if not response:
                 return
@@ -186,7 +216,7 @@ class BrowserCrawler:
             await self._extract_inline_scripts(page, url)
 
             # Click interactive elements to trigger lazy-loaded JS
-            if self.click_interactive:
+            if self.click_interactive and not self.safe_mode:
                 await self._click_interactive_elements(page)
 
             # Follow links
@@ -328,9 +358,13 @@ class BrowserCrawler:
             "target": self.target,
             "crawl_time": datetime.now(timezone.utc).isoformat(),
             "pages_visited": len(self.visited_urls),
+            "page_budget": self.max_pages,
             "external_js_collected": len(self.discovered_js),
             "inline_scripts_collected": len(self.inline_scripts),
             "traffic_requests_logged": len(self.traffic_log),
+            "requests_enforced": self.safe_mode,
+            "requests_sent": self.request_count,
+            "request_budget": self.max_requests,
             "errors": len(self.errors),
             "visited_urls": sorted(self.visited_urls),
         }
@@ -370,6 +404,14 @@ def main():
                         help="Custom User-Agent string")
     parser.add_argument("--timeout", type=int, default=30000,
                         help="Page load timeout in ms (default: 30000)")
+    parser.add_argument("--safe-mode", action="store_true",
+                        help="Restrict browser traffic to the exact target host and GET/HEAD; disable all clicks")
+    parser.add_argument("--max-requests", type=int, default=100,
+                        help="Maximum browser requests in safe mode (default: 100)")
+    parser.add_argument("--request-delay", type=float, default=0.4,
+                        help="Minimum delay between safe-mode requests in seconds")
+    parser.add_argument("--max-pages", type=int, default=20,
+                        help="Maximum pages to visit")
 
     args = parser.parse_args()
 
@@ -382,6 +424,10 @@ def main():
         click_interactive=args.click_all_interactive,
         follow_links=args.follow_all_links,
         timeout_ms=args.timeout,
+        safe_mode=args.safe_mode,
+        max_requests=args.max_requests,
+        request_delay=args.request_delay,
+        max_pages=args.max_pages,
     )
 
     asyncio.run(crawler.crawl())

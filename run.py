@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -83,6 +84,10 @@ Examples:
                         help="Custom target directory (default: targets/<domain>)")
     parser.add_argument("--skills", default="all",
                         help="Comma-separated skill names, or 'all' (default: all)")
+    parser.add_argument("--scan-mode", choices=["quick", "full"], default="full",
+                        help="quick runs the core recon/discovery checks; full runs every registered skill")
+    parser.add_argument("--fail-on-candidate", action="store_true",
+                        help="Return exit code 2 when the completed run contains unverified candidate findings (useful in CI)")
     parser.add_argument("--models", default="default",
                         help="Comma-separated model names (default: default)")
     parser.add_argument("--runs-per-skill", type=int, default=1,
@@ -162,7 +167,11 @@ Examples:
 
     # Parse skills
     if args.skills == "all":
-        skills = list(SKILL_ORDER)
+        if args.scan_mode == "quick":
+            skills = ["recon-subdomain", "api-spec-discovery", "js-discover", "js-analyze",
+                      "content-discovery", "xss-reflected", "ssrf-identify", "report-conglomeration"]
+        else:
+            skills = list(SKILL_ORDER)
     else:
         skills = [s.strip() for s in args.skills.split(",")]
         # Validate skill names
@@ -181,6 +190,7 @@ Examples:
         print(f"   Target: {args.target}")
         print(f"   Directory: {target_dir}")
         print(f"   Skills ({len(skills)}): {' → '.join(skills)}")
+        print(f"   Scan mode: {args.scan_mode}")
         print(f"   Models: {', '.join(models)}")
         print(f"   Runs per skill: {args.runs_per_skill}")
         print(f"   Review model: {args.review_model or 'same as skill'}")
@@ -202,6 +212,7 @@ Examples:
     # Run orchestrator
     print(f"\n🚀 Starting Moros AI scan of {args.target}")
     print(f"   Skills: {', '.join(skills)}")
+    print(f"   Scan mode: {args.scan_mode}")
     print(f"   Models: {', '.join(models)}")
     print()
 
@@ -220,10 +231,27 @@ Examples:
         request_delay=args.request_delay,
     )
 
+    scan_started_at = time.time()
     try:
         result = orchestrator.run()
         if result and result.get("status") == "FAILED":
             sys.exit(1)
+        if args.fail_on_candidate and result:
+            findings_root = target_path / "output" / "findings"
+            has_candidate = False
+            if findings_root.exists():
+                for artifact in findings_root.rglob("candidates-*.json"):
+                    if artifact.stat().st_mtime < scan_started_at:
+                        continue
+                    try:
+                        payload = json.loads(artifact.read_text(encoding="utf-8"))
+                        if payload.get("findings"):
+                            has_candidate = True
+                            break
+                    except (OSError, json.JSONDecodeError, AttributeError):
+                        continue
+            if has_candidate:
+                sys.exit(2)
     except KeyboardInterrupt:
         print("\n\n⚠️  Scan interrupted by user.")
         sys.exit(130)

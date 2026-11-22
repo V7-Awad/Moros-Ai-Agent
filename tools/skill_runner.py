@@ -295,7 +295,42 @@ class SkillRunner:
             return {"status": "BLOCKED_SCOPE", "files_collected": 0}
 
         self.log_step(skill, "step-01-auth-check.log", "Scope note matched the exact configured target; network policy is same-host GET/HEAD only.")
-        self.log_step(skill, "step-02-browser-crawl.log", f"Fetching the root page and same-host JavaScript from {self.http.base_url}")
+        self.log_step(skill, "step-02-browser-crawl.log", f"Starting bounded same-host browser crawl for {self.http.base_url}")
+
+        remaining = self.http.max_requests - self.http.request_count
+        browser_budget = min(20, remaining)
+        if browser_budget > 0:
+            browser_summary = js_dir / "crawl-summary.json"
+            try:
+                crawl = subprocess.run(
+                    [sys.executable, str(PROJECT_ROOT / "tools" / "browser-crawl.py"),
+                     "--target", self.http.base_url, "--output-dir", str(js_dir / "raw"),
+                     "--safe-mode", "--max-requests", str(browser_budget),
+                     "--request-delay", str(self.http.delay_seconds),
+                     "--max-depth", "2", "--max-pages", "2", "--timeout", "15000"],
+                    capture_output=True, text=True, timeout=90,
+                )
+                if browser_summary.is_file():
+                    crawl_data = json.loads(browser_summary.read_text(encoding="utf-8"))
+                    used = min(browser_budget, int(crawl_data.get("requests_sent", 0)))
+                    self.http.record_external_requests(used)
+                    self.log_step(skill, "step-02-browser-crawl.log",
+                                  f"Safe browser visited {crawl_data.get('pages_visited', 0)} pages; "
+                                  f"captured {crawl_data.get('external_js_collected', 0)} bundles and "
+                                  f"{crawl_data.get('inline_scripts_collected', 0)} inline scripts; "
+                                  f"requests={used}/{browser_budget}.")
+                elif crawl.returncode:
+                    self.http.record_external_requests(browser_budget)
+                    self.log_step(skill, "step-02-browser-crawl.log",
+                                  f"Browser crawl unavailable; continuing with bounded HTTP fallback: {crawl.stderr[-500:]}")
+                else:
+                    self.http.record_external_requests(browser_budget)
+                    self.log_step(skill, "step-02-browser-crawl.log",
+                                  "Browser crawl produced no summary; reserving its full request budget before fallback.")
+            except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError) as exc:
+                self.http.record_external_requests(browser_budget)
+                self.log_step(skill, "step-02-browser-crawl.log",
+                              f"Browser crawl fallback: {str(exc)[:300]}")
 
         collected_files = []
         root_response = self.http.request("/", method="GET")
@@ -444,7 +479,7 @@ class SkillRunner:
                                 "type": label,
                                 "source_file": str(js_p.name),
                                 "risk": "MEDIUM — Unsanitized DOM sink",
-                                "severity": "AI-proposed severity: MEDIUM — pending human review"
+                                "severity": "Triage Severity: MEDIUM — pending human review"
                             })
                 except Exception:
                     pass
@@ -763,7 +798,7 @@ class SkillRunner:
                                       "response_sha256": probe.get("body_sha256"),
                                       "response_status": probe.get("status_code"),
                                       "marker_escaped": escaped, "response_context": context}],
-                        "severity": "AI-proposed severity: UNASSESSED — pending evidence and human review",
+                        "severity": "Triage Severity: UNASSESSED — pending evidence and human review",
                         "notes": "A harmless marker was reflected. No script payload was sent or executed; manual context review is required."
                     })
         elif skill_name == "ssrf-identify":
@@ -786,7 +821,7 @@ class SkillRunner:
                         "confidence": "low",
                         "evidence_ids": [evidence["evidence_id"]],
                         "evidence": [evidence],
-                        "severity": "AI-proposed severity: UNASSESSED — pending evidence and human review",
+                        "severity": "Triage Severity: UNASSESSED — pending evidence and human review",
                         "notes": "Endpoint-shape heuristic only. No outbound request or SSRF behavior was observed."
                     })
 
@@ -902,7 +937,7 @@ class SkillRunner:
                 for s in s_data.get("findings", []):
                     all_findings.append({
                         "title": f"Exposed Secret: {s.get('type')}",
-                        "severity": s.get("severity", "AI-proposed severity: MEDIUM — pending human review"),
+                        "severity": s.get("severity", "Triage Severity: MEDIUM — pending human review"),
                         "url": s.get("source_file"),
                         "notes": s.get("context", ""),
                         "status": "candidate",
@@ -920,7 +955,7 @@ class SkillRunner:
         md = f"# Penetration Testing Assessment Report — {self.target}\n\n"
         md += f"**Assessment Date:** {datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n"
         md += f"**Target Organization:** {self.target}\n"
-        md += "**Compliance Notice:** All findings are tagged `AI-proposed severity — pending human review`.\n\n"
+        md += "**Compliance Notice:** All findings are tagged `Triage Severity — pending human review`.\n\n"
         candidate_count = sum(f.get("validation_status") != "validated" for f in all_findings)
         validated_count = len(all_findings) - candidate_count
         md += "## Executive Summary\n\n"

@@ -116,7 +116,7 @@ def scan_file(filepath: Path, min_entropy: float = 4.5,
                 "source_file": str(filepath),
                 "line_number": line_num,
                 "context": lines[line_num - 1].strip()[:200] if line_num <= len(lines) else "",
-                "severity": "AI-proposed severity: MEDIUM — pending human review",
+                "severity": "Triage Severity: MEDIUM — pending human review",
             })
 
     # Method 2: High-entropy string detection
@@ -151,7 +151,7 @@ def scan_file(filepath: Path, min_entropy: float = 4.5,
                     "source_file": str(filepath),
                     "line_number": line_num,
                     "context": lines[line_num - 1].strip()[:200] if line_num <= len(lines) else "",
-                    "severity": "AI-proposed severity: LOW — pending human review",
+                    "severity": "Triage Severity: LOW — pending human review",
                 })
 
     return findings

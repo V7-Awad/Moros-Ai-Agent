@@ -42,7 +42,7 @@ These are the **mandatory** points where the system MUST pause and wait for huma
 | **Destructive Actions** | Before any DELETE, state-changing POST/PUT | Exact request to be sent, target endpoint, rationale |
 | **Exploit Chain Claims** | Before labeling a chain of low findings as critical | Full chain with evidence at each step |
 | **Password Reset / Auth Brute-force** | Before any credential-related testing | Specific parameters and wordlist to be used |
-| **Final Report Approval** | Before report delivery | All findings still marked "AI-proposed — pending human review" |
+| **Final Report Approval** | Before report delivery | All findings require operator sign-off and validation before delivery |
 
 ---
 
@@ -59,19 +59,19 @@ These are the **mandatory** points where the system MUST pause and wait for huma
 8. Human reviews final report, confirms/adjusts severities
 ```
 
-Each step may be run with **multiple models** (Section 7 of build plan) and repeated 2–3 times for coverage.
+Each step may be run with **multiple models** and repeated 2–3 times for coverage.
 
 ---
 
 ## Severity Rating Policy
 
-All AI-generated severity ratings MUST be labeled:
+All candidate severity ratings MUST be labeled:
 
 ```
-AI-proposed severity: <CRITICAL|HIGH|MEDIUM|LOW|INFO> — pending human review
+Triage Severity: <CRITICAL|HIGH|MEDIUM|LOW|INFO> — pending human review
 ```
 
-A finding's severity is NOT finalized until a human pentester confirms it. AI models systematically over-rate criticality.
+A finding's severity is NOT finalized until a human pentester confirms it. Automated scanners systematically over-rate criticality.
 
 ---
 
@@ -96,8 +96,8 @@ A finding's severity is NOT finalized until a human pentester confirms it. AI mo
 
 | Tier | Use Case | Example Models |
 |---|---|---|
-| Frontier | "Bitter pill" exploration, novel reasoning | Claude Opus, GPT-4o |
-| Mid-tier | Skill-engineered methodology runs | Claude Sonnet, GPT-4o-mini |
-| Local/Open | High-volume, budget-conscious skill runs | Llama, Mistral, Qwen via OpenCode |
+| Frontier | Complex reasoning, context escape analysis | Claude 3.5 Sonnet, GPT-4o, DeepSeek-R1 |
+| Mid-tier | Methodology-driven skill execution | DeepSeek-Chat, GPT-4o-mini |
+| Local/Open | High-volume, offline & budget-friendly runs | Llama 3.3, Mistral, Qwen 2.5 via Ollama/vLLM |
 
-The default workhorse should be mid-tier/local models for methodology-heavy tasks; reserve frontier models for minimal-prompt exploration.
+The default workhorse should be mid-tier/local models for methodology-heavy tasks; reserve frontier models for complex multi-step reasoning.

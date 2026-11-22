@@ -87,6 +87,14 @@ class ScopedHttpClient:
                 "duration_s": round(time.monotonic() - started, 3),
             }
 
+    def record_external_requests(self, count: int) -> None:
+        """Account for requests made by an equally scoped browser worker."""
+        count = max(0, int(count))
+        with self._lock:
+            if self.request_count + count > self.max_requests:
+                raise RuntimeError("External worker exceeded the shared HTTP request budget")
+            self.request_count += count
+
     def _response_result(self, status_code: int, url: str, headers: Any, body: bytes, started: float) -> Dict[str, Any]:
         truncated = len(body) > self.max_body_bytes
         body = body[:self.max_body_bytes]
