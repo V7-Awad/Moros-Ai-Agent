@@ -1,501 +1,1079 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Moros AI Agent — Pentest Dashboard</title>
-  <!-- Tailwind CSS CDN -->
-  <script src="https://cdn.tailwindcss.com"></script>
-  <!-- Chart.js CDN -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <!-- Lucide Icons -->
-  <script src="https://unpkg.com/lucide@latest"></script>
-  <!-- Marked for Markdown rendering -->
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script>
-    tailwind.config = {
-      darkMode: 'class',
-      theme: {
-        extend: {
-          colors: {
-            brand: {
-              50: '#f0fdf4',
-              500: '#22c55e',
-              600: '#16a34a',
-              700: '#15803d',
-            },
-            dark: {
-              950: '#090d16',
-              900: '#0f172a',
-              850: '#131d35',
-              800: '#1e293b',
-              700: '#334155',
-            }
-          }
-        }
+  <title>MOROS AI — Agentic Pentest Dashboard</title>
+  <style>
+    /* ==================== 1. TOKENS & FOUNDATION ==================== */
+    :root {
+      --bg: #080808;
+      --blue: #008CFF;
+      --cyan: #00D9FF;
+      --card: #080808;
+      --card2: #0b0b0b;
+      --line: rgba(0, 140, 255, .17);
+      --mut: #9aa7b8;
+      --ok: #19e6b0;
+      --bad: #ff4d5e;
+      --warn: #f1c26b;
+      --vio: #a98bff;
+      --high: #ff8a3d;
+      color-scheme: dark;
+      box-sizing: border-box;
+      padding-top: env(safe-area-inset-top, 0px);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+    }
+    html {
+      scroll-padding-top: env(safe-area-inset-top, 0px);
+      background: var(--bg);
+    }
+    *, *::before, *::after {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: #fff;
+      font: 400 15px/1.5 Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      min-height: 100vh;
+      overflow-x: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    body::after {
+      content: "";
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      pointer-events: none;
+      background:
+        linear-gradient(rgba(255, 255, 255, .07) 1px, transparent 1px) 0 0/52px 52px,
+        linear-gradient(90deg, rgba(255, 255, 255, .07) 1px, transparent 1px) 0 0/52px 52px;
+    }
+    button, input, select, textarea {
+      font: inherit;
+      color: inherit;
+    }
+    button {
+      cursor: pointer;
+    }
+    :focus-visible {
+      outline: 2px solid var(--cyan);
+      outline-offset: 2px;
+    }
+    code, pre, .mono {
+      font-family: ui-monospace, 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+    }
+
+    /* Scrollbars */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #080808; }
+    ::-webkit-scrollbar-thumb { background: rgba(0, 140, 255, .25); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--blue); }
+
+    /* ==================== 2. HEADER ==================== */
+    header {
+      position: sticky;
+      top: env(safe-area-inset-top, 0px);
+      z-index: 50;
+      background: rgba(8, 8, 8, .85);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border-bottom: 1px solid var(--line);
+    }
+    .bar {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .brand-wrap {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      cursor: pointer;
+      text-decoration: none;
+    }
+    .brand-logo {
+      width: 32px;
+      height: 32px;
+      border-radius: 6px;
+      object-fit: cover;
+      box-shadow: 0 0 14px rgba(0, 140, 255, .5);
+      border: 1px solid rgba(0, 217, 255, .35);
+      flex-shrink: 0;
+    }
+    .brand {
+      font: 700 18px 'Space Grotesk', system-ui, sans-serif;
+      letter-spacing: .2px;
+      color: #fff;
+    }
+    .brand span {
+      color: var(--cyan);
+      text-shadow: 0 0 10px rgba(0, 217, 255, .4);
+    }
+    .target-picker {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-left: 12px;
+      padding-left: 14px;
+      border-left: 1px solid var(--line);
+    }
+    .target-picker label {
+      font: 600 12px 'Space Grotesk', system-ui, sans-serif;
+      color: var(--mut);
+      letter-spacing: .08em;
+    }
+    select, input, textarea {
+      background: #060606;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 6px 10px;
+      color: #e8eefb;
+      transition: border-color .2s, box-shadow .2s;
+    }
+    select:focus, input:focus, textarea:focus {
+      border-color: var(--blue);
+      box-shadow: 0 0 18px rgba(0, 140, 255, .2);
+      outline: none;
+    }
+    .stats {
+      margin-left: auto;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: flex-end;
+    }
+    .pill {
+      padding: 5px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(0, 140, 255, .06);
+      font: 500 12px Inter, system-ui, sans-serif;
+      color: var(--mut);
+      white-space: nowrap;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .pill b { color: #fff; font-weight: 600; }
+    .pill.ok { border-color: rgba(25, 230, 176, .45); background: rgba(25, 230, 176, .09); color: #b9f7e6; }
+    .pill.ok b { color: var(--ok); }
+    .pill.warn { border-color: rgba(241, 194, 107, .5); background: rgba(241, 194, 107, .09); color: #ffe6b0; }
+    .pill.warn b { color: var(--warn); }
+    .pill.bad { border-color: rgba(255, 77, 94, .55); background: rgba(255, 77, 94, .1); color: #ffb3ba; }
+    .pill.bad b { color: var(--bad); }
+
+    .prog {
+      height: 2px;
+      background: rgba(0, 140, 255, .12);
+      width: 100%;
+    }
+    .prog i {
+      display: block;
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--blue), var(--cyan));
+      box-shadow: 0 0 10px var(--cyan);
+      transition: width .4s ease;
+    }
+    .prog.big {
+      height: 8px;
+      border-radius: 99px;
+      margin: 12px 0 16px;
+      overflow: hidden;
+      background: rgba(0, 140, 255, .15);
+    }
+
+    /* ==================== 3. BUTTONS ==================== */
+    .btn {
+      padding: 9px 18px;
+      border-radius: 999px;
+      border: 0;
+      font: 600 13px Inter, system-ui, sans-serif;
+      background: linear-gradient(135deg, var(--blue), #0a6bff);
+      color: #fff;
+      box-shadow: 0 0 18px rgba(0, 140, 255, .3);
+      transition: all .2s ease;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      text-decoration: none;
+    }
+    .btn:hover:not(:disabled) {
+      box-shadow: 0 0 26px rgba(0, 140, 255, .55);
+      transform: translateY(-1px);
+    }
+    .btn:active:not(:disabled) {
+      transform: scale(.97);
+    }
+    .btn:disabled {
+      opacity: .35;
+      cursor: default;
+      box-shadow: none;
+    }
+    .ghost {
+      padding: 8px 16px;
+      border-radius: 999px;
+      border: 1px solid rgba(0, 140, 255, .45);
+      background: transparent;
+      font: 500 13px Inter, system-ui, sans-serif;
+      color: #dbe9ff;
+      transition: all .2s ease;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+    .ghost:hover:not(:disabled) {
+      border-color: var(--cyan);
+      box-shadow: 0 0 16px rgba(0, 217, 255, .2);
+      color: #fff;
+    }
+    .ghost:disabled {
+      opacity: .35;
+      cursor: default;
+    }
+    .ghost.active {
+      background: linear-gradient(135deg, var(--blue), #0a6bff);
+      color: #fff;
+      border-color: transparent;
+      box-shadow: 0 0 16px rgba(0, 140, 255, .35);
+    }
+    .btn-danger {
+      background: transparent;
+      border: 1px solid var(--bad);
+      box-shadow: none;
+      color: #fff;
+      padding: 8px 16px;
+      border-radius: 999px;
+      font: 600 12px Inter, system-ui, sans-serif;
+      transition: all .2s ease;
+    }
+    .btn-danger:hover:not(:disabled) {
+      box-shadow: 0 0 16px rgba(255, 77, 94, .35);
+      background: rgba(255, 77, 94, .12);
+    }
+    .btn-warn {
+      background: transparent;
+      border: 1px solid var(--warn);
+      color: var(--warn);
+      padding: 8px 16px;
+      border-radius: 999px;
+      font: 600 12px Inter, system-ui, sans-serif;
+      transition: all .2s ease;
+    }
+    .btn-warn:hover:not(:disabled) {
+      border-color: #ffd98a;
+      color: #ffd98a;
+      box-shadow: 0 0 16px rgba(241, 194, 107, .3);
+      background: rgba(241, 194, 107, .1);
+    }
+    .btn-vio {
+      background: transparent;
+      border: 1px solid var(--vio);
+      color: #cdbdff;
+      padding: 6px 14px;
+      border-radius: 999px;
+      font: 600 12px Inter, system-ui, sans-serif;
+      transition: all .2s ease;
+      cursor: pointer;
+    }
+    .btn-vio:hover:not(:disabled) {
+      border-color: #c4b0ff;
+      color: #fff;
+      box-shadow: 0 0 16px rgba(169, 139, 255, .35);
+      background: rgba(169, 139, 255, .1);
+    }
+
+    /* ==================== 4. LAYOUT & CARDS ==================== */
+    .wrap {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 22px 16px 56px;
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr);
+      gap: 24px;
+      align-items: start;
+      flex: 1;
+      width: 100%;
+    }
+    aside {
+      position: sticky;
+      top: 84px;
+      max-height: calc(100vh - 100px);
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .card {
+      background:
+        linear-gradient(rgba(255, 255, 255, .06) 1px, transparent 1px) 0 0/52px 52px,
+        linear-gradient(90deg, rgba(255, 255, 255, .06) 1px, transparent 1px) 0 0/52px 52px,
+        linear-gradient(180deg, var(--card2), var(--card));
+      border: 1px solid rgba(0, 140, 255, .3);
+      border-radius: 10px;
+      padding: 20px;
+      transition: border-color .25s, box-shadow .25s;
+    }
+    .card:hover {
+      border-color: rgba(0, 140, 255, .38);
+      box-shadow: 0 0 30px rgba(0, 140, 255, .08);
+    }
+    .box {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(6, 6, 6, .7);
+      margin: 0 0 12px;
+    }
+    .box h2, .h2 {
+      margin: 0 0 6px;
+      font: 600 16px 'Space Grotesk', system-ui, sans-serif;
+      color: #fff;
+    }
+    .h2 {
+      margin: 24px 0 12px;
+    }
+    .line {
+      color: var(--mut);
+      margin: 4px 0;
+    }
+    .hint {
+      color: var(--mut);
+      font-size: 12px;
+    }
+
+    /* Sidebar Navigation Parts */
+    .parts {
+      display: grid;
+      gap: 8px;
+    }
+    .part {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      width: 100%;
+      text-align: left;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: rgba(6, 6, 6, .9);
+      transition: all .2s ease;
+      color: #e2e8f0;
+      cursor: pointer;
+    }
+    .part:hover {
+      border-color: var(--blue);
+      box-shadow: 0 0 18px rgba(0, 140, 255, .2);
+      color: #fff;
+    }
+    .part.active {
+      border-color: var(--cyan);
+      box-shadow: inset 0 0 0 1px var(--cyan), 0 0 20px rgba(0, 217, 255, .15);
+      background: rgba(0, 140, 255, .09);
+      color: #fff;
+    }
+    .part strong {
+      display: block;
+      font: 600 14px 'Space Grotesk', system-ui, sans-serif;
+    }
+    .part small {
+      color: var(--mut);
+      font-size: 11px;
+    }
+    .nav-badge {
+      margin-left: auto;
+      font: 600 11px 'Space Grotesk', monospace;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: rgba(0, 140, 255, .12);
+      border: 1px solid var(--line);
+      color: var(--cyan);
+    }
+    .nav-badge.warn {
+      background: rgba(241, 194, 107, .15);
+      border-color: rgba(241, 194, 107, .4);
+      color: var(--warn);
+    }
+    .nav-badge.bad {
+      background: rgba(255, 77, 94, .15);
+      border-color: rgba(255, 77, 94, .4);
+      color: var(--bad);
+    }
+
+    /* Small Rings & Chips */
+    .ring {
+      flex: none;
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: conic-gradient(var(--cyan) var(--p, 0%), rgba(0, 140, 255, .18) 0);
+      display: grid;
+      place-items: center;
+      position: relative;
+    }
+    .ring::before {
+      content: "";
+      position: absolute;
+      inset: 3px;
+      border-radius: 50%;
+      background: #080808;
+    }
+    .ring b {
+      position: relative;
+      font: 600 10px Inter, system-ui, sans-serif;
+      color: #fff;
+    }
+    .chip {
+      width: 32px;
+      height: 32px;
+      border-radius: 9px;
+      border: 1px solid var(--line);
+      background: #070707;
+      color: var(--mut);
+      font: 600 12px Inter, system-ui, sans-serif;
+      display: inline-grid;
+      place-items: center;
+      transition: .2s;
+    }
+    .chip:hover { border-color: var(--blue); color: #fff; }
+    .chip.cur { border-color: var(--cyan); color: #fff; box-shadow: inset 0 0 0 1px var(--cyan); }
+    .chip.ok { background: rgba(25, 230, 176, .12); border-color: rgba(25, 230, 176, .5); color: var(--ok); }
+    .chip.bad { background: rgba(255, 77, 94, .14); border-color: rgba(255, 77, 94, .6); color: var(--bad); }
+
+    /* Big Score Numbers */
+    .score {
+      font: 700 clamp(32px, 8vw, 44px)/1 'Space Grotesk', system-ui, sans-serif;
+      margin: 8px 0;
+      color: #fff;
+    }
+
+    /* Stat Cards Grid */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .stat-card {
+      padding: 14px;
+      border-radius: 10px;
+      background: rgba(6, 6, 6, .75);
+      border: 1px solid var(--line);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .stat-card .label {
+      font: 600 11px 'Space Grotesk', system-ui, sans-serif;
+      color: var(--mut);
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    .stat-card .sub {
+      font-size: 11px;
+      color: var(--mut);
+    }
+    .stat-card.crit { border-color: rgba(255, 77, 94, .3); }
+    .stat-card.crit .score { color: var(--bad); }
+    .stat-card.high { border-color: rgba(255, 138, 61, .3); }
+    .stat-card.high .score { color: var(--high); }
+    .stat-card.med { border-color: rgba(241, 194, 107, .3); }
+    .stat-card.med .score { color: var(--warn); }
+    .stat-card.blue .score { color: var(--blue); }
+    .stat-card.cyan .score { color: var(--cyan); }
+
+    /* Timeline (Agent Graph & Skills) */
+    .sec {
+      position: relative;
+      padding: 0 0 24px 46px;
+    }
+    .sec::before {
+      content: "";
+      position: absolute;
+      left: 15px;
+      top: 34px;
+      bottom: 2px;
+      width: 1px;
+      background: var(--line);
+    }
+    .sec:last-of-type {
+      padding-bottom: 6px;
+    }
+    .sec:last-of-type::before {
+      display: none;
+    }
+    .dot {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      border: 1.5px solid var(--blue);
+      display: grid;
+      place-items: center;
+      font: 600 12px 'Space Grotesk', system-ui, sans-serif;
+      color: var(--cyan);
+      background: var(--bg);
+    }
+    .sec.act .dot {
+      box-shadow: 0 0 14px rgba(0, 140, 255, .6);
+      border-color: var(--cyan);
+    }
+    .sec.done .dot {
+      background: var(--blue);
+      color: #fff;
+    }
+    .sec h3 {
+      margin: 0;
+      font: 600 15px/1.3 'Space Grotesk', system-ui, sans-serif;
+      color: #fff;
+    }
+    .sec small {
+      color: var(--mut);
+      font-size: 12px;
+    }
+
+    /* Panels & Alerts */
+    .panel {
+      margin-top: 14px;
+      padding: 14px 16px;
+      border-radius: 10px;
+      border: 1px solid;
+    }
+    .panel.ok {
+      border-color: rgba(25, 230, 176, .55);
+      background: rgba(25, 230, 176, .09);
+      color: #b9f7e6;
+    }
+    .panel.ok b { color: var(--ok); }
+    .panel.bad {
+      border-color: rgba(255, 77, 94, .6);
+      background: rgba(255, 77, 94, .09);
+      color: #ffccd0;
+    }
+    .panel.bad b { color: var(--bad); }
+    .note {
+      margin-top: 12px;
+      padding: 12px 16px;
+      border-radius: 10px;
+      border: 1px solid rgba(241, 194, 107, .5);
+      background: rgba(241, 194, 107, .08);
+    }
+    .note b { color: var(--warn); }
+    .note p { margin: 6px 0 0; color: #e6d6b0; font-size: 13px; }
+
+    .ans {
+      margin-top: 12px;
+      padding: 14px 16px;
+      border-radius: 10px;
+      border: 1px solid rgba(0, 217, 255, .3);
+      background: rgba(0, 140, 255, .07);
+      animation: rise .3s ease both;
+    }
+
+    /* Tags & Badges */
+    .tag {
+      padding: 4px 12px;
+      border-radius: 999px;
+      font: 600 11px 'Space Grotesk', system-ui, sans-serif;
+      display: inline-block;
+      letter-spacing: .04em;
+    }
+    .tag.ok {
+      background: rgba(25, 230, 176, .12);
+      color: var(--ok);
+      border: 1px solid rgba(25, 230, 176, .5);
+    }
+    .tag.bad, .tag.crit {
+      background: var(--bad);
+      color: #fff;
+      border: 1px solid var(--bad);
+    }
+    .tag.high {
+      background: rgba(255, 138, 61, .15);
+      color: var(--high);
+      border: 1px solid rgba(255, 138, 61, .6);
+    }
+    .tag.med {
+      background: rgba(241, 194, 107, .15);
+      color: var(--warn);
+      border: 1px solid rgba(241, 194, 107, .6);
+    }
+    .tag.low {
+      background: rgba(0, 140, 255, .15);
+      color: var(--blue);
+      border: 1px solid rgba(0, 140, 255, .5);
+    }
+    .tag.info {
+      background: rgba(154, 167, 184, .15);
+      color: var(--mut);
+      border: 1px solid rgba(154, 167, 184, .4);
+    }
+
+    /* Data Tables */
+    .data-table-wrap {
+      overflow-x: auto;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+    }
+    table.data-table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 13px;
+    }
+    table.data-table th {
+      background: rgba(11, 11, 11, .95);
+      color: var(--mut);
+      font: 600 11px 'Space Grotesk', monospace;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    table.data-table td {
+      padding: 10px 14px;
+      border-bottom: 1px solid rgba(0, 140, 255, .08);
+      color: #cbd5e1;
+    }
+    table.data-table tr:hover td {
+      background: rgba(0, 140, 255, .04);
+      color: #fff;
+    }
+
+    /* Terminal Console */
+    .terminal-box {
+      background: #050505;
+      border: 1px solid rgba(0, 140, 255, .3);
+      border-radius: 10px;
+      padding: 16px;
+      font-family: ui-monospace, 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+      font-size: 12px;
+      color: #19e6b0;
+      height: 520px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+      line-height: 1.6;
+    }
+
+    /* Modals */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      background: rgba(8, 8, 8, .78);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      display: grid;
+      place-items: center;
+      padding: 16px;
+    }
+    .modal-backdrop.hidden {
+      display: none;
+    }
+    .modal-box {
+      background:
+        linear-gradient(rgba(255, 255, 255, .06) 1px, transparent 1px) 0 0/52px 52px,
+        linear-gradient(90deg, rgba(255, 255, 255, .06) 1px, transparent 1px) 0 0/52px 52px,
+        linear-gradient(180deg, var(--card2), var(--card));
+      border: 1px solid rgba(0, 140, 255, .4);
+      border-radius: 12px;
+      padding: 24px;
+      width: 100%;
+      max-width: 520px;
+      box-shadow: 0 0 40px rgba(0, 140, 255, .15);
+      animation: rise .25s ease both;
+    }
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 12px;
+      margin-bottom: 18px;
+    }
+    .modal-header h3 {
+      margin: 0;
+      font: 700 17px 'Space Grotesk', system-ui, sans-serif;
+      color: #fff;
+    }
+    .modal-close {
+      background: transparent;
+      border: none;
+      font-size: 20px;
+      color: var(--mut);
+      cursor: pointer;
+    }
+    .modal-close:hover { color: #fff; }
+
+    /* Motion */
+    .enter {
+      animation: rise .35s ease both;
+    }
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: none; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      * { animation: none !important; transition: none !important; }
+    }
+
+    /* Responsive */
+    .mobile-menu-btn {
+      display: none;
+    }
+    @media (max-width: 860px) {
+      .wrap {
+        grid-template-columns: 1fr;
+        padding-top: 16px;
+      }
+      aside {
+        display: none;
+        position: static;
+        max-height: none;
+      }
+      aside.open {
+        display: flex;
+      }
+      .mobile-menu-btn {
+        display: inline-flex;
+      }
+      .stats .hide-sm {
+        display: none;
+      }
+      .card {
+        padding: 16px;
+      }
+      .target-picker {
+        border-left: none;
+        padding-left: 0;
+        margin-left: 0;
       }
     }
-  </script>
-  <style>
-    /* Custom scrollbars */
-    ::-webkit-scrollbar { width: 6px; height: 6px; }
-    ::-webkit-scrollbar-track { background: #0f172a; }
-    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
-    ::-webkit-scrollbar-thumb:hover { background: #475569; }
-    .font-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 
-    /* MOROS cyber operations console */
-    :root {
-      color-scheme: dark;
-      --ink: #070a12;
-      --panel: #0d1220;
-      --panel-raised: #11192a;
-      --line: rgba(130, 160, 190, .14);
-      --cyan: #48f4e4;
-      --cyan-soft: #00cdbd;
-      --violet: #aa7bff;
-      --muted: #8491a7;
+    /* Footer signature */
+    .by {
+      text-align: center;
+      padding: 6px 16px calc(34px + env(safe-area-inset-bottom, 0px));
+      margin-top: auto;
     }
-    html, body { min-height: 100%; }
-    body {
-      background-color: var(--ink) !important;
-      background-image:
-        radial-gradient(ellipse at 12% -10%, rgba(0, 218, 201, .12), transparent 36%),
-        radial-gradient(ellipse at 90% 4%, rgba(139, 79, 255, .10), transparent 30%),
-        linear-gradient(rgba(95, 130, 155, .035) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(95, 130, 155, .035) 1px, transparent 1px) !important;
-      background-size: auto, auto, 42px 42px, 42px 42px !important;
-      color: #e6edf7;
-      letter-spacing: .01em;
+    .by::before {
+      content: "";
+      display: block;
+      width: min(240px, 55%);
+      height: 1px;
+      margin: 0 auto 18px;
+      background: linear-gradient(90deg, transparent, var(--blue), transparent);
     }
-    ::-webkit-scrollbar-track { background: #080c15; }
-    ::-webkit-scrollbar-thumb { background: #25344a; border: 1px solid #080c15; }
-    ::-webkit-scrollbar-thumb:hover { background: #3b536f; }
-    header {
-      min-height: 74px;
-      background: rgba(7, 11, 20, .88) !important;
-      border-color: var(--line) !important;
-      box-shadow: 0 8px 34px rgba(0, 0, 0, .26);
+    .by span {
+      font: 500 13px 'Space Grotesk', system-ui, sans-serif;
+      letter-spacing: .16em;
+      color: var(--mut);
     }
-    header .bg-gradient-to-tr {
-      background: linear-gradient(140deg, #0ce0ce, #58fff0 60%, #92fff5) !important;
-      box-shadow: 0 0 26px rgba(35, 241, 222, .28) !important;
-    }
-    header .bg-gradient-to-tr i { color: #041114 !important; }
-    header .font-extrabold { letter-spacing: .16em; }
-    header p { letter-spacing: .02em; }
-    aside {
-      background: rgba(8, 12, 21, .82) !important;
-      border-color: var(--line) !important;
-      backdrop-filter: blur(18px);
-    }
-    main { scroll-behavior: smooth; }
-    .bg-dark-950 { background-color: var(--ink) !important; }
-    .bg-dark-900, .bg-dark-900\/50, .bg-dark-900\/80 {
-      background-color: rgba(13, 18, 32, .88) !important;
-    }
-    .bg-dark-850, .bg-dark-800 { background-color: var(--panel-raised) !important; }
-    .border-dark-800, .border-dark-700 { border-color: var(--line) !important; }
-    .text-brand-500, .text-brand-400 { color: var(--cyan) !important; }
-    .text-emerald-400 { color: #4cf3d3 !important; }
-    .bg-brand-500\/10 { background-color: rgba(72, 244, 228, .08) !important; }
-    .border-brand-500\/20 { border-color: rgba(72, 244, 228, .25) !important; }
-    .shadow-emerald-500\/20 { --tw-shadow-color: rgba(38, 239, 218, .2) !important; }
-    button, select, input, textarea { transition: all .18s ease; }
-    button { letter-spacing: .015em; }
-    button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible {
-      outline: 2px solid var(--cyan) !important; outline-offset: 2px;
-    }
-    aside nav button { min-height: 44px; border: 1px solid transparent; }
-    aside nav button:hover { border-color: rgba(72, 244, 228, .12); }
-    aside nav button.bg-dark-800 {
-      color: #ecffff !important;
-      background: linear-gradient(100deg, rgba(31, 223, 207, .14), rgba(31, 223, 207, .025)) !important;
-      border-color: rgba(72, 244, 228, .2);
-      box-shadow: inset 2px 0 0 var(--cyan), 0 0 22px rgba(5, 226, 205, .04);
-    }
-    aside nav button.bg-dark-800 i { color: var(--cyan) !important; }
-    main section > div[class*="rounded"], main section article {
-      border-color: var(--line);
-    }
-    #tab-overview > .flex:first-child {
-      position: relative; overflow: hidden;
-      background: linear-gradient(112deg, rgba(14, 26, 39, .98), rgba(13, 18, 32, .92) 60%, rgba(28, 19, 49, .76)) !important;
-      border-color: rgba(72, 244, 228, .16) !important;
-      box-shadow: 0 18px 60px rgba(0, 0, 0, .23);
-    }
-    #tab-overview > .flex:first-child::after {
-      content: ""; position: absolute; width: 300px; height: 300px; right: 8%; top: -220px;
-      border: 1px solid rgba(72, 244, 228, .17); border-radius: 50%;
-      box-shadow: 0 0 0 28px rgba(72,244,228,.025), 0 0 0 58px rgba(72,244,228,.018);
-      pointer-events: none;
-    }
-    #overviewTargetName { letter-spacing: .04em; text-shadow: 0 0 24px rgba(72,244,228,.16); }
-    #tab-overview .grid > div[class*="rounded-xl"] {
-      position: relative; overflow: hidden; min-height: 112px;
-      background: linear-gradient(145deg, rgba(17,25,42,.96), rgba(10,15,27,.96)) !important;
-      border-color: var(--line) !important;
-      box-shadow: 0 10px 26px rgba(0,0,0,.13);
-    }
-    #tab-overview .grid > div[class*="rounded-xl"]::before {
-      content: ""; position: absolute; left: 0; top: 0; width: 100%; height: 2px;
-      background: linear-gradient(90deg, rgba(72,244,228,.72), transparent 75%); opacity: .55;
-    }
-    #tab-overview .grid > div:nth-child(2)::before { background: linear-gradient(90deg,#ff527e,transparent 75%); }
-    #tab-overview .grid > div:nth-child(3)::before { background: linear-gradient(90deg,#ff9a55,transparent 75%); }
-    #tab-overview .grid > div:nth-child(4)::before { background: linear-gradient(90deg,#f1d35a,transparent 75%); }
-    #tab-overview .grid > div:nth-child(6)::before { background: linear-gradient(90deg,#a77bff,transparent 75%); }
-    #tab-overview .grid > div[class*="rounded-xl"] > span:first-child,
-    #tab-overview .grid > div[class*="rounded-xl"] > div:first-child { letter-spacing: .1em; }
-    #tab-overview .grid > div[class*="rounded-xl"] .text-2xl { font-size: 1.85rem; }
-    main h1, main h2 { letter-spacing: .025em; }
-    main h2[class*="uppercase"] { font-size: .72rem; letter-spacing: .13em; }
-    .rounded-2xl, .rounded-xl { border-radius: 13px !important; }
-    .bg-gradient-to-r.from-brand-600,
-    button.bg-gradient-to-r.from-brand-600 {
-      background-image: linear-gradient(100deg, #13cfc0, #53f4e1) !important;
-      color: #041113 !important;
-      box-shadow: 0 5px 24px rgba(29, 228, 210, .18) !important;
-    }
-    button.bg-gradient-to-r.from-brand-600:hover { filter: brightness(1.12); transform: translateY(-1px); }
-    select, input, textarea {
-      background-color: #0a101c !important; border-color: rgba(128,155,186,.22) !important;
-      color: #dce9f5 !important; border-radius: 8px !important;
-    }
-    select:hover, input:hover, textarea:hover { border-color: rgba(72,244,228,.42) !important; }
-    canvas { filter: drop-shadow(0 0 12px rgba(72,244,228,.08)); }
-    .animate-pulse { box-shadow: 0 0 12px currentColor; }
-    @media (max-width: 900px) {
-      header { padding-left: 16px !important; padding-right: 16px !important; }
-      main { padding: 22px !important; }
-      aside { width: 210px !important; }
-    }
-    @media (max-width: 640px) {
-      header { min-height: 64px; }
-      header .text-\[10px\] { display: none; }
-      header p { display: none; }
-      header .flex.items-center.space-x-3 { gap: .5rem; }
-      header button span { display: none; }
-      header button { padding: 9px !important; }
-      .flex-1.flex.overflow-hidden { display: block; overflow: visible; }
-      aside { width: 100% !important; position: sticky; top: 64px; z-index: 30; padding: 8px !important; }
-      aside nav { display: flex; overflow-x: auto; gap: 5px; }
-      aside nav button { width: auto !important; flex: 0 0 46px; justify-content: center; padding: 10px !important; }
-      aside nav button span { display: none; }
-      aside > div { display: none; }
-      main { padding: 16px !important; overflow: visible !important; }
-      #tab-overview > .flex:first-child { padding: 18px !important; }
-      #overviewTargetName { font-size: 1.25rem; }
+    .by b {
+      font-weight: 700;
+      color: var(--cyan);
+      text-shadow: 0 0 12px rgba(0, 217, 255, .55);
     }
   </style>
 </head>
-<body class="bg-dark-950 text-slate-100 min-h-screen flex flex-col font-sans antialiased selection:bg-brand-500 selection:text-black">
+<body>
 
   <!-- ==================== HEADER ==================== -->
-  <header class="border-b border-dark-800 bg-dark-900/80 backdrop-blur sticky top-0 z-40 px-6 py-3 flex items-center justify-between">
-    <div class="flex items-center space-x-4">
-      <div class="flex items-center space-x-3">
-        <div class="w-9 h-9 rounded-lg bg-gradient-to-tr from-brand-600 to-emerald-400 flex items-center justify-center shadow-lg shadow-emerald-500/20">
-          <i data-lucide="shield-alert" class="w-5 h-5 text-black"></i>
-        </div>
-        <div>
-          <div class="flex items-center space-x-2">
-            <span class="font-extrabold text-lg tracking-wider text-white">MOROS <span class="text-brand-500">AI</span></span>
-            <span class="text-[10px] uppercase font-bold tracking-widest px-2 py-0.5 rounded bg-brand-500/10 text-brand-400 border border-brand-500/20">AGENTIC PENTEST</span>
-          </div>
-          <p class="text-xs text-slate-400">Autonomous Web Pentest Automation System</p>
-        </div>
+  <header>
+    <div class="bar">
+      <!-- Mobile menu trigger -->
+      <button class="ghost mobile-menu-btn" onclick="toggleSidebar()" aria-label="Toggle Navigation">☰ Menu</button>
+
+      <!-- Brand Element -->
+      <div class="brand-wrap" onclick="switchTab('overview')">
+        <img src="logo.png" alt="MOROS" class="brand-logo">
+        <span class="brand">MOROS <span>AI</span></span>
       </div>
 
       <!-- Target Selector -->
-      <div class="hidden md:flex items-center space-x-2 ml-8 pl-8 border-l border-dark-800">
-        <span class="text-xs text-slate-400 font-medium">TARGET:</span>
-        <select id="targetSelect" onchange="onTargetChange()" class="bg-dark-850 border border-dark-700 text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:border-brand-500 font-mono text-emerald-400">
+      <div class="target-picker">
+        <label for="targetSelect">TARGET:</label>
+        <select id="targetSelect" onchange="onTargetChange()" class="mono" style="font-size: 13px;">
           <option value="">Loading targets...</option>
         </select>
-        <button onclick="openModal('newTargetModal')" class="p-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 text-slate-300 hover:text-white transition" title="Add Target">
-          <i data-lucide="plus" class="w-4 h-4"></i>
+        <button onclick="openModal('newTargetModal')" class="ghost" style="padding: 4px 10px; font-size: 12px;" title="Add Target">+</button>
+      </div>
+
+      <!-- Right Header Actions & Stats -->
+      <div class="stats">
+        <span id="scopeBadge" class="pill ok hide-sm"><b>SCOPE VERIFIED</b></span>
+        <span id="scanStatusBadge" class="pill"><b>IDLE</b></span>
+        <button onclick="openModal('newScanModal')" class="btn">
+          <span>Launch Scan</span>
         </button>
       </div>
     </div>
-
-    <!-- Right Header Actions -->
-    <div class="flex items-center space-x-3">
-      <!-- Scope Status Badge -->
-      <div id="scopeBadge" class="hidden sm:flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-        <i data-lucide="file-check-2" class="w-3.5 h-3.5"></i>
-        <span>SCOPE VERIFIED</span>
-      </div>
-
-      <!-- Scan status badge -->
-      <div id="scanStatusBadge" class="hidden sm:flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-dark-800 text-slate-300 border border-dark-700">
-        <span class="w-2 h-2 rounded-full bg-slate-500"></span>
-        <span>IDLE</span>
-      </div>
-
-      <!-- New Scan Button -->
-      <button onclick="openModal('newScanModal')" class="flex items-center space-x-2 px-4 py-1.5 rounded-lg bg-gradient-to-r from-brand-600 to-emerald-500 hover:from-brand-500 hover:to-emerald-400 text-black font-semibold text-sm shadow-lg shadow-emerald-500/20 transition">
-        <i data-lucide="play" class="w-4 h-4 fill-current"></i>
-        <span>Launch Scan</span>
-      </button>
-    </div>
+    <!-- Thin progress bar under header -->
+    <div class="prog"><i id="globalProgBar" style="width: 100%;"></i></div>
   </header>
 
   <!-- ==================== MAIN CONTENT WRAPPER ==================== -->
-  <div class="flex-1 flex overflow-hidden">
+  <div class="wrap">
 
     <!-- SIDEBAR NAVIGATION -->
-    <aside class="w-64 border-r border-dark-800 bg-dark-900/50 flex flex-col justify-between p-4 space-y-6">
-      <nav class="space-y-1.5">
-        <button onclick="switchTab('overview')" id="tabBtn-overview" class="w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium transition bg-dark-800 text-white">
-          <i data-lucide="layout-dashboard" class="w-4 h-4 text-brand-400"></i>
-          <span>Dashboard Overview</span>
-        </button>
-        <button onclick="switchTab('pipeline')" id="tabBtn-pipeline" class="w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium transition text-slate-400 hover:bg-dark-850 hover:text-slate-200">
-          <i data-lucide="git-fork" class="w-4 h-4"></i>
-          <span>Agent Graph & Skills</span>
-          <span class="ml-auto text-xs px-1.5 py-0.5 rounded bg-dark-800 text-slate-400">15</span>
-        </button>
-        <button onclick="switchTab('findings')" id="tabBtn-findings" class="w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium transition text-slate-400 hover:bg-dark-850 hover:text-slate-200">
-          <i data-lucide="bug" class="w-4 h-4"></i>
-          <span>Findings & Exploits</span>
-          <span id="navFindingsCount" class="ml-auto text-xs px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 font-bold">0</span>
-        </button>
-        <button onclick="switchTab('endpoints')" id="tabBtn-endpoints" class="w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium transition text-slate-400 hover:bg-dark-850 hover:text-slate-200">
-          <i data-lucide="network" class="w-4 h-4"></i>
-          <span>Endpoints & APIs</span>
-          <span id="navEndpointsCount" class="ml-auto text-xs px-1.5 py-0.5 rounded bg-dark-800 text-slate-400">0</span>
-        </button>
-        <button onclick="switchTab('checkpoints')" id="tabBtn-checkpoints" class="w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium transition text-slate-400 hover:bg-dark-850 hover:text-slate-200">
-          <i data-lucide="user-check" class="w-4 h-4"></i>
-          <span>Human Checkpoints</span>
-          <span id="navCheckpointsBadge" class="ml-auto text-xs px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-bold">HITL</span>
-        </button>
-        <button onclick="switchTab('terminal')" id="tabBtn-terminal" class="w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium transition text-slate-400 hover:bg-dark-850 hover:text-slate-200">
-          <i data-lucide="terminal" class="w-4 h-4"></i>
-          <span>Live Logs & Output</span>
-        </button>
-        <button onclick="switchTab('report')" id="tabBtn-report" class="w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium transition text-slate-400 hover:bg-dark-850 hover:text-slate-200">
-          <i data-lucide="file-text" class="w-4 h-4"></i>
-          <span>Report Conglomeration</span>
-        </button>
+    <aside class="card" id="appSidebar">
+      <div class="h2" style="margin-top:0;">OPERATIONS</div>
+      <nav class="parts">
+        <div class="part active" id="tabBtn-overview" onclick="switchTab('overview')">
+          <span class="chip cur">01</span>
+          <div>
+            <strong>Overview</strong>
+            <small>Metrics & fingerprint</small>
+          </div>
+        </div>
+        <div class="part" id="tabBtn-pipeline" onclick="switchTab('pipeline')">
+          <span class="chip">02</span>
+          <div>
+            <strong>Skills Graph</strong>
+            <small>Orchestration chain</small>
+          </div>
+          <span class="nav-badge">15</span>
+        </div>
+        <div class="part" id="tabBtn-findings" onclick="switchTab('findings')">
+          <span class="chip">03</span>
+          <div>
+            <strong>Findings & PoCs</strong>
+            <small>Verified vulnerabilities</small>
+          </div>
+          <span class="nav-badge bad" id="navFindingsCount">0</span>
+        </div>
+        <div class="part" id="tabBtn-endpoints" onclick="switchTab('endpoints')">
+          <span class="chip">04</span>
+          <div>
+            <strong>Endpoints & APIs</strong>
+            <small>Discovered routes</small>
+          </div>
+          <span class="nav-badge" id="navEndpointsCount">0</span>
+        </div>
+        <div class="part" id="tabBtn-checkpoints" onclick="switchTab('checkpoints')">
+          <span class="chip">05</span>
+          <div>
+            <strong>HITL Checkpoints</strong>
+            <small>Human approval gate</small>
+          </div>
+          <span class="nav-badge warn" id="navCheckpointsBadge">HITL</span>
+        </div>
+        <div class="part" id="tabBtn-terminal" onclick="switchTab('terminal')">
+          <span class="chip">06</span>
+          <div>
+            <strong>Live Terminal</strong>
+            <small>Streaming execution logs</small>
+          </div>
+        </div>
+        <div class="part" id="tabBtn-report" onclick="switchTab('report')">
+          <span class="chip">07</span>
+          <div>
+            <strong>Final Report</strong>
+            <small>Conglomerated audit</small>
+          </div>
+        </div>
       </nav>
 
       <!-- System Status Widget -->
-      <div class="p-3.5 rounded-xl bg-dark-900 border border-dark-800 space-y-2.5 text-xs text-slate-400">
-        <div class="flex items-center justify-between font-semibold text-slate-300">
-          <span>SYSTEM STATUS</span>
-          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+      <div class="box" style="margin-top: 10px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <h2 style="font-size:13px; text-transform:uppercase; letter-spacing:.08em; margin:0;">System Engine</h2>
+          <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--ok); box-shadow:0 0 8px var(--ok);"></span>
         </div>
-        <div class="flex justify-between">
+        <div class="line" style="display:flex; justify-content:space-between; font-size:12px;">
           <span>Engine:</span>
-          <span class="font-mono text-slate-200">Moros AI v1.0</span>
+          <span class="mono" style="color:#fff;">Moros AI v1.0</span>
         </div>
-        <div class="flex justify-between">
+        <div class="line" style="display:flex; justify-content:space-between; font-size:12px;">
           <span>Playwright:</span>
-          <span id="sysPlaywrightStatus" class="font-mono text-slate-200">Checking...</span>
+          <span id="sysPlaywrightStatus" class="mono" style="color:var(--ok);">Checking...</span>
         </div>
-        <div class="flex justify-between">
+        <div class="line" style="display:flex; justify-content:space-between; font-size:12px;">
           <span>Human-in-Loop:</span>
-          <span class="font-semibold text-emerald-400">Enforced</span>
+          <span style="color:var(--cyan); font-weight:600;">Enforced</span>
         </div>
+      </div>
+
+      <!-- Destructive / Reset Controls with Two-Step Confirm -->
+      <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px;">
+        <button id="btnStopScan" class="btn-danger" style="flex:1;" onclick="handleTwoStepAction(this, stopActiveScan, 'Stop Agent', 'Confirm Stop?')">Stop Agent</button>
+        <button id="btnResetTarget" class="btn-warn" style="flex:1;" onclick="handleTwoStepAction(this, resetTargetData, 'Rescan', 'Confirm Rescan?')">Rescan</button>
       </div>
     </aside>
 
     <!-- CONTENT AREA -->
-    <main class="flex-1 overflow-y-auto p-8 space-y-8">
+    <main>
 
       <!-- ==================== TAB 1: OVERVIEW ==================== -->
-      <section id="tab-overview" class="space-y-8">
-        <!-- Target Header Banner -->
-        <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4 p-6 rounded-2xl bg-gradient-to-r from-dark-900 via-dark-850 to-dark-900 border border-dark-800">
-          <div class="space-y-1">
-            <div class="flex items-center space-x-3">
-              <h1 id="overviewTargetName" class="text-2xl font-extrabold text-white font-mono">Select a target</h1>
-              <span id="overviewScopeTag" class="px-2.5 py-0.5 rounded text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">SCOPE VERIFIED</span>
+      <section id="tab-overview" class="enter">
+        <!-- Target Header Card -->
+        <div class="card" style="margin-bottom: 20px;">
+          <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 14px;">
+            <div>
+              <div style="display:flex; align-items:center; gap:10px; margin-bottom:4px;">
+                <h1 id="overviewTargetName" style="margin:0; font:700 24px 'Space Grotesk', system-ui, sans-serif; color:#fff;" class="mono">Select a target</h1>
+                <span id="overviewScopeTag" class="pill ok">SCOPE VERIFIED</span>
+              </div>
+              <p class="hint" style="margin:0;">Autonomous multi-skill reconnaissance, JS collection, vulnerability discovery & review-skill verification.</p>
             </div>
-            <p class="text-sm text-slate-400">Autonomous dynamic reconnaissance, JS collection, vulnerability discovery & verification</p>
-          </div>
-          <div class="flex items-center space-x-3">
-            <button onclick="refreshTargetData()" class="flex items-center space-x-2 px-3 py-2 rounded-lg bg-dark-800 hover:bg-dark-700 text-sm font-medium transition">
-              <i data-lucide="refresh-cw" class="w-4 h-4"></i>
-              <span>Refresh</span>
-            </button>
-            <button onclick="switchTab('report')" class="flex items-center space-x-2 px-4 py-2 rounded-lg bg-dark-700 hover:bg-dark-600 text-sm font-medium transition text-white">
-              <i data-lucide="download" class="w-4 h-4"></i>
-              <span>Export Report</span>
-            </button>
+            <div style="display:flex; gap:8px;">
+              <button onclick="refreshTargetData()" class="ghost">Refresh</button>
+              <button onclick="switchTab('report')" class="ghost">Export Report</button>
+            </div>
           </div>
         </div>
 
-        <!-- Metrics Grid -->
-        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-          <!-- Total Findings -->
-          <div class="p-4 rounded-xl bg-dark-900 border border-dark-800 space-y-1">
-            <span class="text-xs text-slate-400 font-medium">TOTAL FINDINGS</span>
-            <div id="statTotalFindings" class="text-2xl font-bold text-white font-mono">0</div>
-            <span class="text-[11px] text-slate-500">Across all categories</span>
+        <!-- Metric Score Cards -->
+        <div class="stats-grid">
+          <div class="stat-card">
+            <span class="label">Total Findings</span>
+            <div id="statTotalFindings" class="score">0</div>
+            <span class="sub">Across all skills</span>
           </div>
-          <!-- Critical -->
-          <div class="p-4 rounded-xl bg-dark-900 border border-rose-500/20 bg-rose-500/5 space-y-1">
-            <div class="flex items-center justify-between text-xs text-rose-400 font-medium">
-              <span>CRITICAL</span>
-              <i data-lucide="flame" class="w-3.5 h-3.5"></i>
-            </div>
-            <div id="statCritical" class="text-2xl font-bold text-rose-400 font-mono">0</div>
-            <span class="text-[11px] text-rose-400/60">Pending human review</span>
+          <div class="stat-card crit">
+            <span class="label" style="color:var(--bad);">Critical</span>
+            <div id="statCritical" class="score">0</div>
+            <span class="sub">Pending review</span>
           </div>
-          <!-- High -->
-          <div class="p-4 rounded-xl bg-dark-900 border border-orange-500/20 bg-orange-500/5 space-y-1">
-            <div class="flex items-center justify-between text-xs text-orange-400 font-medium">
-              <span>HIGH</span>
-              <i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i>
-            </div>
-            <div id="statHigh" class="text-2xl font-bold text-orange-400 font-mono">0</div>
-            <span class="text-[11px] text-orange-400/60">Pending human review</span>
+          <div class="stat-card high">
+            <span class="label" style="color:var(--high);">High</span>
+            <div id="statHigh" class="score">0</div>
+            <span class="sub">Pending review</span>
           </div>
-          <!-- Medium -->
-          <div class="p-4 rounded-xl bg-dark-900 border border-yellow-500/20 bg-yellow-500/5 space-y-1">
-            <div class="flex items-center justify-between text-xs text-yellow-400 font-medium">
-              <span>MEDIUM</span>
-              <i data-lucide="alert-circle" class="w-3.5 h-3.5"></i>
-            </div>
-            <div id="statMedium" class="text-2xl font-bold text-yellow-400 font-mono">0</div>
-            <span class="text-[11px] text-yellow-400/60">Pending human review</span>
+          <div class="stat-card med">
+            <span class="label" style="color:var(--warn);">Medium</span>
+            <div id="statMedium" class="score">0</div>
+            <span class="sub">Pending review</span>
           </div>
-          <!-- Endpoints -->
-          <div class="p-4 rounded-xl bg-dark-900 border border-dark-800 space-y-1">
-            <span class="text-xs text-slate-400 font-medium">ENDPOINTS DISCOVERED</span>
-            <div id="statEndpoints" class="text-2xl font-bold text-emerald-400 font-mono">0</div>
-            <span class="text-[11px] text-slate-500">From JS & crawl</span>
+          <div class="stat-card cyan">
+            <span class="label" style="color:var(--cyan);">Endpoints</span>
+            <div id="statEndpoints" class="score">0</div>
+            <span class="sub">From JS & crawl</span>
           </div>
-          <!-- JS Files -->
-          <div class="p-4 rounded-xl bg-dark-900 border border-dark-800 space-y-1">
-            <span class="text-xs text-slate-400 font-medium">JS ARTIFACTS</span>
-            <div id="statJsFiles" class="text-2xl font-bold text-cyan-400 font-mono">0</div>
-            <span class="text-[11px] text-slate-500">Raw & beautified</span>
+          <div class="stat-card blue">
+            <span class="label" style="color:var(--blue);">JS Artifacts</span>
+            <div id="statJsFiles" class="score">0</div>
+            <span class="sub">Raw & beautified</span>
           </div>
         </div>
 
         <!-- Middle Section: Chart + Tech Stack -->
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <!-- Vulnerability Chart -->
-          <div class="p-6 rounded-2xl bg-dark-900 border border-dark-800 space-y-4 flex flex-col justify-between">
-            <div class="flex items-center justify-between">
-              <h2 class="text-sm font-semibold tracking-wider text-slate-300 uppercase">Vulnerability Severity Distribution</h2>
-              <i data-lucide="pie-chart" class="w-4 h-4 text-slate-400"></i>
+        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; margin-bottom: 20px;">
+          <!-- Severity Chart Card -->
+          <div class="card" style="display:flex; flex-direction:column; justify-content:space-between;">
+            <div>
+              <h2 style="font-size:15px; text-transform:uppercase; letter-spacing:.08em; margin:0 0 14px;">Severity Distribution</h2>
+              <div style="position:relative; width:100%; height:200px; display:flex; align-items:center; justify-content:center;">
+                <canvas id="vulnChart" width="220" height="200"></canvas>
+              </div>
             </div>
-            <div class="relative flex items-center justify-center my-auto h-48">
-              <canvas id="vulnChart"></canvas>
-            </div>
-            <div class="text-[11px] text-center text-slate-500">All severities are AI-proposed and provisional until confirmed.</div>
+            <div class="hint" style="text-align:center; margin-top:12px;">All severities are AI-proposed and provisional until confirmed.</div>
           </div>
 
-          <!-- Tech Stack Fingerprint -->
-          <div class="lg:col-span-2 p-6 rounded-2xl bg-dark-900 border border-dark-800 space-y-4">
-            <div class="flex items-center justify-between">
-              <div class="flex items-center space-x-2">
-                <i data-lucide="cpu" class="w-4 h-4 text-brand-400"></i>
-                <h2 class="text-sm font-semibold tracking-wider text-slate-300 uppercase">Detected Tech Stack & Misconfigurations</h2>
-              </div>
-              <span class="text-xs text-slate-500 font-mono">js-analyze output</span>
+          <!-- Tech Stack Fingerprint Card -->
+          <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
+              <h2 style="font-size:15px; text-transform:uppercase; letter-spacing:.08em; margin:0;">Detected Tech Stack</h2>
+              <span class="hint mono">js-analyze output</span>
             </div>
-
-            <div id="techStackContainer" class="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div class="p-4 rounded-xl bg-dark-850 border border-dark-800 space-y-2">
-                <span class="text-xs font-semibold text-slate-400 uppercase">Frontend Architecture</span>
-                <div id="techFrontend" class="text-sm font-medium text-slate-200">Analyzing...</div>
-              </div>
-              <div class="p-4 rounded-xl bg-dark-850 border border-dark-800 space-y-2">
-                <span class="text-xs font-semibold text-slate-400 uppercase">Backend Indicators</span>
-                <div id="techBackend" class="text-sm font-medium text-slate-200">Analyzing...</div>
-              </div>
-              <div class="md:col-span-2 p-4 rounded-xl bg-dark-850 border border-dark-800 space-y-2">
-                <span class="text-xs font-semibold text-amber-400 uppercase flex items-center space-x-1.5">
-                  <i data-lucide="shield-alert" class="w-3.5 h-3.5"></i>
-                  <span>Known Misconfigurations to Probe</span>
-                </span>
-                <ul id="techMisconfigs" class="text-xs text-slate-300 space-y-1 list-disc list-inside">
-                  <li>Run `js-analyze` to populate stack vulnerabilities</li>
-                </ul>
-              </div>
+            <div class="box">
+              <span class="hint" style="text-transform:uppercase; font-size:11px; font-weight:600;">Frontend Architecture</span>
+              <div id="techFrontend" style="font-weight:600; color:#fff; margin-top:4px;">Analyzing...</div>
+            </div>
+            <div class="box">
+              <span class="hint" style="text-transform:uppercase; font-size:11px; font-weight:600;">Backend Indicators</span>
+              <div id="techBackend" style="font-weight:600; color:#fff; margin-top:4px;">Analyzing...</div>
+            </div>
+            <div class="box" style="margin-bottom:0;">
+              <span class="hint" style="text-transform:uppercase; font-size:11px; font-weight:600; color:var(--warn);">Known Misconfigurations to Probe</span>
+              <ul id="techMisconfigs" class="mono" style="font-size:12px; margin:6px 0 0; padding-left:18px; color:#e2e8f0;">
+                <li>Run `js-analyze` to populate stack vulnerabilities</li>
+              </ul>
             </div>
           </div>
         </div>
 
         <!-- Human Checkpoints Preview in Overview -->
-        <div class="p-6 rounded-2xl bg-dark-900 border border-amber-500/20 bg-amber-500/[0.02] space-y-4">
-          <div class="flex items-center justify-between">
-            <div class="flex items-center space-x-2.5">
-              <i data-lucide="user-check" class="w-5 h-5 text-amber-400"></i>
-              <h2 class="text-sm font-bold text-slate-200 uppercase tracking-wider">Human-In-The-Loop Checkpoint Queue</h2>
-            </div>
-            <button onclick="switchTab('checkpoints')" class="text-xs text-amber-400 hover:underline">View All Checkpoints &rarr;</button>
+        <div class="card">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <h2 style="font-size:15px; text-transform:uppercase; letter-spacing:.08em; margin:0; color:var(--warn);">Human-In-The-Loop Checkpoint Queue</h2>
+            <button onclick="switchTab('checkpoints')" class="ghost" style="padding:4px 10px; font-size:12px;">View All &rarr;</button>
           </div>
-          <div id="overviewCheckpointsList" class="space-y-3">
-            <p class="text-xs text-slate-400">No pending checkpoints requiring approval.</p>
+          <div id="overviewCheckpointsList" class="parts">
+            <p class="hint">No pending checkpoints requiring approval.</p>
           </div>
         </div>
       </section>
 
       <!-- ==================== TAB 2: AGENT GRAPH & SKILLS ==================== -->
-      <section id="tab-pipeline" class="hidden space-y-6">
-        <div>
-          <h1 class="text-xl font-bold text-white">Agent Multi-Skill Coordination Graph</h1>
-          <p class="text-xs text-slate-400">14 specialized micro-skills orchestrated with strict completion verification (Review-Skill)</p>
+      <section id="tab-pipeline" style="display:none;" class="enter">
+        <div class="card" style="margin-bottom: 20px;">
+          <h1 style="margin:0 0 4px; font:700 20px 'Space Grotesk', system-ui, sans-serif; color:#fff;">Agent Multi-Skill Coordination Graph</h1>
+          <p class="hint" style="margin:0;">15 specialized micro-skills orchestrated with strict completion verification (Review-Skill)</p>
         </div>
-
-        <!-- Skills Flowchart Cards -->
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4" id="skillsGrid">
-          <!-- Dynamic Skill Cards inserted here -->
+        <div class="card" id="skillsTimeline">
+          <!-- Populated dynamically with .sec timeline items -->
         </div>
       </section>
 
       <!-- ==================== TAB 3: FINDINGS & EXPLOITS ==================== -->
-      <section id="tab-findings" class="hidden space-y-6">
-        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <h1 class="text-xl font-bold text-white">Discovered Vulnerabilities & Exploit Evidence</h1>
-            <p class="text-xs text-slate-400">All findings include verified PoC curl commands and context</p>
-          </div>
-          <!-- Severity Filter Buttons -->
-          <div class="flex items-center space-x-2">
-            <button onclick="filterFindings('ALL')" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-brand-600 text-black filter-btn" data-filter="ALL">All</button>
-            <button onclick="filterFindings('CRITICAL')" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-dark-800 text-rose-400 hover:bg-dark-700 filter-btn" data-filter="CRITICAL">Critical</button>
-            <button onclick="filterFindings('HIGH')" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-dark-800 text-orange-400 hover:bg-dark-700 filter-btn" data-filter="HIGH">High</button>
-            <button onclick="filterFindings('MEDIUM')" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-dark-800 text-yellow-400 hover:bg-dark-700 filter-btn" data-filter="MEDIUM">Medium</button>
-            <button onclick="filterFindings('LOW')" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-dark-800 text-blue-400 hover:bg-dark-700 filter-btn" data-filter="LOW">Low</button>
+      <section id="tab-findings" style="display:none;" class="enter">
+        <div class="card" style="margin-bottom: 20px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+            <div>
+              <h1 style="margin:0 0 4px; font:700 20px 'Space Grotesk', system-ui, sans-serif; color:#fff;">Discovered Vulnerabilities & Exploit Evidence</h1>
+              <p class="hint" style="margin:0;">All findings include verified PoC curl commands and context</p>
+            </div>
+            <!-- Severity Filter Buttons -->
+            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+              <button onclick="filterFindings('ALL')" class="ghost active filter-btn" data-filter="ALL">All</button>
+              <button onclick="filterFindings('CRITICAL')" class="ghost filter-btn" data-filter="CRITICAL" style="color:var(--bad);">Critical</button>
+              <button onclick="filterFindings('HIGH')" class="ghost filter-btn" data-filter="HIGH" style="color:var(--high);">High</button>
+              <button onclick="filterFindings('MEDIUM')" class="ghost filter-btn" data-filter="MEDIUM" style="color:var(--warn);">Medium</button>
+              <button onclick="filterFindings('LOW')" class="ghost filter-btn" data-filter="LOW" style="color:var(--blue);">Low</button>
+            </div>
           </div>
         </div>
 
         <!-- Findings List -->
-        <div id="findingsContainer" class="space-y-4">
-          <p class="text-sm text-slate-400">No findings recorded yet for this target.</p>
+        <div id="findingsContainer" style="display:flex; flex-direction:column; gap:14px;">
+          <div class="card"><p class="hint">No findings recorded yet for this target.</p></div>
         </div>
       </section>
 
       <!-- ==================== TAB 4: ENDPOINTS & APIS ==================== -->
-      <section id="tab-endpoints" class="hidden space-y-6">
-        <div>
-          <h1 class="text-xl font-bold text-white">Discovered API Endpoints & Routes</h1>
-          <p class="text-xs text-slate-400">Extracted from client-side JS bundles, inline scripts, and dynamic spidering</p>
+      <section id="tab-endpoints" style="display:none;" class="enter">
+        <div class="card" style="margin-bottom: 20px;">
+          <h1 style="margin:0 0 4px; font:700 20px 'Space Grotesk', system-ui, sans-serif; color:#fff;">Discovered API Endpoints & Routes</h1>
+          <p class="hint" style="margin:0;">Extracted from client-side JS bundles, inline scripts, and dynamic spidering</p>
         </div>
-
-        <div class="bg-dark-900 rounded-2xl border border-dark-800 overflow-hidden">
-          <div class="overflow-x-auto">
-            <table class="w-full text-left text-xs">
-              <thead class="bg-dark-850 text-slate-400 border-b border-dark-800 uppercase font-mono">
+        <div class="card" style="padding:0; overflow:hidden;">
+          <div class="data-table-wrap" style="border:none;">
+            <table class="data-table">
+              <thead>
                 <tr>
-                  <th class="px-4 py-3">Method</th>
-                  <th class="px-4 py-3">Endpoint URL</th>
-                  <th class="px-4 py-3">Category</th>
-                  <th class="px-4 py-3">Parameters</th>
-                  <th class="px-4 py-3">Source File</th>
-                  <th class="px-4 py-3 text-right">Actions</th>
+                  <th style="width:80px;">Method</th>
+                  <th>Endpoint URL</th>
+                  <th>Category</th>
+                  <th>Parameters</th>
+                  <th>Source File</th>
+                  <th style="text-align:right;">Actions</th>
                 </tr>
               </thead>
-              <tbody id="endpointsTableBody" class="divide-y divide-dark-800 text-slate-300 font-mono">
-                <tr><td colspan="6" class="px-4 py-6 text-center text-slate-500">No endpoints discovered yet.</td></tr>
+              <tbody id="endpointsTableBody">
+                <tr><td colspan="6" style="text-align:center; padding:24px; color:var(--mut);">No endpoints discovered yet.</td></tr>
               </tbody>
             </table>
           </div>
@@ -503,55 +1081,53 @@
       </section>
 
       <!-- ==================== TAB 5: HUMAN CHECKPOINTS ==================== -->
-      <section id="tab-checkpoints" class="hidden space-y-6">
-        <div class="flex items-center justify-between">
-          <div>
-            <h1 class="text-xl font-bold text-white">Human-In-The-Loop Approval Center</h1>
-            <p class="text-xs text-slate-400">Mandatory human review for state-changing endpoints, brute-forcing, and exploit chaining</p>
+      <section id="tab-checkpoints" style="display:none;" class="enter">
+        <div class="card" style="margin-bottom: 20px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+            <div>
+              <h1 style="margin:0 0 4px; font:700 20px 'Space Grotesk', system-ui, sans-serif; color:#fff;">Human-In-The-Loop Approval Center</h1>
+              <p class="hint" style="margin:0;">Mandatory human review for state-changing endpoints, brute-forcing, and exploit chaining</p>
+            </div>
+            <span class="pill warn"><b>Zero Unattended Exploitation</b></span>
           </div>
-          <span class="px-3 py-1 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20">Zero Unattended Exploitation</span>
         </div>
-
-        <div id="checkpointsContainer" class="space-y-4">
-          <p class="text-sm text-slate-400">No pending checkpoints for this target.</p>
+        <div id="checkpointsContainer" style="display:flex; flex-direction:column; gap:14px;">
+          <div class="card"><p class="hint">No pending checkpoints for this target.</p></div>
         </div>
       </section>
 
       <!-- ==================== TAB 6: TERMINAL & LOGS ==================== -->
-      <section id="tab-terminal" class="hidden space-y-6">
-        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <h1 class="text-xl font-bold text-white">Live Execution Logs & Tool Terminal</h1>
-            <p class="text-xs text-slate-400">Streaming execution logs across all tools, agents, and verification steps</p>
-          </div>
-          <!-- Log File Selector -->
-          <div class="flex items-center space-x-2">
-            <select id="logFileSelect" onchange="fetchSelectedLog()" class="bg-dark-850 border border-dark-700 text-xs rounded-lg px-3 py-1.5 font-mono text-slate-200">
-              <option value="LIVE">Live Scan Stream</option>
-            </select>
+      <section id="tab-terminal" style="display:none;" class="enter">
+        <div class="card" style="margin-bottom: 20px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+            <div>
+              <h1 style="margin:0 0 4px; font:700 20px 'Space Grotesk', system-ui, sans-serif; color:#fff;">Live Execution Logs & Tool Terminal</h1>
+              <p class="hint" style="margin:0;">Streaming execution logs across all tools, agents, and verification steps</p>
+            </div>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <select id="logFileSelect" onchange="fetchSelectedLog()" class="mono" style="font-size:12px;">
+                <option value="LIVE">Live Scan Stream</option>
+              </select>
+              <button id="btnPauseScroll" class="ghost" onclick="toggleTerminalScroll()" style="font-size:12px; padding:6px 12px;">Pause scroll</button>
+            </div>
           </div>
         </div>
-
-        <div class="bg-black/80 rounded-2xl border border-dark-800 p-4 font-mono text-xs text-emerald-400/90 h-[600px] overflow-y-auto leading-relaxed shadow-inner" id="terminalBox">
-          <pre id="terminalOutput" class="whitespace-pre-wrap">Listening for agent execution logs...</pre>
-        </div>
+        <div class="terminal-box" id="terminalBox"><pre id="terminalOutput" style="margin:0; font-family:inherit;">Listening for agent execution logs...</pre></div>
       </section>
 
       <!-- ==================== TAB 7: REPORT CONGLOMERATION ==================== -->
-      <section id="tab-report" class="hidden space-y-6">
-        <div class="flex items-center justify-between">
-          <div>
-            <h1 class="text-xl font-bold text-white">Penetration Testing Final Deliverable Report</h1>
-            <p class="text-xs text-slate-400">Synthesized report from all skill passes, deduplicated, ready for human sign-off</p>
+      <section id="tab-report" style="display:none;" class="enter">
+        <div class="card" style="margin-bottom: 20px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+            <div>
+              <h1 style="margin:0 0 4px; font:700 20px 'Space Grotesk', system-ui, sans-serif; color:#fff;">Penetration Testing Final Deliverable Report</h1>
+              <p class="hint" style="margin:0;">Synthesized report from all skill passes, deduplicated, ready for human sign-off</p>
+            </div>
+            <button onclick="window.print()" class="ghost">Print / Save as PDF</button>
           </div>
-          <button onclick="window.print()" class="px-4 py-2 rounded-lg bg-dark-800 hover:bg-dark-700 text-xs font-semibold text-white border border-dark-700 transition flex items-center space-x-2">
-            <i data-lucide="printer" class="w-4 h-4"></i>
-            <span>Print / Save as PDF</span>
-          </button>
         </div>
-
-        <div class="bg-dark-900 rounded-2xl border border-dark-800 p-8 prose prose-invert max-w-none" id="reportContent">
-          <p class="text-slate-400">Loading final report...</p>
+        <div class="card" id="reportContent" style="line-height:1.7;">
+          <p class="hint">Loading final report...</p>
         </div>
       </section>
 
@@ -561,120 +1137,163 @@
   <!-- ==================== MODALS ==================== -->
 
   <!-- 1. Launch Scan Modal -->
-  <div id="newScanModal" class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-    <div class="bg-dark-900 border border-dark-700 rounded-2xl w-full max-w-lg p-6 space-y-6 shadow-2xl">
-      <div class="flex items-center justify-between border-b border-dark-800 pb-4">
-        <div class="flex items-center space-x-2">
-          <i data-lucide="play-circle" class="w-5 h-5 text-brand-400"></i>
-          <h3 class="text-lg font-bold text-white">Launch Moros AI Assessment</h3>
-        </div>
-        <button onclick="closeModal('newScanModal')" class="text-slate-400 hover:text-white">&times;</button>
+  <div id="newScanModal" class="modal-backdrop hidden">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3>Launch Moros AI Assessment</h3>
+        <button class="modal-close" onclick="closeModal('newScanModal')">&times;</button>
       </div>
-
-      <div class="space-y-4 text-xs">
+      <div style="display:flex; flex-direction:column; gap:14px; font-size:13px;">
         <div>
-          <label class="block text-slate-300 font-semibold mb-1">Target Domain</label>
-          <input type="text" id="scanTargetInput" class="w-full bg-dark-850 border border-dark-700 rounded-lg px-3 py-2 text-white font-mono" placeholder="example.com">
+          <label style="display:block; margin-bottom:4px; font-weight:600; color:var(--mut);">Target Domain</label>
+          <input type="text" id="scanTargetInput" class="mono" style="width:100%;" placeholder="example.com">
         </div>
-
         <div>
-          <label class="block text-slate-300 font-semibold mb-1">Skills Execution Strategy</label>
-          <select id="scanSkillsSelect" class="w-full bg-dark-850 border border-dark-700 rounded-lg px-3 py-2 text-white font-mono">
-            <option value="all">Full Autonomous Pipeline (All 14 Skills)</option>
+          <label style="display:block; margin-bottom:4px; font-weight:600; color:var(--mut);">Skills Execution Strategy</label>
+          <select id="scanSkillsSelect" class="mono" style="width:100%;">
+            <option value="all">Full Autonomous Pipeline (All 15 Skills)</option>
             <option value="recon-subdomain,js-discover,js-analyze">Reconnaissance & JS Discovery Only</option>
             <option value="xss-reflected,xss-dom,xss-stored,xss-blind">XSS Testing Suite Only</option>
             <option value="ssrf-identify,ssrf-post-exploit">SSRF Pipeline Only</option>
             <option value="content-discovery">Content Discovery Only</option>
           </select>
         </div>
-
         <div>
-          <label class="block text-slate-300 font-semibold mb-1">Model Tier / Provider</label>
-          <select id="scanModelSelect" class="w-full bg-dark-850 border border-dark-700 rounded-lg px-3 py-2 text-white font-mono">
+          <label style="display:block; margin-bottom:4px; font-weight:600; color:var(--mut);">Model Tier / Provider</label>
+          <select id="scanModelSelect" class="mono" style="width:100%;">
             <option value="default">Default Configured Harness</option>
             <option value="claude-sonnet,gpt-4o-mini">Multi-Model Tier (Claude + OpenAI)</option>
             <option value="open-weight-local">Local / Open-Weight (via OpenCode)</option>
           </select>
         </div>
-
-        <div class="flex items-center space-x-2 pt-2">
-          <input type="checkbox" id="scanDryRunCheck" class="rounded bg-dark-850 border-dark-700 text-brand-500 focus:ring-brand-500">
-          <label for="scanDryRunCheck" class="text-slate-300">Dry-run only (simulate execution plan without calling live endpoints)</label>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <input type="checkbox" id="scanDryRunCheck">
+          <label for="scanDryRunCheck" style="color:#e2e8f0;">Dry-run only (simulate execution plan without calling live endpoints)</label>
         </div>
       </div>
-
-      <div class="flex justify-end space-x-3 pt-4 border-t border-dark-800">
-        <button onclick="closeModal('newScanModal')" class="px-4 py-2 rounded-lg bg-dark-800 text-slate-300 text-xs font-semibold hover:bg-dark-700">Cancel</button>
-        <button onclick="submitNewScan()" class="px-5 py-2 rounded-lg bg-brand-600 hover:bg-brand-500 text-black text-xs font-bold shadow-lg shadow-emerald-500/20">Start Assessment</button>
+      <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:20px; padding-top:14px; border-top:1px solid var(--line);">
+        <button onclick="closeModal('newScanModal')" class="ghost">Cancel</button>
+        <button onclick="submitNewScan()" class="btn">Start Assessment</button>
       </div>
     </div>
   </div>
 
   <!-- 2. New Target Modal -->
-  <div id="newTargetModal" class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-    <div class="bg-dark-900 border border-dark-700 rounded-2xl w-full max-w-md p-6 space-y-6 shadow-2xl">
-      <div class="flex items-center justify-between border-b border-dark-800 pb-4">
-        <h3 class="text-lg font-bold text-white">Initialize New Target</h3>
-        <button onclick="closeModal('newTargetModal')" class="text-slate-400 hover:text-white">&times;</button>
+  <div id="newTargetModal" class="modal-backdrop hidden">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3>Initialize New Target</h3>
+        <button class="modal-close" onclick="closeModal('newTargetModal')">&times;</button>
       </div>
-      <div class="space-y-4 text-xs">
+      <div style="display:flex; flex-direction:column; gap:14px; font-size:13px;">
         <div>
-          <label class="block text-slate-300 font-semibold mb-1">Target Domain / Host</label>
-          <input type="text" id="newTargetDomainInput" class="w-full bg-dark-850 border border-dark-700 rounded-lg px-3 py-2 text-white font-mono" placeholder="app.target.com">
+          <label style="display:block; margin-bottom:4px; font-weight:600; color:var(--mut);">Target Domain / Host</label>
+          <input type="text" id="newTargetDomainInput" class="mono" style="width:100%;" placeholder="app.target.com">
         </div>
-        <div class="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300/90 text-xs leading-relaxed">
-          <strong>⚠️ Authorization Reminder:</strong> You must have a signed scope-of-work or bug bounty authorization for this target before offensive skills can execute.
+        <div class="note">
+          <b>Authorization Scope Requirement:</b>
+          <p>You must possess explicit, documented authorization for this target. Testing will respect scope definitions strictly.</p>
         </div>
       </div>
-      <div class="flex justify-end space-x-3 pt-4 border-t border-dark-800">
-        <button onclick="closeModal('newTargetModal')" class="px-4 py-2 rounded-lg bg-dark-800 text-slate-300 text-xs font-semibold">Cancel</button>
-        <button onclick="submitNewTarget()" class="px-5 py-2 rounded-lg bg-brand-600 hover:bg-brand-500 text-black text-xs font-bold">Initialize</button>
+      <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:20px; padding-top:14px; border-top:1px solid var(--line);">
+        <button onclick="closeModal('newTargetModal')" class="ghost">Cancel</button>
+        <button onclick="submitNewTarget()" class="btn">Initialize</button>
       </div>
     </div>
   </div>
 
-  <!-- ==================== SCRIPT ==================== -->
+  <!-- ==================== FOOTER SIGNATURE ==================== -->
+  <footer class="by">
+    <span>By <b>Raider</b></span>
+  </footer>
+
+  <!-- ==================== CORE SCRIPT (100% OFFLINE) ==================== -->
   <script>
     let currentTarget = "";
     let targetsList = [];
     let currentFindings = [];
     let activeFilter = "ALL";
-    let chartInstance = null;
     let pollInterval = null;
+    let autoScrollTerminal = true;
 
-    // --- Tab Switching ---
+    // --- Tab Navigation ---
     function switchTab(tabId) {
       const tabs = ['overview', 'pipeline', 'findings', 'endpoints', 'checkpoints', 'terminal', 'report'];
       tabs.forEach(t => {
         const el = document.getElementById(`tab-${t}`);
         const btn = document.getElementById(`tabBtn-${t}`);
-        if (el) el.classList.add('hidden');
-        if (btn) {
-          btn.classList.remove('bg-dark-800', 'text-white');
-          btn.classList.add('text-slate-400');
-        }
+        if (el) el.style.display = 'none';
+        if (btn) btn.classList.remove('active');
       });
       const activeEl = document.getElementById(`tab-${tabId}`);
       const activeBtn = document.getElementById(`tabBtn-${tabId}`);
-      if (activeEl) activeEl.classList.remove('hidden');
-      if (activeBtn) {
-        activeBtn.classList.add('bg-dark-800', 'text-white');
-        activeBtn.classList.remove('text-slate-400');
+      if (activeEl) {
+        activeEl.style.display = 'block';
+        activeEl.classList.remove('enter');
+        void activeEl.offsetWidth; // re-trigger animation
+        activeEl.classList.add('enter');
       }
-      lucide.createIcons();
+      if (activeBtn) activeBtn.classList.add('active');
+
+      // Close mobile sidebar if open
+      const sb = document.getElementById('appSidebar');
+      if (sb && window.innerWidth <= 860) {
+        sb.classList.remove('open');
+      }
+    }
+
+    function toggleSidebar() {
+      const sb = document.getElementById('appSidebar');
+      if (sb) sb.classList.toggle('open');
     }
 
     // --- Modals ---
     function openModal(id) { document.getElementById(id).classList.remove('hidden'); }
     function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
 
+    // --- Two-Step Confirmation Helper ---
+    function handleTwoStepAction(btn, actionFn, defaultText, confirmText) {
+      if (btn.dataset.confirming === "true") {
+        clearTimeout(btn._timer);
+        btn.dataset.confirming = "false";
+        btn.textContent = defaultText;
+        actionFn();
+      } else {
+        btn.dataset.confirming = "true";
+        btn.textContent = confirmText;
+        btn._timer = setTimeout(() => {
+          btn.dataset.confirming = "false";
+          btn.textContent = defaultText;
+        }, 4000);
+      }
+    }
+
+    function stopActiveScan() {
+      if (!currentTarget) return;
+      fetch('/api/scan/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target: currentTarget })
+      }).then(() => pollScanStatus()).catch(e => console.error(e));
+    }
+
+    function resetTargetData() {
+      if (!currentTarget) return;
+      fetch('/api/scan/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target: currentTarget, skills: 'all', dry_run: false })
+      }).then(() => {
+        switchTab('terminal');
+        pollScanStatus();
+      }).catch(e => console.error(e));
+    }
+
     // --- Initialization ---
     async function init() {
-      lucide.createIcons();
       await fetchSystemInfo();
       await fetchTargets();
 
-      // Check URL query param for default target
       const urlParams = new URLSearchParams(window.location.search);
       const urlTarget = urlParams.get('target');
       if (urlTarget && targetsList.some(t => t.name === urlTarget)) {
@@ -690,7 +1309,6 @@
         await refreshTargetData();
       }
 
-      // Start live polling
       pollInterval = setInterval(pollScanStatus, 2500);
     }
 
@@ -698,8 +1316,14 @@
       try {
         const res = await fetch('/api/system');
         const data = await res.json();
-        document.getElementById('sysPlaywrightStatus').textContent = data.playwright_installed ? 'Installed' : 'Missing';
-        document.getElementById('sysPlaywrightStatus').className = data.playwright_installed ? 'font-mono text-emerald-400' : 'font-mono text-rose-400';
+        const el = document.getElementById('sysPlaywrightStatus');
+        if (data.playwright_installed) {
+          el.textContent = 'Installed';
+          el.style.color = 'var(--ok)';
+        } else {
+          el.textContent = 'Missing';
+          el.style.color = 'var(--bad)';
+        }
       } catch (e) {
         console.error("System info error:", e);
       }
@@ -738,94 +1362,113 @@
         const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/summary`);
         const summary = await res.json();
 
-        // Scope badge
         const scopeBadge = document.getElementById('scopeBadge');
         const overviewScopeTag = document.getElementById('overviewScopeTag');
         if (summary.has_scope) {
-          scopeBadge.className = "hidden sm:flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20";
-          scopeBadge.innerHTML = `<i data-lucide="file-check-2" class="w-3.5 h-3.5"></i><span>SCOPE VERIFIED</span>`;
-          overviewScopeTag.className = "px-2.5 py-0.5 rounded text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20";
+          scopeBadge.className = "pill ok hide-sm";
+          scopeBadge.innerHTML = "<b>SCOPE VERIFIED</b>";
+          overviewScopeTag.className = "pill ok";
           overviewScopeTag.textContent = "SCOPE VERIFIED";
         } else {
-          scopeBadge.className = "hidden sm:flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20";
-          scopeBadge.innerHTML = `<i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i><span>PASSIVE RECON ONLY</span>`;
-          overviewScopeTag.className = "px-2.5 py-0.5 rounded text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20";
+          scopeBadge.className = "pill warn hide-sm";
+          scopeBadge.innerHTML = "<b>PASSIVE RECON ONLY</b>";
+          overviewScopeTag.className = "pill warn";
           overviewScopeTag.textContent = "NO SCOPE FILE — PASSIVE RECON ONLY";
         }
 
-        // Metrics
-        document.getElementById('statTotalFindings').textContent = summary.total_findings;
+        document.getElementById('statTotalFindings').textContent = summary.total_findings || 0;
         document.getElementById('statCritical').textContent = summary.severities.CRITICAL || 0;
         document.getElementById('statHigh').textContent = summary.severities.HIGH || 0;
         document.getElementById('statMedium').textContent = summary.severities.MEDIUM || 0;
-        document.getElementById('statEndpoints').textContent = summary.total_endpoints;
-        document.getElementById('statJsFiles').textContent = summary.total_js_files;
+        document.getElementById('statEndpoints').textContent = summary.total_endpoints || 0;
+        document.getElementById('statJsFiles').textContent = summary.total_js_files || 0;
 
-        // Render Chart
-        renderVulnChart(summary.severities);
-
-        // Tech Stack
+        renderVulnCanvas(summary.severities);
         renderTechStack(summary.tech_fingerprint);
       } catch (e) {
         console.error("Summary error:", e);
       }
 
-      // 2. Fetch Findings
       await fetchFindings();
-
-      // 3. Fetch Skills status
       await fetchSkillsStatus();
-
-      // 4. Fetch Endpoints
       await fetchEndpoints();
-
-      // 5. Fetch Checkpoints
       await fetchCheckpoints();
-
-      // 6. Fetch Logs list
       await fetchLogsList();
-
-      // 7. Fetch Report
       await fetchReport();
-
-      lucide.createIcons();
     }
 
-    function renderVulnChart(severities) {
-      const ctx = document.getElementById('vulnChart').getContext('2d');
-      if (chartInstance) chartInstance.destroy();
+    // --- Offline Native Canvas Donut Chart ---
+    function renderVulnCanvas(severities) {
+      const canvas = document.getElementById('vulnChart');
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      const width = canvas.width;
+      const height = canvas.height;
+      ctx.clearRect(0, 0, width, height);
 
-      const data = [
-        severities.CRITICAL || 0,
-        severities.HIGH || 0,
-        severities.MEDIUM || 0,
-        severities.LOW || 0,
-        severities.INFO || 0,
+      const items = [
+        { label: 'Critical', val: severities.CRITICAL || 0, color: '#ff4d5e' },
+        { label: 'High', val: severities.HIGH || 0, color: '#ff8a3d' },
+        { label: 'Medium', val: severities.MEDIUM || 0, color: '#f1c26b' },
+        { label: 'Low', val: severities.LOW || 0, color: '#008CFF' },
+        { label: 'Info', val: severities.INFO || 0, color: '#9aa7b8' },
       ];
 
-      const allZero = data.every(v => v === 0);
+      const total = items.reduce((acc, cur) => acc + cur.val, 0);
+      const centerX = width / 2;
+      const centerY = height / 2 - 12;
+      const outerRadius = 70;
+      const innerRadius = 50;
 
-      chartInstance = new Chart(ctx, {
-        type: 'doughnut',
-        data: {
-          labels: ['Critical', 'High', 'Medium', 'Low', 'Info'],
-          datasets: [{
-            data: allZero ? [1] : data,
-            backgroundColor: allZero ? ['#334155'] : ['#f43f5e', '#fb923c', '#facc15', '#60a5fa', '#94a3b8'],
-            borderWidth: 0,
-          }]
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          plugins: {
-            legend: {
-              position: 'bottom',
-              labels: { color: '#94a3b8', font: { size: 10, family: 'monospace' }, boxWidth: 10 }
-            }
-          },
-          cutout: '72%'
-        }
+      if (total === 0) {
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, outerRadius, 0, 2 * Math.PI);
+        ctx.arc(centerX, centerY, innerRadius, 2 * Math.PI, 0, true);
+        ctx.fillStyle = '#1c2430';
+        ctx.fill();
+
+        ctx.fillStyle = '#9aa7b8';
+        ctx.font = '12px Space Grotesk, monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('0 Findings', centerX, centerY);
+        return;
+      }
+
+      let currentAngle = -0.5 * Math.PI;
+      items.forEach(item => {
+        if (item.val === 0) return;
+        const sliceAngle = (item.val / total) * 2 * Math.PI;
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, outerRadius, currentAngle, currentAngle + sliceAngle);
+        ctx.arc(centerX, centerY, innerRadius, currentAngle + sliceAngle, currentAngle, true);
+        ctx.closePath();
+        ctx.fillStyle = item.color;
+        ctx.fill();
+        currentAngle += sliceAngle;
+      });
+
+      // Center text
+      ctx.fillStyle = '#fff';
+      ctx.font = '700 16px Space Grotesk, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(total.toString(), centerX, centerY - 4);
+      ctx.fillStyle = '#9aa7b8';
+      ctx.font = '10px Inter, sans-serif';
+      ctx.fillText('TOTAL', centerX, centerY + 12);
+
+      // Simple Legend
+      let lx = 14;
+      const ly = height - 12;
+      ctx.font = '10px Inter, sans-serif';
+      items.forEach((item) => {
+        ctx.fillStyle = item.color;
+        ctx.fillRect(lx, ly - 7, 7, 7);
+        ctx.fillStyle = '#9aa7b8';
+        ctx.textAlign = 'left';
+        ctx.fillText(`${item.label[0]}:${item.val}`, lx + 10, ly);
+        lx += 38;
       });
     }
 
@@ -842,16 +1485,17 @@
       }
 
       if (tech.frontend) {
-        fEl.innerHTML = `<span class="text-emerald-400 font-bold">${tech.frontend.framework || 'Detected'}</span> ${tech.frontend.version || ''} (${tech.frontend.build_tool || 'Webpack/Vite'})`;
+        fEl.innerHTML = `<span style="color:var(--ok); font-weight:700;">${escapeHtml(tech.frontend.framework || 'Detected')}</span> ${escapeHtml(tech.frontend.version || '')} (${escapeHtml(tech.frontend.build_tool || 'Webpack/Vite')})`;
       }
       if (tech.backend_indicators) {
-        bEl.innerHTML = `<span class="text-cyan-400 font-bold">${tech.backend_indicators.likely_framework || 'Unknown'}</span> (${tech.backend_indicators.api_style || 'REST'})`;
+        bEl.innerHTML = `<span style="color:var(--cyan); font-weight:700;">${escapeHtml(tech.backend_indicators.likely_framework || 'Unknown')}</span> (${escapeHtml(tech.backend_indicators.api_style || 'REST')})`;
       }
       if (tech.known_misconfigs_for_stack && tech.known_misconfigs_for_stack.length > 0) {
-        mEl.innerHTML = tech.known_misconfigs_for_stack.map(m => `<li>${m}</li>`).join('');
+        mEl.innerHTML = tech.known_misconfigs_for_stack.map(m => `<li>${escapeHtml(m)}</li>`).join('');
       }
     }
 
+    // --- Findings ---
     async function fetchFindings() {
       try {
         const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/findings`);
@@ -867,9 +1511,9 @@
       activeFilter = sev;
       document.querySelectorAll('.filter-btn').forEach(btn => {
         if (btn.dataset.filter === sev) {
-          btn.className = "px-3 py-1.5 rounded-lg text-xs font-semibold bg-brand-600 text-black filter-btn";
+          btn.classList.add('active');
         } else {
-          btn.className = "px-3 py-1.5 rounded-lg text-xs font-semibold bg-dark-800 text-slate-300 hover:bg-dark-700 filter-btn";
+          btn.classList.remove('active');
         }
       });
       renderFindingsList();
@@ -882,80 +1526,97 @@
         : currentFindings.filter(f => f.severity_level === activeFilter);
 
       if (filtered.length === 0) {
-        container.innerHTML = `<div class="p-8 text-center text-slate-500 bg-dark-900 rounded-xl border border-dark-800">No findings match the current filter.</div>`;
+        container.innerHTML = `<div class="card"><p class="hint">No findings match the current filter.</p></div>`;
         return;
       }
 
-      container.innerHTML = filtered.map(f => {
-        let badgeColor = "bg-rose-500/10 text-rose-400 border-rose-500/20";
-        if (f.severity_level === "HIGH") badgeColor = "bg-orange-500/10 text-orange-400 border-orange-500/20";
-        if (f.severity_level === "MEDIUM") badgeColor = "bg-yellow-500/10 text-yellow-400 border-yellow-500/20";
-        if (f.severity_level === "LOW") badgeColor = "bg-blue-500/10 text-blue-400 border-blue-500/20";
+      container.innerHTML = filtered.map((f, idx) => {
+        let tagClass = "tag info";
+        if (f.severity_level === "CRITICAL") tagClass = "tag crit";
+        else if (f.severity_level === "HIGH") tagClass = "tag high";
+        else if (f.severity_level === "MEDIUM") tagClass = "tag med";
+        else if (f.severity_level === "LOW") tagClass = "tag low";
+
+        const findingId = `finding-${idx}`;
 
         return `
-          <div class="p-5 rounded-2xl bg-dark-900 border border-dark-800 space-y-4 hover:border-dark-700 transition">
-            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div class="space-y-1">
-                <div class="flex items-center space-x-2">
-                  <span class="px-2.5 py-0.5 rounded text-[11px] font-bold border ${badgeColor}">${f.severity_level}</span>
-                  <h3 class="font-bold text-white text-base">${f.title}</h3>
+          <div class="card" style="margin-bottom:4px;">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:8px;">
+              <div>
+                <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+                  <span class="${tagClass}">${f.severity_level}</span>
+                  <strong style="font:600 16px 'Space Grotesk', system-ui, sans-serif; color:#fff;">${escapeHtml(f.title)}</strong>
                 </div>
-                <div class="text-xs text-slate-400 font-mono">${f.endpoint || 'Global Application Scope'}</div>
+                <div class="mono" style="font-size:12px; color:var(--mut);">${escapeHtml(f.endpoint || 'Global Scope')}</div>
               </div>
-              <span class="text-[11px] px-2 py-0.5 rounded bg-dark-800 text-slate-400 border border-dark-700">AI-PROPOSED SEVERITY — PENDING HUMAN REVIEW</span>
+              <span class="pill" style="font-size:11px;">PROVISIONAL AI FINDING</span>
             </div>
 
             ${f.payload ? `
-              <div class="p-3 rounded-lg bg-dark-950 border border-dark-800 font-mono text-xs text-slate-300">
-                <span class="text-slate-500 select-none">Payload / Trigger: </span>
-                <span class="text-emerald-400">${escapeHtml(f.payload)}</span>
+              <div class="box" style="margin:12px 0 6px; padding:10px 14px;">
+                <span class="hint" style="text-transform:uppercase; font-size:11px; font-weight:600;">Payload / Trigger:</span>
+                <div class="mono" style="color:var(--ok); font-size:12px; margin-top:2px;">${escapeHtml(f.payload)}</div>
               </div>
             ` : ''}
 
             ${f.curl_command ? `
-              <div class="space-y-1">
-                <div class="flex items-center justify-between text-xs text-slate-400 font-mono">
-                  <span>Reproduction cURL:</span>
-                  <button onclick="copyToClipboard('${escapeJs(f.curl_command)}')" class="hover:text-emerald-400">Copy</button>
+              <div class="ans">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                  <span class="hint mono" style="font-size:11px; color:var(--cyan);">Reproduction cURL:</span>
+                  <button onclick="copyToClipboard('${escapeJs(f.curl_command)}')" class="ghost" style="padding:2px 8px; font-size:11px;">Copy</button>
                 </div>
-                <div class="p-3 rounded-lg bg-dark-950 border border-dark-800 font-mono text-xs text-cyan-300 overflow-x-auto">
-                  ${escapeHtml(f.curl_command)}
-                </div>
+                <pre class="mono" style="margin:0; font-size:11px; color:#dbe9ff; overflow-x:auto;">${escapeHtml(f.curl_command)}</pre>
               </div>
             ` : ''}
 
-            ${f.details ? `<p class="text-xs text-slate-300 leading-relaxed">${escapeHtml(f.details)}</p>` : ''}
+            <div style="margin-top:12px; display:flex; justify-content:space-between; align-items:center;">
+              <button onclick="toggleEvidence('${findingId}')" class="btn-vio">Show evidence / details</button>
+            </div>
+
+            <div id="${findingId}" class="ans" style="display:none; margin-top:10px;">
+              <h4 style="margin:0 0 6px; font-size:13px; color:var(--cyan);">Remediation & Technical Evidence</h4>
+              <p style="margin:0; font-size:13px; color:#cbd5e1; line-height:1.6;">${escapeHtml(f.details || 'No extended details recorded.')}</p>
+            </div>
           </div>
         `;
       }).join('');
     }
 
+    function toggleEvidence(id) {
+      const el = document.getElementById(id);
+      if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+    }
+
+    // --- Skills Timeline ---
     async function fetchSkillsStatus() {
       try {
         const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/skills`);
         const skills = await res.json();
-        const grid = document.getElementById('skillsGrid');
+        const container = document.getElementById('skillsTimeline');
 
-        grid.innerHTML = skills.map((s, idx) => {
-          let stateBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-400">PENDING</span>`;
+        container.innerHTML = skills.map((s, idx) => {
+          let secClass = "sec";
+          let badge = `<span class="tag info">PENDING</span>`;
           if (s.state === "completed") {
-            stateBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">PASSED</span>`;
+            secClass = "sec done";
+            badge = `<span class="tag ok">PASSED</span>`;
+          } else if (s.state === "running") {
+            secClass = "sec act";
+            badge = `<span class="tag" style="background:var(--blue); color:#fff;">RUNNING</span>`;
           } else if (s.state === "failed") {
-            stateBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/10 text-rose-400 border border-rose-500/20">FAILED (NUDGE)</span>`;
+            secClass = "sec";
+            badge = `<span class="tag bad">FAILED (NUDGE)</span>`;
           }
 
           return `
-            <div class="p-4 rounded-xl bg-dark-900 border border-dark-800 space-y-3 flex flex-col justify-between">
-              <div class="space-y-1">
-                <div class="flex items-center justify-between">
-                  <span class="text-[10px] font-mono text-slate-500">STAGE ${idx + 1}</span>
-                  ${stateBadge}
+            <div class="${secClass}">
+              <div class="dot">${idx + 1}</div>
+              <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:6px;">
+                <div>
+                  <h3 class="mono">${escapeHtml(s.skill)}</h3>
+                  <small>Logs: ${s.logs_count} files &bull; ${escapeHtml(s.review_status)}</small>
                 </div>
-                <h4 class="font-bold text-sm text-white font-mono">${s.skill}</h4>
-              </div>
-              <div class="pt-2 border-t border-dark-800/80 flex items-center justify-between text-xs text-slate-400">
-                <span>Logs: ${s.logs_count} files</span>
-                <span class="text-slate-500">${s.review_status}</span>
+                ${badge}
               </div>
             </div>
           `;
@@ -965,6 +1626,7 @@
       }
     }
 
+    // --- Endpoints Table ---
     async function fetchEndpoints() {
       try {
         const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/endpoints`);
@@ -974,25 +1636,25 @@
         document.getElementById('navEndpointsCount').textContent = list.length;
 
         if (list.length === 0) {
-          tb.innerHTML = `<tr><td colspan="6" class="px-4 py-6 text-center text-slate-500">No endpoints discovered yet.</td></tr>`;
+          tb.innerHTML = `<tr><td colspan="6" style="text-align:center; padding:24px; color:var(--mut);">No endpoints discovered yet.</td></tr>`;
           return;
         }
 
         tb.innerHTML = list.map(ep => {
-          let mColor = "text-emerald-400";
-          if (ep.method === "POST") mColor = "text-cyan-400";
-          if (ep.method === "PUT") mColor = "text-yellow-400";
-          if (ep.method === "DELETE") mColor = "text-rose-400";
+          let mColor = "var(--ok)";
+          if (ep.method === "POST") mColor = "var(--cyan)";
+          else if (ep.method === "PUT") mColor = "var(--warn)";
+          else if (ep.method === "DELETE") mColor = "var(--bad)";
 
           return `
-            <tr class="hover:bg-dark-850/50 transition">
-              <td class="px-4 py-3 font-bold ${mColor}">${ep.method}</td>
-              <td class="px-4 py-3 text-white">${escapeHtml(ep.url)}</td>
-              <td class="px-4 py-3 text-slate-400">${ep.category || 'api'}</td>
-              <td class="px-4 py-3 text-slate-400">${(ep.parameters || []).join(', ') || '-'}</td>
-              <td class="px-4 py-3 text-slate-500 text-[11px] truncate max-w-xs">${ep.source_file || '-'}</td>
-              <td class="px-4 py-3 text-right">
-                <button onclick="copyToClipboard('${escapeJs(ep.url)}')" class="text-slate-400 hover:text-white">Copy</button>
+            <tr>
+              <td class="mono" style="font-weight:700; color:${mColor};">${escapeHtml(ep.method)}</td>
+              <td class="mono" style="color:#fff;">${escapeHtml(ep.url)}</td>
+              <td>${escapeHtml(ep.category || 'api')}</td>
+              <td class="mono" style="color:var(--mut);">${escapeHtml((ep.parameters || []).join(', ') || '-')}</td>
+              <td class="mono" style="color:var(--mut); font-size:11px;">${escapeHtml(ep.source_file || '-')}</td>
+              <td style="text-align:right;">
+                <button onclick="copyToClipboard('${escapeJs(ep.url)}')" class="ghost" style="padding:2px 8px; font-size:11px;">Copy</button>
               </td>
             </tr>
           `;
@@ -1002,6 +1664,7 @@
       }
     }
 
+    // --- Checkpoints ---
     async function fetchCheckpoints() {
       try {
         const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/checkpoints`);
@@ -1013,38 +1676,39 @@
         document.getElementById('navCheckpointsBadge').textContent = pending.length > 0 ? `${pending.length} PENDING` : "CLEAR";
 
         if (cps.length === 0) {
-          container.innerHTML = `<div class="p-8 text-center text-slate-500 bg-dark-900 rounded-xl border border-dark-800">No checkpoints recorded.</div>`;
-          overviewList.innerHTML = `<p class="text-xs text-slate-400">All actions verified. No checkpoints waiting.</p>`;
+          container.innerHTML = `<div class="card"><p class="hint">No checkpoints recorded.</p></div>`;
+          overviewList.innerHTML = `<p class="hint">All actions verified. No checkpoints waiting.</p>`;
           return;
         }
 
         overviewList.innerHTML = cps.slice(0, 3).map(c => `
-          <div class="flex items-center justify-between text-xs p-2.5 rounded-lg bg-dark-850 border border-dark-800">
+          <div class="part">
             <div>
-              <span class="font-bold text-white">${c.type}</span> &bull; <span class="text-slate-400">${c.target_url}</span>
+              <strong>${escapeHtml(c.type)}</strong>
+              <small class="mono">${escapeHtml(c.target_url)}</small>
             </div>
-            <span class="font-semibold ${c.status === 'APPROVED' ? 'text-emerald-400' : (c.status === 'REJECTED' ? 'text-rose-400' : 'text-amber-400')}">${c.status}</span>
+            <span class="nav-badge ${c.status === 'APPROVED' ? '' : (c.status === 'REJECTED' ? 'bad' : 'warn')}" style="margin-left:auto;">${c.status}</span>
           </div>
         `).join('');
 
         container.innerHTML = cps.map(c => `
-          <div class="p-5 rounded-2xl bg-dark-900 border ${c.status === 'PENDING_APPROVAL' ? 'border-amber-500/30 bg-amber-500/5' : 'border-dark-800'} space-y-3">
-            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div class="space-y-0.5">
-                <div class="flex items-center space-x-2">
-                  <span class="px-2 py-0.5 rounded text-[10px] font-bold ${c.status === 'APPROVED' ? 'bg-emerald-500/10 text-emerald-400' : (c.status === 'REJECTED' ? 'bg-rose-500/10 text-rose-400' : 'bg-amber-500/10 text-amber-400')}">${c.status}</span>
-                  <h3 class="font-bold text-white">${c.type}</h3>
+          <div class="card" style="border-color:${c.status === 'PENDING_APPROVAL' ? 'rgba(241,194,107,.5)' : 'rgba(0,140,255,.2)'};">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:8px;">
+              <div>
+                <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+                  <span class="tag ${c.status === 'APPROVED' ? 'ok' : (c.status === 'REJECTED' ? 'bad' : 'med')}">${c.status}</span>
+                  <h3 style="margin:0; font:600 16px 'Space Grotesk', system-ui, sans-serif; color:#fff;">${escapeHtml(c.type)}</h3>
                 </div>
-                <div class="text-xs text-slate-400 font-mono">${c.method || 'ACTION'} ${c.target_url}</div>
+                <div class="mono" style="font-size:12px; color:var(--mut);">${escapeHtml(c.method || 'ACTION')} ${escapeHtml(c.target_url)}</div>
               </div>
               ${c.status === 'PENDING_APPROVAL' ? `
-                <div class="flex items-center space-x-2">
-                  <button onclick="respondCheckpoint('${c.id}', 'approve')" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-black font-bold text-xs">Approve</button>
-                  <button onclick="respondCheckpoint('${c.id}', 'reject')" class="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs">Reject</button>
+                <div style="display:flex; gap:8px;">
+                  <button onclick="respondCheckpoint('${c.id}', 'approve')" class="btn" style="padding:6px 14px; font-size:12px; background:linear-gradient(135deg,var(--ok),#12a880);">Approve</button>
+                  <button onclick="respondCheckpoint('${c.id}', 'reject')" class="btn-danger" style="padding:6px 14px; font-size:12px;">Reject</button>
                 </div>
-              ` : `<span class="text-xs text-slate-500">Decided</span>`}
+              ` : `<span class="hint">Resolved</span>`}
             </div>
-            <p class="text-xs text-slate-300">${c.reason || ''}</p>
+            <p style="margin:10px 0 0; font-size:13px; color:#cbd5e1;">${escapeHtml(c.reason || '')}</p>
           </div>
         `).join('');
       } catch (e) {
@@ -1065,6 +1729,7 @@
       }
     }
 
+    // --- Terminal & Logs ---
     async function fetchLogsList() {
       try {
         const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/logs`);
@@ -1099,14 +1764,10 @@
       }
     }
 
-    async function fetchReport() {
-      try {
-        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/report`);
-        const data = await res.json();
-        document.getElementById('reportContent').innerHTML = marked.parse(data.markdown || "# No report content");
-      } catch (e) {
-        console.error("Report error:", e);
-      }
+    function toggleTerminalScroll() {
+      autoScrollTerminal = !autoScrollTerminal;
+      const btn = document.getElementById('btnPauseScroll');
+      if (btn) btn.textContent = autoScrollTerminal ? "Pause scroll" : "Resume scroll";
     }
 
     async function pollScanStatus() {
@@ -1117,26 +1778,76 @@
         const badge = document.getElementById('scanStatusBadge');
 
         if (data.status === "running") {
-          badge.className = "hidden sm:flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20";
-          badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span><span>SCANNING...</span>`;
+          badge.className = "pill ok";
+          badge.innerHTML = "<b>SCANNING...</b>";
         } else {
-          badge.className = "hidden sm:flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-dark-800 text-slate-300 border border-dark-700";
-          badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-slate-500"></span><span>IDLE</span>`;
+          badge.className = "pill";
+          badge.innerHTML = "<b>IDLE</b>";
         }
 
-        // If on terminal and LIVE is selected, update output
         const logSel = document.getElementById('logFileSelect');
         if (logSel && logSel.value === "LIVE" && data.logs) {
           const out = document.getElementById('terminalOutput');
           out.textContent = data.logs || "Waiting for output...";
-          const box = document.getElementById('terminalBox');
-          box.scrollTop = box.scrollHeight;
+          if (autoScrollTerminal) {
+            const box = document.getElementById('terminalBox');
+            box.scrollTop = box.scrollHeight;
+          }
         }
       } catch (e) {
         // Silent poll error
       }
     }
 
+    // --- Report Conglomeration (Offline Markdown Parser) ---
+    async function fetchReport() {
+      try {
+        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/report`);
+        const data = await res.json();
+        document.getElementById('reportContent').innerHTML = renderOfflineMarkdown(data.markdown || "# No report content yet.");
+      } catch (e) {
+        console.error("Report error:", e);
+      }
+    }
+
+    // Lightweight 100% offline markdown renderer
+    function renderOfflineMarkdown(md) {
+      if (!md) return '';
+      let html = escapeHtml(md);
+
+      // Fenced code blocks
+      html = html.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, function(match, lang, code) {
+        return `<pre class="ans mono" style="font-size:12px; margin:12px 0;"><code>${code}</code></pre>`;
+      });
+
+      // Headers
+      html = html.replace(/^### (.*$)/gim, '<h3 style="font:600 16px Space Grotesk, sans-serif; color:var(--cyan); margin:18px 0 8px;">$1</h3>');
+      html = html.replace(/^## (.*$)/gim, '<h2 style="font:700 18px Space Grotesk, sans-serif; color:#fff; border-bottom:1px solid var(--line); padding-bottom:6px; margin:24px 0 10px;">$1</h2>');
+      html = html.replace(/^# (.*$)/gim, '<h1 style="font:700 22px Space Grotesk, sans-serif; color:#fff; margin:0 0 14px;">$1</h1>');
+
+      // Bold & Italic
+      html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+      html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
+
+      // Inline code
+      html = html.replace(/`([^`]+)`/g, '<code class="mono" style="background:#050505; color:var(--cyan); padding:2px 5px; border-radius:4px; font-size:12px;">$1</code>');
+
+      // Unordered lists
+      html = html.replace(/^\- (.*$)/gim, '<li style="margin:4px 0; color:#e2e8f0;">$1</li>');
+      html = html.replace(/(<li.*<\/li>)/s, '<ul style="padding-left:20px; margin:10px 0;">$1</ul>');
+
+      // Paragraphs
+      html = html.split('\n\n').map(p => {
+        p = p.trim();
+        if (!p) return '';
+        if (p.startsWith('<h') || p.startsWith('<pre') || p.startsWith('<ul') || p.startsWith('<li')) return p;
+        return `<p style="margin:8px 0; color:#cbd5e1; font-size:14px;">${p}</p>`;
+      }).join('\n');
+
+      return html;
+    }
+
+    // --- Actions ---
     async function submitNewScan() {
       const target = document.getElementById('scanTargetInput').value.trim();
       const skills = document.getElementById('scanSkillsSelect').value;
