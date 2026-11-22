@@ -1,0 +1,23 @@
+# Core
+playwright>=1.40.0
+jsbeautifier>=1.14.0
+
+# HTTP & networking
+requests>=2.31.0
+aiohttp>=3.9.0
+urllib3>=2.0.0
+
+# Data processing
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# CLI
+rich>=13.0.0
+click>=8.1.0
+
+# Async
+asyncio-extra>=1.0.0
+
+# Utils
+python-dateutil>=2.8.0
+tqdm>=4.65.0
