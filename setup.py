@@ -37,6 +37,8 @@ def init_target(domain: str):
         output_dir / "js" / "source-maps" / "external",
         output_dir / "js" / "source-maps" / "inline",
         output_dir / "content-discovery",
+        output_dir / "api",
+        output_dir / "logs" / "api-spec-discovery",
         output_dir / "findings" / "xss-reflected",
         output_dir / "findings" / "xss-stored",
         output_dir / "findings" / "xss-dom",

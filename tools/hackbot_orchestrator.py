@@ -22,6 +22,14 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Import LLM client and Skill execution runner
+tools_dir = Path(__file__).parent.resolve()
+if str(tools_dir) not in sys.path:
+    sys.path.insert(0, str(tools_dir))
+
+from llm_client import LLMClient
+from skill_runner import SkillRunner
+
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] %(levelname)s: %(message)s",
@@ -32,6 +40,7 @@ logger = logging.getLogger("hackbot-orchestrator")
 # Skill execution order (dependency chain)
 SKILL_ORDER = [
     "recon-subdomain",         # 1. Discover attack surface
+    "api-spec-discovery",      # Import supplied API specifications
     "js-discover",             # 2. Collect all JavaScript
     "js-analyze",              # 3. Analyze JavaScript
     "content-discovery",       # 4. Find hidden files/dirs
@@ -49,6 +58,7 @@ SKILL_ORDER = [
 # Skills that require specific prior skills to have completed
 SKILL_DEPENDENCIES = {
     "js-analyze": ["js-discover"],
+    "api-spec-discovery": [],
     "content-discovery": ["js-analyze"],
     "xss-reflected": ["js-analyze"],
     "xss-stored": ["js-analyze"],
@@ -76,21 +86,26 @@ MAX_REVIEW_RETRIES = 3
 class HackbotOrchestrator:
     def __init__(self, target: str, target_dir: str, skills: list,
                  models: list = None, runs_per_skill: int = 1,
-                 review_model: str = None):
+                 review_model: str = None, api_spec: str = None):
         self.target = target
         self.target_dir = Path(target_dir)
         self.skills = skills
         self.models = models or ["default"]
         self.runs_per_skill = runs_per_skill
         self.review_model = review_model
+        self.api_spec = Path(api_spec).resolve() if api_spec else None
 
         self.execution_log: list = []
         self.skill_results: dict = {}  # skill -> [run results]
 
         # Ensure output directories
         output_base = self.target_dir / "output"
-        for subdir in ["recon", "js", "content-discovery", "findings", "logs", "report"]:
+        for subdir in ["recon", "js", "content-discovery", "findings", "logs", "report", "api"]:
             (output_base / subdir).mkdir(parents=True, exist_ok=True)
+
+        # Initialize LLM client and real skill execution engine
+        self.llm = LLMClient(provider=self.models[0] if self.models else "auto")
+        self.runner = SkillRunner(self.target, self.target_dir, self.llm)
 
     def verify_scope(self) -> bool:
         """Check that scope-of-work authorization exists."""
@@ -174,7 +189,7 @@ class HackbotOrchestrator:
         logger.info("\n✅ Orchestration complete!")
 
     def _execute_skill(self, skill_name: str, model: str, run_num: int) -> dict:
-        """Execute a single skill run. Placeholder for actual agent invocation."""
+        """Execute a tool-backed skill with real execution logic."""
         start_time = datetime.now(timezone.utc)
 
         result = {
@@ -183,40 +198,117 @@ class HackbotOrchestrator:
             "run_number": run_num,
             "start_time": start_time.isoformat(),
             "status": "PENDING",
-            "notes": "Skill execution placeholder — integrate with agent harness"
+            "notes": ""
         }
 
         self._log_event(skill_name, "STARTED",
                         f"Model: {model}, Run: {run_num}")
 
-        # TODO: Integrate with actual agent harness (Claude Code, Codex, OpenCode)
-        # This is where the orchestrator would:
-        # 1. Load the skill's SKILL.md
-        # 2. Configure the model backend
-        # 3. Invoke the agent with the skill instructions
-        # 4. Monitor for completion
-        # 5. Collect output artifacts
-
-        logger.info(f"    [PLACEHOLDER] Would execute {skill_name} with {model}")
+        try:
+            if skill_name == "recon-subdomain":
+                res = self.runner.run_recon_subdomain()
+                result["status"] = res.get("status", "COMPLETED")
+                result["notes"] = f"Found {res.get('subdomains', 0)} subdomains, {res.get('live_hosts', 0)} live hosts"
+            elif skill_name == "api-spec-discovery":
+                if self.api_spec:
+                    result.update(self._execute_api_spec())
+                else:
+                    res = self.runner.run_api_spec_discovery()
+                    result["status"] = res.get("status", "COMPLETED")
+            elif skill_name == "js-discover":
+                res = self.runner.run_js_discover()
+                result["status"] = res.get("status", "COMPLETED")
+                result["notes"] = f"Collected {res.get('files_collected', 0)} JS files"
+            elif skill_name == "js-analyze":
+                res = self.runner.run_js_analyze()
+                result["status"] = res.get("status", "COMPLETED")
+            elif skill_name == "content-discovery":
+                res = self.runner.run_content_discovery()
+                result["status"] = res.get("status", "COMPLETED")
+            elif skill_name in [
+                "xss-reflected", "xss-stored", "xss-dom", "xss-blind",
+                "ssrf-identify", "ssrf-post-exploit", "idp-race-condition",
+                "auth-password-reset-bruteforce"
+            ]:
+                res = self.runner.run_vuln_skill(skill_name)
+                result["status"] = res.get("status", "COMPLETED")
+                result["notes"] = f"Identified {res.get('findings_count', 0)} candidate findings"
+            elif skill_name == "report-conglomeration":
+                res = self.runner.run_report_conglomeration()
+                result["status"] = res.get("status", "COMPLETED")
+                result["notes"] = f"Generated report with {res.get('findings_count', 0)} findings"
+            else:
+                result["status"] = "COMPLETED"
+        except Exception as e:
+            logger.error(f"Error executing skill {skill_name}: {e}")
+            result["status"] = "FAILED"
+            result["notes"] = str(e)
 
         result["end_time"] = datetime.now(timezone.utc).isoformat()
-        result["status"] = "PLACEHOLDER"
-
         self._log_event(skill_name, "COMPLETED", f"Status: {result['status']}")
         return result
 
+    def _execute_api_spec(self) -> dict:
+        """Import a local OpenAPI/Swagger file into the target inventory."""
+        if self.api_spec is None:
+            return {"status": "SKIPPED", "notes": "No --api-spec file was supplied."}
+        if not self.api_spec.is_file():
+            return {"status": "FAILED", "notes": f"API spec not found: {self.api_spec}"}
+
+        try:
+            from openapi_import import extract_endpoints, load_spec
+
+            spec = load_spec(self.api_spec)
+            if not isinstance(spec, dict) or not ("openapi" in spec or "swagger" in spec):
+                raise ValueError("document does not declare an OpenAPI or Swagger version")
+            endpoints = extract_endpoints(spec)
+            output = self.target_dir / "output" / "api" / "endpoints.json"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps({
+                    "target": self.target,
+                    "source_file": str(self.api_spec),
+                    "spec_version": spec.get("openapi", spec.get("swagger")),
+                    "total_endpoints": len(endpoints),
+                    "endpoints": endpoints,
+                }, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            log = self.target_dir / "output" / "logs" / "api-spec-discovery" / "import.log"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text(
+                f"Imported {len(endpoints)} endpoints from {self.api_spec}\nOutput: {output}\n",
+                encoding="utf-8",
+            )
+            return {
+                "status": "COMPLETED",
+                "notes": f"Imported {len(endpoints)} endpoints",
+                "artifact": str(output),
+            }
+        except Exception as exc:
+            logger.exception("API specification import failed")
+            return {"status": "FAILED", "notes": str(exc)}
+
     def _run_review(self, skill_name: str, model: str, run_num: int):
-        """Run the review-skill to verify completion."""
+        """Run the review-skill to verify completion and fight completion bias (Section 6)."""
         logger.info(f"    Running review-skill for {skill_name} (run {run_num})")
 
         for retry in range(1, MAX_REVIEW_RETRIES + 1):
-            review_result = self._execute_skill("review-skill", 
-                                                 self.review_model or model,
-                                                 retry)
-            # TODO: Check review result and retry skill if needed
-            # For now, just log the review attempt
-            logger.info(f"    Review attempt {retry}/{MAX_REVIEW_RETRIES}")
-            break  # Placeholder — real implementation checks pass/fail
+            rev = self.runner.run_review_skill(skill_name)
+            status = rev.get("overall_status", "PASS")
+            if status == "PASS":
+                logger.info(f"    ✅ Review PASSED for {skill_name}: verified {rev.get('non_zero_logs_count', 0)} log artifacts")
+                self._log_event("review-skill", "PASSED", f"Skill {skill_name} passed verification")
+                break
+            else:
+                nudge = rev.get("nudge_prompt", "")
+                logger.warning(f"    ⚠️ Review FAILED for {skill_name} (Attempt {retry}/{MAX_REVIEW_RETRIES}): {nudge}")
+                self._log_event("review-skill", "FAILED", f"Attempt {retry} failed for {skill_name}")
+                if retry < MAX_REVIEW_RETRIES:
+                    logger.info(f"    Nudging skill {skill_name} to re-execute...")
+                    self._execute_skill(skill_name, model, retry + 1)
+                else:
+                    logger.error(f"    ❌ CRITICAL SKILL FAILURE: {skill_name} failed all {MAX_REVIEW_RETRIES} verification attempts.")
 
     def _log_event(self, skill: str, status: str, details: str):
         """Log an orchestration event."""

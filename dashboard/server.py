@@ -12,6 +12,7 @@ Provides a local web server and REST API for:
 - Viewing and exporting conglomerated penetration testing reports
 """
 
+import hashlib
 import json
 import logging
 import mimetypes
@@ -35,6 +36,7 @@ SKILLS_DIR = PROJECT_ROOT / "skills"
 # List of all 14 skills in dependency order
 ALL_SKILLS = [
     "recon-subdomain",
+    "api-spec-discovery",
     "js-discover",
     "js-analyze",
     "content-discovery",
@@ -349,15 +351,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-        # Read endpoints count
-        endpoints_file = output_dir / "js" / "endpoints.json"
-        endpoints_count = 0
-        if endpoints_file.exists():
-            try:
-                ep_data = json.loads(endpoints_file.read_text(encoding="utf-8"))
-                endpoints_count = ep_data.get("total_endpoints", len(ep_data.get("endpoints", [])))
-            except Exception:
-                pass
+        # Read endpoints count from JavaScript and OpenAPI inventories.
+        endpoints_count = self.get_target_endpoints(target_name).get("total_endpoints", 0)
 
         # Read JS files count
         raw_js_dir = output_dir / "js" / "raw"
@@ -525,12 +520,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def get_target_endpoints(self, target_name):
         ep_file = TARGETS_DIR / target_name / "output" / "js" / "endpoints.json"
+        api_file = TARGETS_DIR / target_name / "output" / "api" / "endpoints.json"
+        inventory = {"endpoints": [], "total_endpoints": 0}
         if ep_file.exists():
             try:
-                return json.loads(ep_file.read_text(encoding="utf-8"))
+                inventory = json.loads(ep_file.read_text(encoding="utf-8"))
             except Exception as e:
                 return {"error": str(e), "endpoints": []}
-        return {"endpoints": [], "total_endpoints": 0}
+        endpoints = inventory.get("endpoints", [])
+        for endpoint in endpoints:
+            endpoint.setdefault("source", "javascript")
+        if api_file.exists():
+            try:
+                api_inventory = json.loads(api_file.read_text(encoding="utf-8"))
+                for endpoint in api_inventory.get("endpoints", []):
+                    endpoint["source"] = "openapi"
+                    endpoint["url"] = endpoint.get("base_url", "").rstrip("/") + endpoint.get("path", "")
+                    endpoints.append(endpoint)
+            except Exception as e:
+                return {"error": str(e), "endpoints": endpoints}
+        inventory["endpoints"] = endpoints
+        inventory["total_endpoints"] = len(endpoints)
+        return inventory
 
     def get_target_tech_fingerprint(self, target_name):
         tech_file = TARGETS_DIR / target_name / "output" / "js" / "tech-fingerprint.json"
@@ -584,8 +595,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     data = json.loads(ep_file.read_text(encoding="utf-8"))
                     for ep in data.get("endpoints", []):
                         if ep.get("method") in ["POST", "PUT", "DELETE"]:
+                            checkpoint_key = "|".join([
+                                str(ep.get("method", "")).upper(),
+                                str(ep.get("url", "")),
+                                str(ep.get("parameter", ep.get("param", ""))),
+                            ])
+                            checkpoint_id = hashlib.sha256(
+                                checkpoint_key.encode("utf-8")
+                            ).hexdigest()[:12]
                             checkpoints.append({
-                                "id": f"cp-{ep.get('method')}-{hash(ep.get('url')) % 10000}",
+                                "id": f"cp-{checkpoint_id}",
                                 "type": "State-Changing Endpoint Confirmation",
                                 "target_url": ep.get("url"),
                                 "method": ep.get("method"),

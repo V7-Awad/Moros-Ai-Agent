@@ -1,0 +1,110 @@
+{
+  "target": "demo.target.local",
+  "orchestration_time": "2026-11-22T13:27:16.042610+00:00",
+  "skills_requested": [
+    "recon-subdomain",
+    "api-spec-discovery",
+    "content-discovery"
+  ],
+  "models_used": [
+    "default"
+  ],
+  "runs_per_skill": 1,
+  "events": [
+    {
+      "timestamp": "2026-11-22T13:26:59.946330+00:00",
+      "skill": "scope-check",
+      "status": "PASSED",
+      "details": "Found D:\\Moros Ai\\targets\\demo.target.local\\scope-of-work.md"
+    },
+    {
+      "timestamp": "2026-11-22T13:26:59.946803+00:00",
+      "skill": "recon-subdomain",
+      "status": "STARTED",
+      "details": "Model: default, Run: 1"
+    },
+    {
+      "timestamp": "2026-11-22T13:27:16.023843+00:00",
+      "skill": "recon-subdomain",
+      "status": "COMPLETED",
+      "details": "Status: SUCCESS"
+    },
+    {
+      "timestamp": "2026-11-22T13:27:16.027108+00:00",
+      "skill": "review-skill",
+      "status": "PASSED",
+      "details": "Skill recon-subdomain passed verification"
+    },
+    {
+      "timestamp": "2026-11-22T13:27:16.027413+00:00",
+      "skill": "api-spec-discovery",
+      "status": "STARTED",
+      "details": "Model: default, Run: 1"
+    },
+    {
+      "timestamp": "2026-11-22T13:27:16.031469+00:00",
+      "skill": "api-spec-discovery",
+      "status": "COMPLETED",
+      "details": "Status: SUCCESS"
+    },
+    {
+      "timestamp": "2026-11-22T13:27:16.033875+00:00",
+      "skill": "review-skill",
+      "status": "PASSED",
+      "details": "Skill api-spec-discovery passed verification"
+    },
+    {
+      "timestamp": "2026-11-22T13:27:16.034153+00:00",
+      "skill": "content-discovery",
+      "status": "STARTED",
+      "details": "Model: default, Run: 1"
+    },
+    {
+      "timestamp": "2026-11-22T13:27:16.039903+00:00",
+      "skill": "content-discovery",
+      "status": "COMPLETED",
+      "details": "Status: SUCCESS"
+    },
+    {
+      "timestamp": "2026-11-22T13:27:16.042400+00:00",
+      "skill": "review-skill",
+      "status": "PASSED",
+      "details": "Skill content-discovery passed verification"
+    }
+  ],
+  "skill_results": {
+    "recon-subdomain": [
+      {
+        "skill": "recon-subdomain",
+        "model": "default",
+        "run_number": 1,
+        "start_time": "2026-11-22T13:26:59.946791+00:00",
+        "status": "SUCCESS",
+        "notes": "Found 1 subdomains, 1 live hosts",
+        "end_time": "2026-11-22T13:27:16.023829+00:00"
+      }
+    ],
+    "api-spec-discovery": [
+      {
+        "skill": "api-spec-discovery",
+        "model": "default",
+        "run_number": 1,
+        "start_time": "2026-11-22T13:27:16.027399+00:00",
+        "status": "SUCCESS",
+        "notes": "",
+        "end_time": "2026-11-22T13:27:16.031453+00:00"
+      }
+    ],
+    "content-discovery": [
+      {
+        "skill": "content-discovery",
+        "model": "default",
+        "run_number": 1,
+        "start_time": "2026-11-22T13:27:16.034142+00:00",
+        "status": "SUCCESS",
+        "notes": "",
+        "end_time": "2026-11-22T13:27:16.039892+00:00"
+      }
+    ]
+  }
+}

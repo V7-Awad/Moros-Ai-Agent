@@ -16,6 +16,10 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Keep the CLI usable on Windows consoles that still default to CP1252.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.resolve()
 sys.path.insert(0, str(PROJECT_ROOT / "tools"))
@@ -85,6 +89,8 @@ Examples:
                         help="Number of runs per skill per model (default: 1)")
     parser.add_argument("--review-model", default=None,
                         help="Model to use for review-skill (default: same as skill model)")
+    parser.add_argument("--api-spec", default=None,
+                        help="Local OpenAPI/Swagger JSON or YAML file for api-spec-discovery")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show execution plan without running anything")
     parser.add_argument("--check", action="store_true",
@@ -93,14 +99,21 @@ Examples:
                         help="Launch local web dashboard viewer (like 'strix view')")
     parser.add_argument("--port", type=int, default=8080,
                         help="Dashboard server port (default: 8080)")
+    parser.add_argument("--no-open", action="store_true",
+                        help="Do not open a browser when launching the dashboard")
+    parser.add_argument("command", nargs="?", choices=["view"],
+                        help=argparse.SUPPRESS)
 
     args = parser.parse_args()
 
     # Check dashboard flag or subcommands
-    if args.dashboard or (len(sys.argv) > 1 and sys.argv[1] == "view"):
+    if args.dashboard or args.command == "view":
         from dashboard.server import run_dashboard
-        target_name = args.target if hasattr(args, "target") else None
-        run_dashboard(port=args.port, default_target=target_name)
+        run_dashboard(
+            port=args.port,
+            open_browser=not args.no_open,
+            default_target=args.target,
+        )
         sys.exit(0)
 
     # Check prerequisites
@@ -161,6 +174,8 @@ Examples:
         print(f"   Models: {', '.join(models)}")
         print(f"   Runs per skill: {args.runs_per_skill}")
         print(f"   Review model: {args.review_model or 'same as skill'}")
+        if args.api_spec:
+            print(f"   API spec: {args.api_spec}")
 
         # Check scope
         scope_files = list(target_path.glob("scope-of-work.*"))
@@ -187,6 +202,7 @@ Examples:
         models=models,
         runs_per_skill=args.runs_per_skill,
         review_model=args.review_model,
+        api_spec=args.api_spec,
     )
 
     try:

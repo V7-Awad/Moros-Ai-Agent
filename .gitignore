@@ -27,8 +27,9 @@ targets/*/output/
 targets/*/scope-of-work.*
 !targets/demo.target.local/**
 
-# Working scratch
+# Working scratch & IDE internal
 .work/
+.manus/
 
 # Playwright browsers
 playwright-browsers/

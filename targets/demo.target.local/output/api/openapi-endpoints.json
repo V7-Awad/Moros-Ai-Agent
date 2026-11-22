@@ -1,0 +1,29 @@
+{
+  "target": "demo.target.local",
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/api/v1/health",
+      "base_url": "https://demo.target.local",
+      "parameters": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/user",
+      "base_url": "https://demo.target.local",
+      "parameters": [
+        "id"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/auth/login",
+      "base_url": "https://demo.target.local",
+      "parameters": [
+        "username",
+        "password"
+      ]
+    }
+  ],
+  "total_endpoints": 3
+}

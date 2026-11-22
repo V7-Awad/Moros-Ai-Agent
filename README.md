@@ -24,7 +24,7 @@ The system enforces this by **requiring a `scope-of-work` file** in every target
 
 ## 🏗️ Architecture
 
-Moros AI is NOT one giant agent that "hacks everything." It is a collection of **14 small, single-purpose skills** orchestrated by a harness, with built-in self-review and human checkpoints.
+Moros AI is NOT one giant agent that "hacks everything." It is a collection of **15 small, single-purpose skills** orchestrated by a harness, with built-in self-review and human checkpoints.
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -35,7 +35,7 @@ Moros AI is NOT one giant agent that "hacks everything." It is a collection of *
         │              │              │
    ┌────▼────┐    ┌────▼────┐   ┌────▼─────┐
    │ SKILLS  │    │  TOOLS  │   │  REVIEW  │
-   │ (14x)   │    │  (7x)   │   │  SKILL   │
+   │ (15x)   │    │  (7x)   │   │  SKILL   │
    └────┬────┘    └────┬────┘   └────┬─────┘
         └──────────────┼──────────────┘
                        ▼
@@ -119,6 +119,16 @@ python run.py --dashboard
 - 💻 **Live Terminal & Tool Logs**: Real-time streaming console for inspecting skill logs.
 - 📄 **Report Viewer**: Formatted markdown penetration testing report with print/PDF export.
 
+### Import an API specification
+
+Import a local OpenAPI/Swagger JSON or YAML file into a structured endpoint inventory. The importer makes no network requests:
+
+```bash
+python tools/openapi_import.py --spec ./openapi.yaml --output targets/example.com/output/api/openapi-endpoints.json --target example.com
+```
+
+YAML input uses PyYAML, installed with `pip install -r requirements.txt`. The result includes methods, paths, parameters, body content types, and declared security requirements. Treat the inventory as an assessment input; declared security is not proof of enforcement.
+
 ---
 
 ### 4. Run a Scan (CLI)
@@ -173,8 +183,9 @@ python tools/endpoint-extractor.py \
 
 ```
 Moros-Ai-Agent/
-├── skills/                              # 14 micro-skills
+├── skills/                              # 15 micro-skills
 │   ├── recon-subdomain/SKILL.md         # Subdomain enumeration
+│   ├── api-spec-discovery/SKILL.md      # Local OpenAPI/Swagger import
 │   ├── js-discover/SKILL.md             # JS collection (browser-driven)
 │   ├── js-analyze/SKILL.md              # JS deep analysis
 │   ├── content-discovery/SKILL.md       # Directory brute-forcing
@@ -195,6 +206,7 @@ Moros-Ai-Agent/
 │   ├── js-beautifier.py                 # JS beautification
 │   ├── secret-scanner.py                # Secret/key scanner
 │   ├── endpoint-extractor.py            # API endpoint extractor
+│   ├── openapi_import.py                # OpenAPI/Swagger inventory importer
 │   └── hackbot-orchestrator.py          # Pipeline orchestrator
 ├── targets/                             # Engagement folders (gitignored output)
 ├── docs/

@@ -1,0 +1,8 @@
+[
+  {
+    "host": "demo.target.local",
+    "url": "https://demo.target.local",
+    "status": 200,
+    "server": "Detected Web Server"
+  }
+]

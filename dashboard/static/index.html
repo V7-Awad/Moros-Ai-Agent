@@ -43,6 +43,150 @@
     ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
     ::-webkit-scrollbar-thumb:hover { background: #475569; }
     .font-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+
+    /* MOROS cyber operations console */
+    :root {
+      color-scheme: dark;
+      --ink: #070a12;
+      --panel: #0d1220;
+      --panel-raised: #11192a;
+      --line: rgba(130, 160, 190, .14);
+      --cyan: #48f4e4;
+      --cyan-soft: #00cdbd;
+      --violet: #aa7bff;
+      --muted: #8491a7;
+    }
+    html, body { min-height: 100%; }
+    body {
+      background-color: var(--ink) !important;
+      background-image:
+        radial-gradient(ellipse at 12% -10%, rgba(0, 218, 201, .12), transparent 36%),
+        radial-gradient(ellipse at 90% 4%, rgba(139, 79, 255, .10), transparent 30%),
+        linear-gradient(rgba(95, 130, 155, .035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(95, 130, 155, .035) 1px, transparent 1px) !important;
+      background-size: auto, auto, 42px 42px, 42px 42px !important;
+      color: #e6edf7;
+      letter-spacing: .01em;
+    }
+    ::-webkit-scrollbar-track { background: #080c15; }
+    ::-webkit-scrollbar-thumb { background: #25344a; border: 1px solid #080c15; }
+    ::-webkit-scrollbar-thumb:hover { background: #3b536f; }
+    header {
+      min-height: 74px;
+      background: rgba(7, 11, 20, .88) !important;
+      border-color: var(--line) !important;
+      box-shadow: 0 8px 34px rgba(0, 0, 0, .26);
+    }
+    header .bg-gradient-to-tr {
+      background: linear-gradient(140deg, #0ce0ce, #58fff0 60%, #92fff5) !important;
+      box-shadow: 0 0 26px rgba(35, 241, 222, .28) !important;
+    }
+    header .bg-gradient-to-tr i { color: #041114 !important; }
+    header .font-extrabold { letter-spacing: .16em; }
+    header p { letter-spacing: .02em; }
+    aside {
+      background: rgba(8, 12, 21, .82) !important;
+      border-color: var(--line) !important;
+      backdrop-filter: blur(18px);
+    }
+    main { scroll-behavior: smooth; }
+    .bg-dark-950 { background-color: var(--ink) !important; }
+    .bg-dark-900, .bg-dark-900\/50, .bg-dark-900\/80 {
+      background-color: rgba(13, 18, 32, .88) !important;
+    }
+    .bg-dark-850, .bg-dark-800 { background-color: var(--panel-raised) !important; }
+    .border-dark-800, .border-dark-700 { border-color: var(--line) !important; }
+    .text-brand-500, .text-brand-400 { color: var(--cyan) !important; }
+    .text-emerald-400 { color: #4cf3d3 !important; }
+    .bg-brand-500\/10 { background-color: rgba(72, 244, 228, .08) !important; }
+    .border-brand-500\/20 { border-color: rgba(72, 244, 228, .25) !important; }
+    .shadow-emerald-500\/20 { --tw-shadow-color: rgba(38, 239, 218, .2) !important; }
+    button, select, input, textarea { transition: all .18s ease; }
+    button { letter-spacing: .015em; }
+    button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible {
+      outline: 2px solid var(--cyan) !important; outline-offset: 2px;
+    }
+    aside nav button { min-height: 44px; border: 1px solid transparent; }
+    aside nav button:hover { border-color: rgba(72, 244, 228, .12); }
+    aside nav button.bg-dark-800 {
+      color: #ecffff !important;
+      background: linear-gradient(100deg, rgba(31, 223, 207, .14), rgba(31, 223, 207, .025)) !important;
+      border-color: rgba(72, 244, 228, .2);
+      box-shadow: inset 2px 0 0 var(--cyan), 0 0 22px rgba(5, 226, 205, .04);
+    }
+    aside nav button.bg-dark-800 i { color: var(--cyan) !important; }
+    main section > div[class*="rounded"], main section article {
+      border-color: var(--line);
+    }
+    #tab-overview > .flex:first-child {
+      position: relative; overflow: hidden;
+      background: linear-gradient(112deg, rgba(14, 26, 39, .98), rgba(13, 18, 32, .92) 60%, rgba(28, 19, 49, .76)) !important;
+      border-color: rgba(72, 244, 228, .16) !important;
+      box-shadow: 0 18px 60px rgba(0, 0, 0, .23);
+    }
+    #tab-overview > .flex:first-child::after {
+      content: ""; position: absolute; width: 300px; height: 300px; right: 8%; top: -220px;
+      border: 1px solid rgba(72, 244, 228, .17); border-radius: 50%;
+      box-shadow: 0 0 0 28px rgba(72,244,228,.025), 0 0 0 58px rgba(72,244,228,.018);
+      pointer-events: none;
+    }
+    #overviewTargetName { letter-spacing: .04em; text-shadow: 0 0 24px rgba(72,244,228,.16); }
+    #tab-overview .grid > div[class*="rounded-xl"] {
+      position: relative; overflow: hidden; min-height: 112px;
+      background: linear-gradient(145deg, rgba(17,25,42,.96), rgba(10,15,27,.96)) !important;
+      border-color: var(--line) !important;
+      box-shadow: 0 10px 26px rgba(0,0,0,.13);
+    }
+    #tab-overview .grid > div[class*="rounded-xl"]::before {
+      content: ""; position: absolute; left: 0; top: 0; width: 100%; height: 2px;
+      background: linear-gradient(90deg, rgba(72,244,228,.72), transparent 75%); opacity: .55;
+    }
+    #tab-overview .grid > div:nth-child(2)::before { background: linear-gradient(90deg,#ff527e,transparent 75%); }
+    #tab-overview .grid > div:nth-child(3)::before { background: linear-gradient(90deg,#ff9a55,transparent 75%); }
+    #tab-overview .grid > div:nth-child(4)::before { background: linear-gradient(90deg,#f1d35a,transparent 75%); }
+    #tab-overview .grid > div:nth-child(6)::before { background: linear-gradient(90deg,#a77bff,transparent 75%); }
+    #tab-overview .grid > div[class*="rounded-xl"] > span:first-child,
+    #tab-overview .grid > div[class*="rounded-xl"] > div:first-child { letter-spacing: .1em; }
+    #tab-overview .grid > div[class*="rounded-xl"] .text-2xl { font-size: 1.85rem; }
+    main h1, main h2 { letter-spacing: .025em; }
+    main h2[class*="uppercase"] { font-size: .72rem; letter-spacing: .13em; }
+    .rounded-2xl, .rounded-xl { border-radius: 13px !important; }
+    .bg-gradient-to-r.from-brand-600,
+    button.bg-gradient-to-r.from-brand-600 {
+      background-image: linear-gradient(100deg, #13cfc0, #53f4e1) !important;
+      color: #041113 !important;
+      box-shadow: 0 5px 24px rgba(29, 228, 210, .18) !important;
+    }
+    button.bg-gradient-to-r.from-brand-600:hover { filter: brightness(1.12); transform: translateY(-1px); }
+    select, input, textarea {
+      background-color: #0a101c !important; border-color: rgba(128,155,186,.22) !important;
+      color: #dce9f5 !important; border-radius: 8px !important;
+    }
+    select:hover, input:hover, textarea:hover { border-color: rgba(72,244,228,.42) !important; }
+    canvas { filter: drop-shadow(0 0 12px rgba(72,244,228,.08)); }
+    .animate-pulse { box-shadow: 0 0 12px currentColor; }
+    @media (max-width: 900px) {
+      header { padding-left: 16px !important; padding-right: 16px !important; }
+      main { padding: 22px !important; }
+      aside { width: 210px !important; }
+    }
+    @media (max-width: 640px) {
+      header { min-height: 64px; }
+      header .text-\[10px\] { display: none; }
+      header p { display: none; }
+      header .flex.items-center.space-x-3 { gap: .5rem; }
+      header button span { display: none; }
+      header button { padding: 9px !important; }
+      .flex-1.flex.overflow-hidden { display: block; overflow: visible; }
+      aside { width: 100% !important; position: sticky; top: 64px; z-index: 30; padding: 8px !important; }
+      aside nav { display: flex; overflow-x: auto; gap: 5px; }
+      aside nav button { width: auto !important; flex: 0 0 46px; justify-content: center; padding: 10px !important; }
+      aside nav button span { display: none; }
+      aside > div { display: none; }
+      main { padding: 16px !important; overflow: visible !important; }
+      #tab-overview > .flex:first-child { padding: 18px !important; }
+      #overviewTargetName { font-size: 1.25rem; }
+    }
   </style>
 </head>
 <body class="bg-dark-950 text-slate-100 min-h-screen flex flex-col font-sans antialiased selection:bg-brand-500 selection:text-black">
@@ -110,7 +254,7 @@
         <button onclick="switchTab('pipeline')" id="tabBtn-pipeline" class="w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium transition text-slate-400 hover:bg-dark-850 hover:text-slate-200">
           <i data-lucide="git-fork" class="w-4 h-4"></i>
           <span>Agent Graph & Skills</span>
-          <span class="ml-auto text-xs px-1.5 py-0.5 rounded bg-dark-800 text-slate-400">14</span>
+          <span class="ml-auto text-xs px-1.5 py-0.5 rounded bg-dark-800 text-slate-400">15</span>
         </button>
         <button onclick="switchTab('findings')" id="tabBtn-findings" class="w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium transition text-slate-400 hover:bg-dark-850 hover:text-slate-200">
           <i data-lucide="bug" class="w-4 h-4"></i>
