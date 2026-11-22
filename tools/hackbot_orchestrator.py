@@ -82,16 +82,16 @@ SKILL_DEPENDENCIES = {
     "report-conglomeration": [],  # Runs after all selected skills
 }
 
-MAX_REVIEW_RETRIES = 3
+MAX_REVIEW_RETRIES = 5
 
 
 class HackbotOrchestrator:
     def __init__(self, target: str, target_dir: str, skills: list,
                  models: list = None, runs_per_skill: int = 1,
                  review_model: str = None, api_spec: str = None,
-                 active_host_limit: int = 20, root_only_active: bool = False,
-                 https_only: bool = False, max_http_requests: int = 40,
-                 request_delay: float = 0.4):
+                 active_host_limit: int = 100, root_only_active: bool = False,
+                 https_only: bool = False, max_http_requests: int = 150,
+                 request_delay: float = 0.3):
         self.target = target
         self.target_dir = Path(target_dir)
         self.skills = skills
@@ -134,14 +134,19 @@ class HackbotOrchestrator:
             return LLMClient(provider="auto")
         if "/" in requested:
             provider, model = requested.split("/", 1)
-            if provider.lower() in {"openai", "anthropic", "gemini", "openrouter", "ollama"}:
-                return LLMClient(provider=provider, model=model)
+            return LLMClient(provider=provider, model=model)
         if normalized.startswith(("gpt-", "o1", "o3", "o4")):
             return LLMClient(provider="openai", model=requested)
         if normalized.startswith("claude-"):
             return LLMClient(provider="anthropic", model=requested)
         if normalized.startswith("gemini-"):
             return LLMClient(provider="gemini", model=requested)
+        if normalized.startswith("deepseek-"):
+            return LLMClient(provider="deepseek", model=requested)
+        if normalized.startswith("grok-"):
+            return LLMClient(provider="xai", model=requested)
+        if normalized.startswith("mistral-") or normalized.startswith("codestral-"):
+            return LLMClient(provider="mistral", model=requested)
         return LLMClient(provider="auto", model=requested)
 
     def verify_scope(self) -> bool:

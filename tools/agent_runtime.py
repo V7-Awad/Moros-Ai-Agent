@@ -156,7 +156,7 @@ class AgentRunner:
                 )
 
         # 3. LLM is Available: Execute ReAct Tool Loop
-        max_steps = context.budget.get("max_steps", 6)
+        max_steps = context.budget.get("max_steps", 25)
         tool_schemas = tools.list_schemas()
         tool_prompt = self._format_tools_prompt(tool_schemas)
 
@@ -182,7 +182,7 @@ class AgentRunner:
         step = 0
         started_at = time.monotonic()
         while step < max_steps:
-            if time.monotonic() - started_at >= context.budget.get("timeout_seconds", 180):
+            if time.monotonic() - started_at >= context.budget.get("timeout_seconds", 600):
                 return AgentResult(
                     status="timeout",
                     summary=f"{agent_id} stopped after reaching its time budget.",
@@ -194,16 +194,16 @@ class AgentRunner:
             step += 1
             logger.info(f"[{agent_id}] ReAct Step {step}/{max_steps}")
 
-            # Send prompt to LLM
+            # Send prompt to LLM (expanded context window)
             step_prompt = "\n\n".join(
                 f"{item['role'].upper()}: {item['content']}"
-                for item in history[-12:]
-            )[-12000:]
+                for item in history[-40:]
+            )[-48000:]
             llm_response = self.llm.complete(
                 step_prompt,
                 system_prompt=full_system_prompt,
                 temperature=0.1,
-                max_tokens=context.budget.get("max_tokens", 4000),
+                max_tokens=context.budget.get("max_tokens", 8192),
             )
 
             if not llm_response:
@@ -249,7 +249,7 @@ class AgentRunner:
             store.append(agent_id, "tool_call", f"Calling {tool_name} with args {parsed_args}", tool=tool_name, run_id=context.run_id)
 
             # Execute tool safely via registry
-            tool_output = tools.execute(tool_name, parsed_args, timeout_seconds=context.budget.get("timeout_seconds", 60))
+            tool_output = tools.execute(tool_name, parsed_args, timeout_seconds=context.budget.get("timeout_seconds", 120))
             obs_str = json.dumps(tool_output, default=str)
 
             # Collect artifacts / findings if returned
@@ -261,9 +261,9 @@ class AgentRunner:
                     if "artifact" in res:
                         artifacts_accumulated.append(str(res["artifact"]))
 
-            store.append(agent_id, "observation", obs_str[:2000], tool=tool_name, run_id=context.run_id)
-            history.append({"role": "user", "content": f"Observation: {obs_str[:3000]}"})
-            current_prompt = f"Observation: {obs_str[:3000]}\nWhat is your next Thought and Action?"
+            store.append(agent_id, "observation", obs_str[:8000], tool=tool_name, run_id=context.run_id)
+            history.append({"role": "user", "content": f"Observation: {obs_str[:12000]}"})
+            current_prompt = f"Observation: {obs_str[:12000]}\nWhat is your next Thought and Action?"
 
         # A configured key does not mean the model call succeeded. Preserve a
         # visible failure state instead of silently marking the agent complete.

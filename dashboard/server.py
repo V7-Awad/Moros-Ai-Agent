@@ -124,7 +124,7 @@ def send_discord_scan_summary(target, status):
 
     content = "\n".join(lines)
     if len(content) > 1900:
-        content = content[:1890] + "…"
+        content = content[:1890] + "..."
     payload = json.dumps({"content": content, "allowed_mentions": {"parse": []}}).encode("utf-8")
     request = urllib.request.Request(
         webhook_url,
@@ -482,8 +482,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not target_path.is_dir():
                 self.send_error_json(f"Target '{target}' not found", status=404)
                 return
-            if len(message) > 12000:
-                self.send_error_json("Message is too long (max 12000 characters)")
+            if len(message) > 60000:
+                self.send_error_json("Message is too long (max 60000 characters)")
                 return
 
             res = self.execute_subagent_chat(target, agent, message)
@@ -627,6 +627,38 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if api_key:
                 env_dict["OPENROUTER_API_KEY"] = api_key
             env_dict["OPENROUTER_MODEL"] = model or "meta-llama/llama-3.1-8b-instruct"
+        elif provider in ["xai", "grok"]:
+            if api_key:
+                env_dict["XAI_API_KEY"] = api_key
+            env_dict["XAI_MODEL"] = model or "grok-2-latest"
+        elif provider == "mistral":
+            if api_key:
+                env_dict["MISTRAL_API_KEY"] = api_key
+            env_dict["MISTRAL_MODEL"] = model or "mistral-large-latest"
+        elif provider == "together":
+            if api_key:
+                env_dict["TOGETHER_API_KEY"] = api_key
+            env_dict["TOGETHER_MODEL"] = model or "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+        elif provider == "cerebras":
+            if api_key:
+                env_dict["CEREBRAS_API_KEY"] = api_key
+            env_dict["CEREBRAS_MODEL"] = model or "llama3.3-70b"
+        elif provider == "sambanova":
+            if api_key:
+                env_dict["SAMBANOVA_API_KEY"] = api_key
+            env_dict["SAMBANOVA_MODEL"] = model or "Meta-Llama-3.3-70B-Instruct"
+        elif provider == "fireworks":
+            if api_key:
+                env_dict["FIREWORKS_API_KEY"] = api_key
+            env_dict["FIREWORKS_MODEL"] = model or "accounts/fireworks/models/llama-v3p3-70b-instruct"
+        elif provider == "perplexity":
+            if api_key:
+                env_dict["PERPLEXITY_API_KEY"] = api_key
+            env_dict["PERPLEXITY_MODEL"] = model or "sonar-pro"
+        elif provider == "cohere":
+            if api_key:
+                env_dict["COHERE_API_KEY"] = api_key
+            env_dict["COHERE_MODEL"] = model or "command-r-plus"
         elif provider == "ollama":
             env_dict["OLLAMA_BASE_URL"] = base_url or "http://localhost:11434"
             env_dict["OLLAMA_MODEL"] = model or "llama3"
@@ -636,10 +668,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if api_key:
                 env_dict["OPENAI_API_KEY"] = api_key
             env_dict["OPENAI_MODEL"] = model or "default"
-        else:  # standard openai
+        else:  # standard openai or any other provider
             if api_key:
                 env_dict["OPENAI_API_KEY"] = api_key
             env_dict["OPENAI_MODEL"] = model or "gpt-4o-mini"
+            if base_url:
+                env_dict["OPENAI_BASE_URL"] = base_url
 
         # Apply to live os.environ
         for k, v in env_dict.items():
@@ -662,17 +696,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
         model = str(body.get("model", "")).strip() or None
         api_key = str(body.get("api_key", "")).strip() or None
         base_url = str(body.get("base_url", "")).strip() or None
-
-        if provider == "deepseek":
-            base_url = "https://api.deepseek.com/v1"
-            model = model or "deepseek-chat"
-            provider = "openai"
-        elif provider == "groq":
-            base_url = "https://api.groq.com/openai/v1"
-            model = model or "llama-3.3-70b-versatile"
-            provider = "openai"
-        elif provider == "custom":
-            provider = "openai"
 
         try:
             client = LLMClient(provider=provider, model=model, api_key=api_key, base_url=base_url)
@@ -795,14 +818,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def get_agent_greeting(self, target_name, agent):
         greetings = {
             "coordinator": (
-                f"🛡️ **Moros Master Coordinator — Active**\n\n"
-                f"Target workspace: `{target_name}` | Status: `ACTIVE & READY`\n\n"
+                f"ðŸ›¡ï¸ **Moros Master Coordinator â€” Active**\n\n"
+                f"Target workspace: `{target_name}` | Status: `READY`\n\n"
                 "I orchestrate multi-agent operations, attack trees, and skill dispatch. "
                 "You can command me to run assessments, verify candidate findings, or coordinate sub-agents."
             ),
             "recon-agent": (
-                f"🌐 **Reconnaissance Specialist Agent — Active**\n\n"
-                f"Target workspace: `{target_name}` | Status: `ACTIVE & READY`\n\n"
+                f"ðŸŒ **Reconnaissance Specialist Agent â€” Active**\n\n"
+                f"Target workspace: `{target_name}` | Status: `READY`\n\n"
                 "Specialized in subdomain enumeration, DNS resolution, alive checks, and Wayback scraping.\n\n"
                 "**Directives supported:**\n"
                 "- `Scan subdomains` / `Run recon`\n"
@@ -811,8 +834,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "- `Summarize mapped attack surface`"
             ),
             "js-analyzer": (
-                f"⚡ **JavaScript & API Hunter Agent — Active**\n\n"
-                f"Target workspace: `{target_name}` | Status: `ACTIVE & READY`\n\n"
+                f"âš¡ **JavaScript & API Hunter Agent â€” Active**\n\n"
+                f"Target workspace: `{target_name}` | Status: `READY`\n\n"
                 "Specialized in headless browser crawling, source map recovery, AST route extraction, and credential pattern detection.\n\n"
                 "**Directives supported:**\n"
                 "- `Analyze JavaScript files`\n"
@@ -821,8 +844,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "- `Audit client-side source maps`"
             ),
             "xss-specialist": (
-                f"🎯 **XSS & Client-Side Specialist Agent — Active**\n\n"
-                f"Target workspace: `{target_name}` | Status: `ACTIVE & READY`\n\n"
+                f"ðŸŽ¯ **XSS & Client-Side Specialist Agent â€” Active**\n\n"
+                f"Target workspace: `{target_name}` | Status: `READY`\n\n"
                 "Specialized in DOM, Reflected, Stored, and Blind XSS payload injection with context-escape analysis.\n\n"
                 "**Directives supported:**\n"
                 "- `Test reflected parameters`\n"
@@ -830,8 +853,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "- `Generate context-tailored XSS payloads`"
             ),
             "ssrf-specialist": (
-                f"☁️ **SSRF & Cloud Metadata Hunter Agent — Active**\n\n"
-                f"Target workspace: `{target_name}` | Status: `ACTIVE & READY`\n\n"
+                f"â˜ï¸ **SSRF & Cloud Metadata Hunter Agent â€” Active**\n\n"
+                f"Target workspace: `{target_name}` | Status: `READY`\n\n"
                 "Specialized in SSRF identification, out-of-band canary interaction, and AWS/GCP/Azure instance metadata pivots.\n\n"
                 "**Directives supported:**\n"
                 "- `Audit SSRF vectors`\n"
@@ -839,8 +862,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "- `Inspect webhook and callback parameters`"
             ),
             "auth-race-specialist": (
-                f"🔑 **Auth & Race Condition Agent — Active**\n\n"
-                f"Target workspace: `{target_name}` | Status: `ACTIVE & READY`\n\n"
+                f"ðŸ”‘ **Auth & Race Condition Agent â€” Active**\n\n"
+                f"Target workspace: `{target_name}` | Status: `READY`\n\n"
                 "Specialized in IdP multi-threaded race conditions, token collisions, and password reset rate-limit auditing.\n\n"
                 "**Directives supported:**\n"
                 "- `Audit multi-threaded race conditions`\n"
@@ -848,8 +871,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "- `Evaluate OAuth/SAML state handling`"
             ),
             "review-verifier": (
-                f"🔍 **Review-Skill Verifier Gate — Active**\n\n"
-                f"Target workspace: `{target_name}` | Status: `ACTIVE & READY`\n\n"
+                f"ðŸ” **Review-Skill Verifier Gate â€” Active**\n\n"
+                f"Target workspace: `{target_name}` | Status: `READY`\n\n"
                 "Specialized in strict evidence enforcement, independent cURL reproduction replay, and false-positive elimination.\n\n"
                 "**Directives supported:**\n"
                 "- `Verify candidate findings`\n"
@@ -857,8 +880,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "- `Enforce verification proof standards`"
             ),
             "report-specialist": (
-                f"📄 **Reporting & Synthesis Agent — Active**\n\n"
-                f"Target workspace: `{target_name}` | Status: `ACTIVE & READY`\n\n"
+                f"ðŸ“„ **Reporting & Synthesis Agent â€” Active**\n\n"
+                f"Target workspace: `{target_name}` | Status: `READY`\n\n"
                 "Specialized in OASIS SARIF 2.1.0 deliverable compilation, CVSS v3.1 scoring, and executive markdown synthesis.\n\n"
                 "**Directives supported:**\n"
                 "- `Generate SARIF 2.1.0 report`\n"
@@ -867,22 +890,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
             ),
         }
         return greetings.get(agent, (
-            f"🛡️ **Moros Specialist Agent — {agent}**\n\n"
-            f"Target workspace: `{target_name}` | Status: `ACTIVE & READY`\n\n"
+            f"ðŸ›¡ï¸ **Moros Specialist Agent â€” {agent}**\n\n"
+            f"Target workspace: `{target_name}` | Status: `READY`\n\n"
             "Ready to execute operational directives for authorized assessment scope."
         ))
 
     def get_subagent_roster(self, target_name):
         target_path = TARGETS_DIR / target_name
         store = ConversationStore(target_path)
-        is_scanning = target_name in active_scans and active_scans[target_name]["status"] == "running"
+        scan_state = active_scans.get(target_name, {}).get("status", "idle")
+        llm_available = LLMClient(provider="auto").is_available()
 
         def _agent_status(agent_id):
-            if is_scanning:
-                return "ACTIVE"
-            msgs = store.read(agent_id, 10)
-            if any(m.get("role") == "user" for m in msgs):
-                return "ACTIVE"
+            if scan_state in {"starting", "running"}:
+                return "RUNNING" if agent_id == "coordinator" else "QUEUED"
+            if scan_state in {"stopping", "stopped", "failed"}:
+                return scan_state.upper()
+            if agent_id == "coordinator" and not llm_available:
+                return "LLM OFFLINE"
             return "READY"
 
         roster = [
@@ -890,7 +915,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "id": "coordinator",
                 "name": "Coordinator Master",
                 "role": "Attack tree orchestration, plan dispatch & multi-agent planner",
-                "tier": "Frontier (Autonomous ReAct Loop)",
+                "tier": "Coordinator / Configured LLM",
                 "status": _agent_status("coordinator"),
                 "icon": "shield-alert",
                 "messages_count": len(store.read("coordinator", 200)),
@@ -1071,7 +1096,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     sample_subs = [s.strip() for s in sub_file.read_text(encoding="utf-8").splitlines() if s.strip()][:8]
                 sub_list = "\n".join(f"- `{s}`" for s in sample_subs) if sample_subs else "- None recorded yet"
                 answer = (
-                    f"🌐 **[RECON-AGENT] Subdomain Enumeration Directive Executed**\n\n"
+                    f"ðŸŒ **[RECON-AGENT] Subdomain Enumeration Directive Executed**\n\n"
                     f"Target: `{target}` | Status: `COMPLETED`\n\n"
                     f"### Key Metrics\n"
                     f"- **Total Subdomains Discovered:** `{sub_count}`\n"
@@ -1095,7 +1120,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         pass
                 sec_summary = "\n".join(f"- `{s.get('type')}` in `{s.get('source_file')}` ({s.get('severity')})" for s in sec_items) if sec_items else "- No exposed API keys or tokens identified."
                 answer = (
-                    f"⚡ **[JS-ANALYZER] JavaScript & Secret Extraction Executed**\n\n"
+                    f"âš¡ **[JS-ANALYZER] JavaScript & Secret Extraction Executed**\n\n"
                     f"Target: `{target}` | Status: `COMPLETED`\n\n"
                     f"### Key Metrics\n"
                     f"- **Secrets / Credentials Flagged:** `{sec_count}`\n"
@@ -1111,7 +1136,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 sarif_path = res.get("sarif_path") or f"targets/{target}/output/report/findings.sarif"
                 report_path = res.get("report_path") or f"targets/{target}/output/report/"
                 answer = (
-                    f"📄 **[REPORT-SPECIALIST] Enterprise Deliverables Compiled**\n\n"
+                    f"ðŸ“„ **[REPORT-SPECIALIST] Enterprise Deliverables Compiled**\n\n"
                     f"Target: `{target}` | Status: `COMPLETED`\n\n"
                     f"### Export Artifacts\n"
                     f"- **OASIS SARIF 2.1.0:** `{sarif_path}` (Directly uploadable via `github/codeql-action/upload-sarif`)\n"
@@ -1128,7 +1153,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 res = runner.run_review_skill("all")
                 status_str = res.get("overall_status", "SUCCESS")
                 answer = (
-                    f"🔍 **[REVIEW-VERIFIER] Verification Gate Executed**\n\n"
+                    f"ðŸ” **[REVIEW-VERIFIER] Verification Gate Executed**\n\n"
                     f"Target: `{target}` | Status: `{status_str}`\n\n"
                     f"- Evaluated candidate findings against strict evidence gates.\n"
                     f"- Verified reproduction proof standards (independent evidence, cURL validation).\n"
@@ -1139,7 +1164,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 eps = _tool_list_endpoints()
                 ep_text = "\n".join(f"- `{e}`" for e in eps[:15]) if eps else "- No endpoints discovered yet. Run recon or js-analyze first."
                 answer = (
-                    f"🛡️ **[AGENT: {agent.upper()}] Discovered Endpoints Inventory**\n\n"
+                    f"ðŸ›¡ï¸ **[AGENT: {agent.upper()}] Discovered Endpoints Inventory**\n\n"
                     f"Target: `{target}` | Inventory Count: `{len(eps)}`\n\n"
                     f"### Target Routes\n{ep_text}\n\n"
                     f"Directives available: Ask to test specific endpoints or run vulnerability auditing."
@@ -1149,9 +1174,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 findings = self.get_target_findings(target)
                 validated = sum(1 for f in findings if f.get("validation_status") == "validated")
                 candidates = len(findings) - validated
-                f_sample = "\n".join(f"- **{f.get('title')}** — `{f.get('severity')}` [{f.get('validation_status')}]" for f in findings[:8]) if findings else "- No findings recorded in workspace."
+                f_sample = "\n".join(f"- **{f.get('title')}** â€” `{f.get('severity')}` [{f.get('validation_status')}]" for f in findings[:8]) if findings else "- No findings recorded in workspace."
                 answer = (
-                    f"🛡️ **[AGENT: {agent.upper()}] Workspace Triage Overview**\n\n"
+                    f"ðŸ›¡ï¸ **[AGENT: {agent.upper()}] Workspace Triage Overview**\n\n"
                     f"Target: `{target}` | Total Items: `{len(findings)}` ({validated} validated, {candidates} unverified candidates)\n\n"
                     f"### Key Findings\n{f_sample}\n\n"
                     f"Use `Verify findings` to invoke the verification gate or `Generate SARIF 2.1.0` to compile CI/CD reports."
@@ -1162,15 +1187,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 endpoints = summary_data.get("total_endpoints", 0)
                 findings = summary_data.get("total_findings", 0)
                 answer = (
-                    f"🛡️ **[AGENT: {agent.upper()}] Operational Briefing**\n\n"
-                    f"Target: `{target}` | Status: `ACTIVE & READY`\n\n"
+                    f"ðŸ›¡ï¸ **[AGENT: {agent.upper()}] Operational Briefing**\n\n"
+                    f"Target: `{target}` | Status: `READY`\n\n"
                     f"I have initialized workspace context for `{target}` with {endpoints} endpoints and {findings} triage items. "
                     f"I am ready to execute tasks under authorization scope.\n\n"
                     f"**Suggested Directives:**\n"
-                    f"- `Run subdomain recon` — Enumerate subdomains & alive hosts\n"
-                    f"- `Analyze JavaScript` — Crawl JS files, extract AST routes & scan for secrets\n"
-                    f"- `Verify findings` — Execute independent cURL replay & prune false positives\n"
-                    f"- `Export SARIF 2.1.0` — Build GitHub Code Scanning deliverable"
+                    f"- `Run subdomain recon` â€” Enumerate subdomains & alive hosts\n"
+                    f"- `Analyze JavaScript` â€” Crawl JS files, extract AST routes & scan for secrets\n"
+                    f"- `Verify findings` â€” Execute independent cURL replay & prune false positives\n"
+                    f"- `Export SARIF 2.1.0` â€” Build GitHub Code Scanning deliverable"
                 )
                 source = "specialist-briefing"
 
@@ -1280,7 +1305,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         items = content if isinstance(content, list) else content.get("findings", [content])
                         for item in items:
                             if isinstance(item, dict) and ("type" in item or "title" in item or "url" in item):
-                                raw_sev = item.get("severity", "Triage Severity: UNASSESSED — pending evidence and human review")
+                                raw_sev = item.get("severity", "Triage Severity: UNASSESSED â€” pending evidence and human review")
                                 sev_lvl = "UNASSESSED" if "UNASSESSED" in raw_sev.upper() else "MEDIUM"
                                 if "CRITICAL" in raw_sev.upper():
                                     sev_lvl = "CRITICAL"
@@ -1325,7 +1350,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             try:
                 s_data = json.loads(secrets_file.read_text(encoding="utf-8"))
                 for s in s_data.get("findings", []):
-                    raw_sev = s.get("severity", "Triage Severity: MEDIUM — pending human review")
+                    raw_sev = s.get("severity", "Triage Severity: MEDIUM â€” pending human review")
                     sev_lvl = "MEDIUM"
                     if "HIGH" in raw_sev.upper():
                         sev_lvl = "HIGH"
@@ -1363,7 +1388,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "id": f"gadget-{len(findings)+1}",
                         "title": f"Dangerous Sink: {g.get('type')}",
                         "category": "dom-xss",
-                        "severity": "Triage Severity: MEDIUM — pending human review",
+                        "severity": "Triage Severity: MEDIUM â€” pending human review",
                         "severity_level": "MEDIUM",
                         "endpoint": g.get("source_file", ""),
                         "parameter": g.get("controllable_source", ""),
@@ -1587,10 +1612,10 @@ def run_dashboard(host="127.0.0.1", port=8080, open_browser=True, default_target
         url += f"?target={default_target}"
 
     print("=" * 60)
-    print("🛡️  MOROS AI AGENT — WEB DASHBOARD")
-    print(f"📡 Dashboard running at: {url}")
-    print(f"📂 Project Root: {PROJECT_ROOT}")
-    print("⌨️  Press Ctrl+C to stop the dashboard server")
+    print("ðŸ›¡ï¸  MOROS AI AGENT â€” WEB DASHBOARD")
+    print(f"ðŸ“¡ Dashboard running at: {url}")
+    print(f"ðŸ“‚ Project Root: {PROJECT_ROOT}")
+    print("âŒ¨ï¸  Press Ctrl+C to stop the dashboard server")
     print("=" * 60)
 
     if open_browser:
@@ -1600,14 +1625,14 @@ def run_dashboard(host="127.0.0.1", port=8080, open_browser=True, default_target
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\n🛑 Dashboard server stopped.")
+        print("\nðŸ›‘ Dashboard server stopped.")
     finally:
         httpd.server_close()
 
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Moros AI Agent — Web Dashboard Server")
+    parser = argparse.ArgumentParser(description="Moros AI Agent â€” Web Dashboard Server")
     parser.add_argument("--host", default="127.0.0.1", help="Host address (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8080, help="Port (default: 8080)")
     parser.add_argument("--target", default=None, help="Default target domain to open")
@@ -1615,3 +1640,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     run_dashboard(host=args.host, port=args.port, open_browser=not args.no_open, default_target=args.target)
+

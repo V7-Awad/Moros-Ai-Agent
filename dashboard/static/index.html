@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>MOROS AI — Agentic Pentest Dashboard</title>
+  <link rel="icon" type="image/png" href="logo.png">
   <style>
     /* ==================== 1. TOKENS & FOUNDATION ==================== */
     :root {
@@ -361,6 +362,13 @@
       display: grid;
       gap: 8px;
     }
+    .nav-group-label {
+      margin: 10px 4px 1px;
+      color: var(--mut);
+      font: 700 10px 'Space Grotesk', system-ui, sans-serif;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
     .part {
       display: flex;
       align-items: center;
@@ -558,6 +566,30 @@
       border-radius: 10px;
       border: 1px solid rgba(241, 194, 107, .5);
       background: rgba(241, 194, 107, .08);
+    }
+    .note.dismissible-notice {
+      position: relative;
+      padding-right: 42px;
+    }
+    .notice-close {
+      position: absolute;
+      top: 6px;
+      right: 8px;
+      width: 26px;
+      height: 26px;
+      padding: 0;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--mut);
+      font-size: 21px;
+      line-height: 24px;
+      cursor: pointer;
+      transition: color .15s ease, background .15s ease;
+    }
+    .notice-close:hover {
+      color: var(--text);
+      background: rgba(255, 255, 255, .1);
     }
     .note b { color: var(--warn); }
     .note p { margin: 6px 0 0; color: #e6d6b0; font-size: 13px; }
@@ -921,9 +953,8 @@
       <!-- Mobile menu trigger -->
       <button class="ghost mobile-menu-btn" onclick="toggleSidebar()" aria-label="Toggle Navigation">☰ Menu</button>
 
-      <!-- Brand Element with Official MOROS Logo -->
+      <!-- MOROS wordmark -->
       <div class="brand-wrap" onclick="switchTab('overview')">
-        <img src="logo.png" alt="MOROS" class="brand-logo">
         <img src="moros-wordmark.png" alt="MOROS" class="brand-wordmark">
       </div>
 
@@ -960,6 +991,7 @@
     <aside class="card" id="appSidebar">
       <div class="h2" style="margin-top:0;">OPERATIONS</div>
       <nav class="parts">
+        <div class="nav-group-label">Overview</div>
         <div class="part active" id="tabBtn-overview" onclick="switchTab('overview')">
           <span class="chip">01</span>
           <div>
@@ -967,6 +999,7 @@
             <small>Metrics & fingerprint</small>
           </div>
         </div>
+        <div class="nav-group-label">Agents</div>
         <div class="part" id="tabBtn-conversations" onclick="switchTab('conversations')">
           <span class="chip">02</span>
           <div>
@@ -983,6 +1016,7 @@
           </div>
           <span class="nav-badge" id="navSkillsCount">15</span>
         </div>
+        <div class="nav-group-label">Evidence</div>
         <div class="part" id="tabBtn-findings" onclick="switchTab('findings')">
           <span class="chip">04</span>
           <div>
@@ -999,6 +1033,7 @@
           </div>
           <span class="nav-badge" id="navEndpointsCount">0</span>
         </div>
+        <div class="nav-group-label">Control</div>
         <div class="part" id="tabBtn-checkpoints" onclick="switchTab('checkpoints')">
           <span class="chip">06</span>
           <div>
@@ -1014,6 +1049,7 @@
             <small>Streaming logs</small>
           </div>
         </div>
+        <div class="nav-group-label">Results</div>
         <div class="part" id="tabBtn-report" onclick="switchTab('report')">
           <span class="chip">08</span>
           <div>
@@ -1303,12 +1339,12 @@
                 <div class="agent-chat-content">
                   <div class="agent-chat-title-row" style="display:flex; align-items:center; gap:8px;">
                     <strong id="activeAgentName" style="font:700 15px 'Space Grotesk', system-ui, sans-serif; color:#fff;">Coordinator Master</strong>
-                    <span id="activeAgentStatusBadge" class="tag ok" style="padding:2px 8px; font-size:10px;">ACTIVE</span>
+                    <span id="activeAgentStatusBadge" class="tag info" style="padding:2px 8px; font-size:10px;">READY</span>
                   </div>
                   <div id="activeAgentRole" class="hint agent-chat-role" style="font-size:11px; margin-top:2px;">Attack tree orchestration & multi-agent planner</div>
                 </div>
               </div>
-              <div class="mono agent-chat-tier" style="font-size:11px; color:var(--cyan); text-align:right;" id="activeAgentTier">Frontier (Claude 3.5 / GPT-4o)</div>
+              <div class="mono agent-chat-tier" style="font-size:11px; color:var(--cyan); text-align:right;" id="activeAgentTier">Configured Engine</div>
             </div>
 
             <!-- Messages Stream Area -->
@@ -1368,8 +1404,8 @@
         <button class="modal-close" onclick="closeModal('newScanModal')">&times;</button>
       </div>
       <div style="display:flex; flex-direction:column; gap:14px; font-size:13px;">
-        <div id="llmCurrentStatus" class="note" style="border-left-color:var(--warn);">
-          Model status is being checked…
+        <div id="llmCurrentStatus" class="note" data-dismiss-key="llm-config-status" style="border-left-color:var(--warn);">
+          <span id="llmCurrentStatusText">Model status is being checked…</span>
         </div>
         <div>
           <label style="display:block; margin-bottom:4px; font-weight:600; color:var(--mut);">Target Domain</label>
@@ -1502,13 +1538,21 @@
           <label style="display:block; margin-bottom:4px; font-weight:600; color:var(--mut);">Provider</label>
           <select id="llmProviderSelect" class="mono" style="width:100%;" onchange="onLlmProviderChange()">
             <option value="deepseek">DeepSeek (deepseek-chat / deepseek-reasoner)</option>
-            <option value="openai">OpenAI (GPT-4o, GPT-4o-mini, o3-mini)</option>
-            <option value="anthropic">Anthropic Claude (Claude 3.5 Sonnet)</option>
-            <option value="groq">Groq (Llama 3.3 70B, Qwen)</option>
-            <option value="gemini">Google Gemini (Gemini 3.8 Flash / 3.1 Pro)</option>
-            <option value="openrouter">OpenRouter (Multi-model Gateway)</option>
+            <option value="openai">OpenAI (GPT-4o, GPT-4o-mini, o1, o3-mini)</option>
+            <option value="anthropic">Anthropic Claude (Claude 3.7 Sonnet / 3.5 Sonnet)</option>
+            <option value="groq">Groq (Llama 3.3 70B, DeepSeek-R1-Distill, Qwen)</option>
+            <option value="gemini">Google Gemini (Gemini 2.0 Flash / 2.5 Pro / 3.8 Flash)</option>
+            <option value="openrouter">OpenRouter (Multi-model Gateway / 100+ Models)</option>
+            <option value="xai">xAI Grok (grok-2-latest, grok-beta)</option>
+            <option value="mistral">Mistral AI (mistral-large-latest, codestral-latest)</option>
+            <option value="together">Together AI (Llama 3.3 70B, DeepSeek-V3)</option>
+            <option value="cerebras">Cerebras (Ultra-Fast Llama 3.3 70B)</option>
+            <option value="sambanova">SambaNova (Llama 3.3 70B, DeepSeek-R1)</option>
+            <option value="fireworks">Fireworks AI (Llama 3.3, Fast Inference)</option>
+            <option value="perplexity">Perplexity (sonar-pro, sonar)</option>
+            <option value="cohere">Cohere (command-r-plus, command-r)</option>
             <option value="ollama">Ollama (Local / Offline 100%)</option>
-            <option value="custom">Custom OpenAI-Compatible (LM Studio / vLLM / LocalAI)</option>
+            <option value="custom">Custom / Any OpenAI-Compatible (LM Studio / vLLM / Any Gateway)</option>
           </select>
         </div>
         <div>
@@ -1600,6 +1644,43 @@
     function openModal(id) { document.getElementById(id).classList.remove('hidden'); }
     function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
 
+    // Notices are dismissible per browser. Clear site data/localStorage to show them again.
+    const NOTICE_STORAGE_PREFIX = 'moros.dismissed.notice.';
+    function noticeKey(element) {
+      return element.dataset.dismissKey || element.id || 'notice-' + Array.from(document.querySelectorAll('.note')).indexOf(element);
+    }
+    function isNoticeDismissed(key) {
+      try { return localStorage.getItem(NOTICE_STORAGE_PREFIX + key) === '1'; }
+      catch (error) { return false; }
+    }
+    function dismissNotice(element) {
+      const key = noticeKey(element);
+      try { localStorage.setItem(NOTICE_STORAGE_PREFIX + key, '1'); } catch (error) {}
+      element.style.display = 'none';
+      element.setAttribute('aria-hidden', 'true');
+    }
+    function installDismissibleNotices() {
+      document.querySelectorAll('.note').forEach((element) => {
+        const key = noticeKey(element);
+        if (isNoticeDismissed(key)) {
+          element.style.display = 'none';
+          element.setAttribute('aria-hidden', 'true');
+          return;
+        }
+        if (element.dataset.dismissReady === '1') return;
+        element.classList.add('dismissible-notice');
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'notice-close';
+        close.setAttribute('aria-label', 'Dismiss notification');
+        close.title = 'Dismiss notification';
+        close.textContent = '×';
+        close.addEventListener('click', () => dismissNotice(element));
+        element.appendChild(close);
+        element.dataset.dismissReady = '1';
+      });
+    }
+
     async function refreshLlmStatus() {
       const indicator = document.getElementById('llmStatusIndicator');
       const notice = document.getElementById('scanLlmNotice');
@@ -1617,13 +1698,20 @@
           ? `Model configured: ${config.provider}/${config.model || 'default'}. Run Test Connection to verify access before scanning.`
           : 'No model is connected. Moros will use deterministic checks only; configure a model before an agentic scan.';
         const modalStatus = document.getElementById('llmCurrentStatus');
-        if (modalStatus) modalStatus.textContent = config.is_available
+        const modalStatusText = document.getElementById('llmCurrentStatusText');
+        if (modalStatusText) modalStatusText.textContent = config.is_available
           ? `Configured: ${config.provider}/${config.model || 'default'}. Connection has not been verified; use Test Connection before scanning.`
           : 'No model is connected. Add a provider key or configure local Ollama, then test the connection. Until then, scans use deterministic checks only.';
+        if (modalStatus && !isNoticeDismissed(noticeKey(modalStatus))) {
+          modalStatus.style.display = '';
+          modalStatus.removeAttribute('aria-hidden');
+        }
         return config;
       } catch (error) {
         if (indicator) indicator.textContent = 'LLM STATUS ERROR';
         if (notice) notice.textContent = 'Could not read model status from the local dashboard.';
+        const modalStatusText = document.getElementById('llmCurrentStatusText');
+        if (modalStatusText) modalStatusText.textContent = 'Could not read model status from the local dashboard.';
         return null;
       }
     }
@@ -1668,6 +1756,7 @@
 
     // --- Initialization ---
     async function init() {
+      installDismissibleNotices();
       await refreshLlmStatus();
       await fetchSystemInfo();
       await fetchTargets();
@@ -2339,6 +2428,14 @@
     let currentAgent = "coordinator";
     let activeRoster = [];
 
+    function getAgentStatusClass(status) {
+      const value = String(status || '').toUpperCase();
+      if (value === 'RUNNING' || value === 'STARTING') return 'tag ok';
+      if (value === 'FAILED' || value === 'STOPPED') return 'tag bad';
+      if (value === 'LLM OFFLINE' || value === 'QUEUED') return 'tag warn';
+      return 'tag info';
+    }
+
     async function fetchConversations() {
       const container = document.getElementById('conversationMessages');
       if (!container || !currentTarget) return;
@@ -2373,7 +2470,7 @@
         if (tierEl) tierEl.textContent = agentMeta.tier;
         if (badgeEl) {
           badgeEl.textContent = agentMeta.status;
-          badgeEl.className = agentMeta.status === "ACTIVE" ? "tag ok" : (agentMeta.status === "COMPLETED" ? "tag info" : "tag low");
+          badgeEl.className = getAgentStatusClass(agentMeta.status);
         }
         if (avatarEl) {
           avatarEl.textContent = getAgentEmoji(currentAgent);
@@ -2406,7 +2503,8 @@
       list.innerHTML = roster.map(a => {
         const isSelected = a.id === currentAgent;
         const emoji = getAgentEmoji(a.id);
-        const statusColor = a.status === "ACTIVE" ? "var(--ok)" : (a.status === "COMPLETED" ? "var(--mut)" : "var(--cyan)");
+        const statusValue = String(a.status || '').toUpperCase();
+        const statusColor = (statusValue === "RUNNING" || statusValue === "STARTING") ? "var(--ok)" : ((statusValue === "FAILED" || statusValue === "STOPPED") ? "var(--bad)" : ((statusValue === "LLM OFFLINE" || statusValue === "QUEUED") ? "var(--warn)" : "var(--mut)"));
 
         return `
           <div class="part ${isSelected ? 'active' : ''}" onclick="selectAgent('${escapeJs(a.id)}')" style="padding:10px 12px; cursor:pointer;">
@@ -2438,7 +2536,12 @@
       }
 
       container.innerHTML = messages.map(m => {
-        const isUser = m.role === 'user';
+        const role = String(m.role || 'assistant').toLowerCase();
+        const isUser = role === 'user';
+        const isTool = role === 'tool' || role === 'system';
+        const label = isUser ? 'OPERATOR' : (isTool ? role.toUpperCase() : (m.agent || currentAgent).toUpperCase());
+        const roleColor = isUser ? 'var(--cyan)' : (isTool ? 'var(--warn)' : 'var(--ok)');
+        const provider = m.model || m.provider || (isTool ? 'execution event' : 'configured engine');
         if (isUser) {
           return `
             <div style="display:flex; justify-content:flex-end; gap:10px; margin-left:60px;">
@@ -2452,6 +2555,19 @@
               <div style="width:32px; height:32px; border-radius:50%; background:var(--blue); display:grid; place-items:center; font-size:14px; flex-shrink:0;">👤</div>
             </div>
           `;
+        } else if (isTool) {
+          return `
+            <div style="display:flex; justify-content:flex-start; gap:10px; margin-right:30px;">
+              <div style="width:32px; height:32px; border-radius:50%; background:rgba(241,194,107,.18); border:1px solid rgba(241,194,107,.45); display:grid; place-items:center; font-size:14px; flex-shrink:0;">⚙</div>
+              <div style="background:rgba(241,194,107,.07); border:1px solid rgba(241,194,107,.35); border-radius:12px; padding:12px 16px; color:#dbe3ee; font-size:12px; line-height:1.6; flex:1;">
+                <div style="display:flex; justify-content:space-between; gap:12px; margin-bottom:5px; font-size:10px;">
+                  <strong style="color:${roleColor}; letter-spacing:.08em;">${escapeHtml(label)}</strong>
+                  <span class="hint mono">${escapeHtml(m.timestamp ? m.timestamp.slice(11, 19) : '')}</span>
+                </div>
+                <div class="mono" style="white-space:pre-wrap;">${escapeHtml(m.content || '')}</div>
+              </div>
+            </div>
+          `;
         } else {
           const emoji = getAgentEmoji(m.agent || currentAgent);
           return `
@@ -2459,7 +2575,7 @@
               <div style="width:32px; height:32px; border-radius:50%; background:linear-gradient(135deg,var(--blue),var(--cyan)); display:grid; place-items:center; font-size:14px; flex-shrink:0; box-shadow:0 0 10px var(--blue-glow);">${emoji}</div>
               <div style="background:rgba(11, 11, 11, .9); border:1px solid var(--line); border-radius:12px; padding:14px 18px; color:#cbd5e1; font-size:13px; line-height:1.6; flex:1;">
                 <div style="display:flex; justify-content:space-between; gap:12px; margin-bottom:6px; font-size:11px;">
-                  <strong style="color:var(--cyan); letter-spacing:.04em;">${escapeHtml((m.agent || currentAgent).toUpperCase())} &bull; <span class="mono" style="color:var(--mut);">${escapeHtml(m.model || m.provider || 'Core')}</span></strong>
+                  <strong style="color:${roleColor}; letter-spacing:.04em;">${escapeHtml(label)} &bull; <span class="mono" style="color:var(--mut);">${escapeHtml(provider)}</span></strong>
                   <span class="hint mono">${escapeHtml(m.timestamp ? m.timestamp.slice(11, 19) : '')}</span>
                 </div>
                 <div>${renderOfflineMarkdown(m.content)}</div>
@@ -2746,38 +2862,30 @@
       const urlIn = document.getElementById('llmBaseUrlInput');
       const keyWrap = document.getElementById('llmApiKeyWrap');
 
-      if (p === 'deepseek') {
-        urlIn.placeholder = "https://api.deepseek.com/v1";
-        if (!modelIn.value || modelIn.value === 'gpt-4o-mini' || modelIn.value === 'llama3') modelIn.value = 'deepseek-chat';
-        keyWrap.style.display = 'block';
-      } else if (p === 'openai') {
-        urlIn.placeholder = "https://api.openai.com/v1";
-        if (!modelIn.value || modelIn.value === 'deepseek-chat') modelIn.value = 'gpt-4o-mini';
-        keyWrap.style.display = 'block';
-      } else if (p === 'anthropic') {
-        urlIn.placeholder = "https://api.anthropic.com/v1";
-        if (!modelIn.value || modelIn.value === 'deepseek-chat') modelIn.value = 'claude-3-5-sonnet-20241022';
-        keyWrap.style.display = 'block';
-      } else if (p === 'groq') {
-        urlIn.placeholder = "https://api.groq.com/openai/v1";
-        if (!modelIn.value || modelIn.value === 'deepseek-chat') modelIn.value = 'llama-3.3-70b-versatile';
-        keyWrap.style.display = 'block';
-      } else if (p === 'gemini') {
-        urlIn.placeholder = "https://generativelanguage.googleapis.com";
-        if (!modelIn.value || modelIn.value === 'deepseek-chat' || modelIn.value.startsWith('gemini-1.5-')) modelIn.value = 'gemini-3.8-flash';
-        keyWrap.style.display = 'block';
-      } else if (p === 'openrouter') {
-        urlIn.placeholder = "https://openrouter.ai/api/v1";
-        if (!modelIn.value || modelIn.value === 'deepseek-chat') modelIn.value = 'meta-llama/llama-3.1-8b-instruct';
-        keyWrap.style.display = 'block';
-      } else if (p === 'ollama') {
-        urlIn.placeholder = "http://localhost:11434";
-        if (!urlIn.value) urlIn.value = "http://localhost:11434";
-        if (!modelIn.value || modelIn.value === 'deepseek-chat') modelIn.value = 'llama3';
-        keyWrap.style.display = 'none';
-      } else if (p === 'custom') {
-        urlIn.placeholder = "http://localhost:1234/v1";
-        keyWrap.style.display = 'block';
+      const providerConfigs = {
+        deepseek: { url: "https://api.deepseek.com/v1", model: "deepseek-chat", key: true },
+        openai: { url: "https://api.openai.com/v1", model: "gpt-4o-mini", key: true },
+        anthropic: { url: "https://api.anthropic.com/v1", model: "claude-3-5-sonnet-20241022", key: true },
+        groq: { url: "https://api.groq.com/openai/v1", model: "llama-3.3-70b-versatile", key: true },
+        gemini: { url: "https://generativelanguage.googleapis.com", model: "gemini-3.8-flash", key: true },
+        openrouter: { url: "https://openrouter.ai/api/v1", model: "meta-llama/llama-3.1-8b-instruct", key: true },
+        xai: { url: "https://api.x.ai/v1", model: "grok-2-latest", key: true },
+        mistral: { url: "https://api.mistral.ai/v1", model: "mistral-large-latest", key: true },
+        together: { url: "https://api.together.xyz/v1", model: "meta-llama/Llama-3.3-70B-Instruct-Turbo", key: true },
+        cerebras: { url: "https://api.cerebras.ai/v1", model: "llama3.3-70b", key: true },
+        sambanova: { url: "https://api.sambanova.ai/v1", model: "Meta-Llama-3.3-70B-Instruct", key: true },
+        fireworks: { url: "https://api.fireworks.ai/inference/v1", model: "accounts/fireworks/models/llama-v3p3-70b-instruct", key: true },
+        perplexity: { url: "https://api.perplexity.ai", model: "sonar-pro", key: true },
+        cohere: { url: "https://api.cohere.com/v2", model: "command-r-plus", key: true },
+        ollama: { url: "http://localhost:11434", model: "llama3", key: false },
+        custom: { url: "http://localhost:1234/v1", model: "default", key: true }
+      };
+
+      const cfg = providerConfigs[p] || { url: "https://api.openai.com/v1", model: "default", key: true };
+      urlIn.placeholder = cfg.url;
+      keyWrap.style.display = cfg.key ? 'block' : 'none';
+      if (!modelIn.value || Object.values(providerConfigs).some(c => c.model === modelIn.value)) {
+        modelIn.value = cfg.model;
       }
     }
 

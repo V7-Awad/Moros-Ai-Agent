@@ -18,8 +18,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class ScopedHttpClient:
-    def __init__(self, target: str, max_requests: int = 40, delay_seconds: float = 0.4,
-                 timeout_seconds: float = 8.0, max_body_bytes: int = 512_000):
+    def __init__(self, target: str, max_requests: int = 150, delay_seconds: float = 0.3,
+                 timeout_seconds: float = 15.0, max_body_bytes: int = 5_242_880):
         parsed = urllib.parse.urlparse(target if "://" in target else f"https://{target}")
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError("Target must be an HTTP(S) URL or hostname without credentials")

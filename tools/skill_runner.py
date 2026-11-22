@@ -162,7 +162,7 @@ class SkillRunner:
         # Step 3: Wayback Machine CDX API subdomains
         self.log_step(skill, "step-03-web-archives.log", f"Querying Wayback CDX for *.{self.target}/*...")
         try:
-            cdx_url = f"https://web.archive.org/cdx/search/cdx?url=*.{self.target}/*&output=json&fl=original&collapse=urlkey&limit=300"
+            cdx_url = f"https://web.archive.org/cdx/search/cdx?url=*.{self.target}/*&output=json&fl=original&collapse=urlkey&limit=3000"
             req = urllib.request.Request(cdx_url, headers={"User-Agent": "Mozilla/5.0 Moros-AI-Recon"})
             with urllib.request.urlopen(req, timeout=15) as resp:
                 rows = json.loads(resp.read().decode("utf-8", errors="ignore"))
@@ -298,7 +298,7 @@ class SkillRunner:
         self.log_step(skill, "step-02-browser-crawl.log", f"Starting bounded same-host browser crawl for {self.http.base_url}")
 
         remaining = self.http.max_requests - self.http.request_count
-        browser_budget = min(20, remaining)
+        browser_budget = min(50, remaining)
         if browser_budget > 0:
             browser_summary = js_dir / "crawl-summary.json"
             try:
@@ -307,8 +307,8 @@ class SkillRunner:
                      "--target", self.http.base_url, "--output-dir", str(js_dir / "raw"),
                      "--safe-mode", "--max-requests", str(browser_budget),
                      "--request-delay", str(self.http.delay_seconds),
-                     "--max-depth", "2", "--max-pages", "2", "--timeout", "15000"],
-                    capture_output=True, text=True, timeout=90,
+                     "--max-depth", "3", "--max-pages", "10", "--timeout", "20000"],
+                    capture_output=True, text=True, timeout=120,
                 )
                 if browser_summary.is_file():
                     crawl_data = json.loads(browser_summary.read_text(encoding="utf-8"))
@@ -337,7 +337,7 @@ class SkillRunner:
         if root_response.get("status") == "response":
             html_content = root_response.get("body", "")
             script_srcs = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
-            for i, src in enumerate(script_srcs[:10]):
+            for i, src in enumerate(script_srcs[:100]):
                 full_src = urllib.parse.urljoin(self.http.base_url + "/", src)
                 bundle = self.http.request(full_src, method="GET")
                 if bundle.get("status") != "response" or bundle.get("status_code") != 200:
@@ -490,20 +490,28 @@ class SkillRunner:
 
         def tool_fingerprint_tech():
             signatures = {
-                "React": ("React.createElement", "__REACT_DEVTOOLS_GLOBAL_HOOK__", "react-dom"),
-                "Vue": ("Vue.createApp", "__VUE__", "vue.runtime"),
-                "Angular": ("ng-version", "@angular/core"),
-                "jQuery": ("jQuery", "window.$"),
+                "React": ("React.createElement", "__REACT_DEVTOOLS_GLOBAL_HOOK__", "react-dom", "react.production.min.js"),
+                "Next.js": ("__NEXT_DATA__", "_next/static", "next/router"),
+                "Vue": ("Vue.createApp", "__VUE__", "vue.runtime", "vue.min.js"),
+                "Nuxt": ("__NUXT__", "_nuxt/"),
+                "Angular": ("ng-version", "@angular/core", "ng-app"),
+                "Svelte": ("svelte-", "__svelte"),
+                "jQuery": ("jQuery", "window.$", "jQuery.fn"),
+                "Alpine.js": ("Alpine.data", "x-data", "x-init"),
+                "HTMX": ("htmx.org", "hx-get", "hx-post"),
+                "Astro": ("astro-island", "astro:"),
+                "Webpack": ("webpackChunk", "__webpack_require__"),
+                "Vite": ("/@vite/client", "__vite_plugin_"),
             }
             js_sources = []
             detected_signatures = []
             bytes_scanned = 0
             for js_path in js_dir.rglob("*.js"):
-                if len(js_sources) >= 250 or bytes_scanned >= 20 * 1024 * 1024:
+                if len(js_sources) >= 1000 or bytes_scanned >= 100 * 1024 * 1024:
                     break
                 try:
                     with js_path.open("rb") as source_file:
-                        content = source_file.read(min(1024 * 1024, 20 * 1024 * 1024 - bytes_scanned))
+                        content = source_file.read(min(1024 * 1024, 100 * 1024 * 1024 - bytes_scanned))
                     bytes_scanned += len(content)
                     source_text = content.decode("utf-8", errors="ignore")
                     js_sources.append(str(js_path.relative_to(js_dir)))
@@ -608,12 +616,24 @@ class SkillRunner:
 
         self.log_step(skill, "step-01-verify.log", "Prerequisites verified.")
 
-        # Low-impact public routes only. Sensitive files, backups, admin paths, and
-        # state-changing routes are deliberately excluded from automatic probing.
+        # High-value non-destructive public discovery routes: API specs, docs,
+        # health/status, GraphQL, discovery indices, and common application entrypoints.
         combined = [
             "/", "/robots.txt", "/sitemap.xml", "/.well-known/security.txt",
-            "/openapi.json", "/swagger.json", "/api-docs", "/swagger",
-            "/docs", "/health", "/status", "/api", "/search",
+            "/.well-known/openid-configuration", "/.well-known/assetlinks.json",
+            "/.well-known/apple-app-site-association",
+            "/openapi.json", "/openapi.yaml", "/swagger.json", "/swagger.yaml",
+            "/swagger/v1/swagger.json", "/swagger-ui.html", "/api-docs", "/v2/api-docs",
+            "/v3/api-docs", "/docs", "/api/docs", "/swagger", "/apidocs",
+            "/graphql", "/graphiql", "/api/graphql", "/query",
+            "/health", "/healthz", "/livez", "/readyz", "/status", "/ping",
+            "/metrics", "/info", "/actuator", "/actuator/health", "/actuator/info",
+            "/api", "/api/v1", "/api/v2", "/api/v3", "/api/health", "/api/status",
+            "/api/version", "/version", "/build-info",
+            "/search", "/login", "/auth", "/oauth/authorize",
+            "/static", "/assets", "/public", "/dist",
+            "/server-status", "/env", "/config", "/manifest.json",
+            "/favicon.ico", "/crossdomain.xml", "/clientaccesspolicy.xml",
         ]
 
         (cd_dir / "wordlist-generic.txt").write_text("\n".join(combined), encoding="utf-8")
@@ -664,8 +684,8 @@ class SkillRunner:
                 run_id=f"content-discovery-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
                 scope={"allowed_hosts": [self.http.target], "methods": ["GET"],
                        "request_budget": self.http.max_requests},
-                budget={"max_steps": min(10, len(combined)), "max_tokens": 2000,
-                        "timeout_seconds": 120},
+                budget={"max_steps": min(35, len(combined)), "max_tokens": 4000,
+                        "timeout_seconds": 240},
             ),
             tools=registry,
             system_prompt=(

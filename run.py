@@ -96,16 +96,16 @@ Examples:
                         help="Model to use for review-skill (default: same as skill model)")
     parser.add_argument("--api-spec", default=None,
                         help="Local OpenAPI/Swagger JSON or YAML file for api-spec-discovery")
-    parser.add_argument("--active-host-limit", type=int, default=20,
-                        help="Maximum hosts for recon HEAD checks (default: 20)")
+    parser.add_argument("--active-host-limit", type=int, default=100,
+                        help="Maximum hosts for recon HEAD checks (default: 100)")
     parser.add_argument("--root-only-active", action="store_true",
                         help="Limit active recon checks to the exact target hostname")
     parser.add_argument("--https-only", action="store_true",
                         help="Do not fall back to plaintext HTTP during active recon")
-    parser.add_argument("--max-http-requests", type=int, default=40,
-                        help="Maximum same-host GET/HEAD requests per scan (default: 40)")
-    parser.add_argument("--request-delay", type=float, default=0.4,
-                        help="Minimum seconds between target requests (default: 0.4)")
+    parser.add_argument("--max-http-requests", type=int, default=150,
+                        help="Maximum same-host GET/HEAD requests per scan (default: 150)")
+    parser.add_argument("--request-delay", type=float, default=0.3,
+                        help="Minimum seconds between target requests (default: 0.3)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show execution plan without running anything")
     parser.add_argument("--check", action="store_true",

@@ -44,10 +44,110 @@ def load_dotenv_if_present():
                 pass
 
 
+KNOWN_PROVIDERS = {
+    "deepseek": {
+        "base_url": "https://api.deepseek.com/v1",
+        "default_model": "deepseek-chat",
+        "env_key": "DEEPSEEK_API_KEY",
+        "env_model": "DEEPSEEK_MODEL",
+    },
+    "openai": {
+        "base_url": "https://api.openai.com/v1",
+        "default_model": "gpt-4o-mini",
+        "env_key": "OPENAI_API_KEY",
+        "env_model": "OPENAI_MODEL",
+    },
+    "anthropic": {
+        "base_url": "https://api.anthropic.com/v1",
+        "default_model": "claude-3-5-sonnet-20241022",
+        "env_key": "ANTHROPIC_API_KEY",
+        "env_model": "ANTHROPIC_MODEL",
+    },
+    "groq": {
+        "base_url": "https://api.groq.com/openai/v1",
+        "default_model": "llama-3.3-70b-versatile",
+        "env_key": "GROQ_API_KEY",
+        "env_model": "GROQ_MODEL",
+    },
+    "gemini": {
+        "base_url": "https://generativelanguage.googleapis.com",
+        "default_model": "gemini-3.8-flash",
+        "env_key": "GEMINI_API_KEY",
+        "env_model": "GEMINI_MODEL",
+    },
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "default_model": "meta-llama/llama-3.1-8b-instruct",
+        "env_key": "OPENROUTER_API_KEY",
+        "env_model": "OPENROUTER_MODEL",
+    },
+    "xai": {
+        "base_url": "https://api.x.ai/v1",
+        "default_model": "grok-2-latest",
+        "env_key": "XAI_API_KEY",
+        "env_model": "XAI_MODEL",
+    },
+    "grok": {
+        "base_url": "https://api.x.ai/v1",
+        "default_model": "grok-2-latest",
+        "env_key": "XAI_API_KEY",
+        "env_model": "XAI_MODEL",
+    },
+    "mistral": {
+        "base_url": "https://api.mistral.ai/v1",
+        "default_model": "mistral-large-latest",
+        "env_key": "MISTRAL_API_KEY",
+        "env_model": "MISTRAL_MODEL",
+    },
+    "together": {
+        "base_url": "https://api.together.xyz/v1",
+        "default_model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "env_key": "TOGETHER_API_KEY",
+        "env_model": "TOGETHER_MODEL",
+    },
+    "cerebras": {
+        "base_url": "https://api.cerebras.ai/v1",
+        "default_model": "llama3.3-70b",
+        "env_key": "CEREBRAS_API_KEY",
+        "env_model": "CEREBRAS_MODEL",
+    },
+    "sambanova": {
+        "base_url": "https://api.sambanova.ai/v1",
+        "default_model": "Meta-Llama-3.3-70B-Instruct",
+        "env_key": "SAMBANOVA_API_KEY",
+        "env_model": "SAMBANOVA_MODEL",
+    },
+    "fireworks": {
+        "base_url": "https://api.fireworks.ai/inference/v1",
+        "default_model": "accounts/fireworks/models/llama-v3p3-70b-instruct",
+        "env_key": "FIREWORKS_API_KEY",
+        "env_model": "FIREWORKS_MODEL",
+    },
+    "perplexity": {
+        "base_url": "https://api.perplexity.ai",
+        "default_model": "sonar-pro",
+        "env_key": "PERPLEXITY_API_KEY",
+        "env_model": "PERPLEXITY_MODEL",
+    },
+    "cohere": {
+        "base_url": "https://api.cohere.com/v2",
+        "default_model": "command-r-plus",
+        "env_key": "COHERE_API_KEY",
+        "env_model": "COHERE_MODEL",
+    },
+    "ollama": {
+        "base_url": "http://localhost:11434",
+        "default_model": "llama3",
+        "env_key": "",
+        "env_model": "OLLAMA_MODEL",
+    },
+}
+
+
 class LLMClient:
     def __init__(self, provider: str = "auto", model: str = None, api_key: str = None, base_url: str = None):
         load_dotenv_if_present()
-        self.provider = provider.lower()
+        self.provider = provider.lower() if provider else "auto"
         self.model = model
         self.api_key = api_key
         self.base_url = base_url
@@ -55,11 +155,11 @@ class LLMClient:
         self._detect_provider()
 
     def _detect_provider(self):
-        """Auto-detect provider based on environment variables if provider is 'auto'."""
+        """Auto-detect provider based on environment variables or explicit selection."""
         if self.provider == "auto":
             selected = os.environ.get("MOROS_LLM_PROVIDER", "").strip().lower()
             if not selected:
-                # Keep the legacy auto-detection order when no provider was selected in the UI.
+                # Priority auto-detection order
                 if os.environ.get("OPENAI_BASE_URL") or os.environ.get("LLM_BASE_URL"):
                     selected = "custom"
                 elif os.environ.get("DEEPSEEK_API_KEY"):
@@ -74,6 +174,22 @@ class LLMClient:
                     selected = "gemini"
                 elif os.environ.get("OPENROUTER_API_KEY"):
                     selected = "openrouter"
+                elif os.environ.get("XAI_API_KEY"):
+                    selected = "xai"
+                elif os.environ.get("MISTRAL_API_KEY"):
+                    selected = "mistral"
+                elif os.environ.get("TOGETHER_API_KEY"):
+                    selected = "together"
+                elif os.environ.get("CEREBRAS_API_KEY"):
+                    selected = "cerebras"
+                elif os.environ.get("SAMBANOVA_API_KEY"):
+                    selected = "sambanova"
+                elif os.environ.get("FIREWORKS_API_KEY"):
+                    selected = "fireworks"
+                elif os.environ.get("PERPLEXITY_API_KEY"):
+                    selected = "perplexity"
+                elif os.environ.get("COHERE_API_KEY"):
+                    selected = "cohere"
                 elif os.environ.get("OLLAMA_BASE_URL") or self._check_ollama():
                     selected = "ollama"
                 else:
@@ -82,38 +198,36 @@ class LLMClient:
             self.provider = selected
 
         selected = self.provider
-        if selected == "deepseek":
-            self.provider = "openai"
-            self.base_url = self.base_url or "https://api.deepseek.com/v1"
-            self.api_key = self.api_key or os.environ.get("DEEPSEEK_API_KEY")
-            self.model = self.model or os.environ.get("DEEPSEEK_MODEL") or "deepseek-chat"
-        elif selected == "groq":
-            self.provider = "openai"
-            self.base_url = self.base_url or "https://api.groq.com/openai/v1"
-            self.api_key = self.api_key or os.environ.get("GROQ_API_KEY")
-            self.model = self.model or os.environ.get("GROQ_MODEL") or "llama-3.3-70b-versatile"
-        elif selected == "custom":
-            self.provider = "openai"
-            self.base_url = self.base_url or os.environ.get("OPENAI_BASE_URL") or os.environ.get("LLM_BASE_URL")
-            self.api_key = self.api_key or os.environ.get("OPENAI_API_KEY") or os.environ.get("LLM_API_KEY") or "none"
-            self.model = self.model or os.environ.get("OPENAI_MODEL") or os.environ.get("LLM_MODEL") or "default"
-        elif selected == "openai":
-            self.api_key = self.api_key or os.environ.get("OPENAI_API_KEY")
-            self.model = self.model or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
-        elif selected == "anthropic":
+
+        # Anthropic, Gemini, Ollama have specialized protocols
+        if selected == "anthropic":
             self.api_key = self.api_key or os.environ.get("ANTHROPIC_API_KEY")
             self.model = self.model or os.environ.get("ANTHROPIC_MODEL") or "claude-3-5-sonnet-20241022"
         elif selected == "gemini":
             self.api_key = self.api_key or os.environ.get("GEMINI_API_KEY")
             self.model = self.model or os.environ.get("GEMINI_MODEL") or "gemini-3.8-flash"
-        elif selected == "openrouter":
-            self.api_key = self.api_key or os.environ.get("OPENROUTER_API_KEY")
-            self.model = self.model or os.environ.get("OPENROUTER_MODEL") or "meta-llama/llama-3.1-8b-instruct"
         elif selected == "ollama":
             self.base_url = self.base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
             self.model = self.model or os.environ.get("OLLAMA_MODEL") or "llama3"
-        elif selected == "none":
-            self.provider = "none"
+        elif selected in KNOWN_PROVIDERS:
+            # Route all known OpenAI-compatible providers
+            info = KNOWN_PROVIDERS[selected]
+            self.provider = "openai"
+            self.base_url = self.base_url or os.environ.get("OPENAI_BASE_URL") or info["base_url"]
+            self.api_key = self.api_key or os.environ.get(info["env_key"]) or os.environ.get("OPENAI_API_KEY")
+            self.model = self.model or os.environ.get(info["env_model"]) or info["default_model"]
+        elif selected in ["custom", "openai_compatible"] or self.base_url or os.environ.get("OPENAI_BASE_URL"):
+            # Custom OpenAI compatible gateway (LM Studio, vLLM, LocalAI, etc.)
+            self.provider = "openai"
+            self.base_url = self.base_url or os.environ.get("OPENAI_BASE_URL") or os.environ.get("LLM_BASE_URL") or "http://localhost:1234/v1"
+            self.api_key = self.api_key or os.environ.get("OPENAI_API_KEY") or os.environ.get("LLM_API_KEY") or "none"
+            self.model = self.model or os.environ.get("OPENAI_MODEL") or os.environ.get("LLM_MODEL") or "default"
+        elif selected != "none":
+            # Universal fallback: Any arbitrary provider name with an API key or base URL is routed as OpenAI-compatible
+            self.provider = "openai"
+            self.base_url = self.base_url or os.environ.get(f"{selected.upper()}_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+            self.api_key = self.api_key or os.environ.get(f"{selected.upper()}_API_KEY") or os.environ.get("OPENAI_API_KEY")
+            self.model = self.model or os.environ.get(f"{selected.upper()}_MODEL") or "default"
         else:
             self.provider = "none"
 
