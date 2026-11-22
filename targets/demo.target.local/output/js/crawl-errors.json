@@ -1,0 +1,7 @@
+[
+  {
+    "url": "https://demo.target.local",
+    "error": "Page.goto: net::ERR_NAME_NOT_RESOLVED at https://demo.target.local/\nCall log:\n  - navigating to \"https://demo.target.local/\", waiting until \"networkidle\"\n",
+    "phase": "page-load"
+  }
+]

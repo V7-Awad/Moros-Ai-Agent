@@ -39,6 +39,70 @@ class SkillRunner:
         self.output_dir = self.target_dir / "output"
         self.logs_dir = self.output_dir / "logs"
         self.llm = llm_client
+        self._recorded_evidence_ids = None
+
+    def record_candidate_evidence(self, skill: str, finding_type: str, artifact_path: Path,
+                                  endpoint: dict, claim: str) -> dict:
+        """Record a content-addressed source reference; endpoint metadata is not exploit proof."""
+        artifact_path = Path(artifact_path)
+        try:
+            digest = hashlib.sha256()
+            with artifact_path.open("rb") as artifact_stream:
+                for chunk in iter(lambda: artifact_stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            artifact_hash = digest.hexdigest()
+            artifact_ref = str(artifact_path.relative_to(self.target_dir)).replace("\\", "/")
+            available = True
+        except (OSError, ValueError):
+            artifact_hash = ""
+            artifact_ref = str(artifact_path)
+            available = False
+
+        route = endpoint.get("url") or (str(endpoint.get("base_url", "")).rstrip("/") + str(endpoint.get("path", "")))
+        parameter = endpoint.get("parameters", [])
+        if parameter and isinstance(parameter[0], dict):
+            parameter = parameter[0].get("name", "")
+        elif parameter:
+            parameter = str(parameter[0])
+        else:
+            parameter = ""
+        identity = "|".join([self.target, skill, finding_type, route, str(parameter), artifact_hash])
+        evidence_id = "ev-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+        evidence = {
+            "evidence_id": evidence_id,
+            "evidence_type": "endpoint_metadata",
+            "source_artifact": artifact_ref,
+            "source_sha256": artifact_hash,
+            "source_available": available,
+            "claim": claim,
+            "limitations": "Metadata supports triage only; no vulnerability behavior was independently reproduced.",
+            "verification_status": "unverified",
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        if self._recorded_evidence_ids is None:
+            self._recorded_evidence_ids = set()
+            ledger = self.output_dir / "evidence" / "ledger.jsonl"
+            if ledger.is_file():
+                try:
+                    with ledger.open("r", encoding="utf-8") as stream:
+                        for line in stream:
+                            try:
+                                old_entry = json.loads(line)
+                                if old_entry.get("evidence_id"):
+                                    self._recorded_evidence_ids.add(old_entry["evidence_id"])
+                            except json.JSONDecodeError:
+                                continue
+                except OSError:
+                    pass
+        if evidence_id not in self._recorded_evidence_ids:
+            ledger = self.output_dir / "evidence" / "ledger.jsonl"
+            ledger.parent.mkdir(parents=True, exist_ok=True)
+            with ledger.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps({"target": self.target, "skill": skill, "finding_type": finding_type,
+                                         **evidence}, ensure_ascii=False) + "\n")
+            self._recorded_evidence_ids.add(evidence_id)
+        return evidence
 
     def log_step(self, skill: str, log_name: str, message: str):
         """Append a message to a skill's step log file."""
@@ -52,7 +116,7 @@ class SkillRunner:
 
     # ==================== SKILL 1: RECON-SUBDOMAIN ====================
 
-    def run_recon_subdomain(self) -> Dict[str, Any]:
+    def run_recon_subdomain(self, active_validation: bool = False) -> Dict[str, Any]:
         skill = "recon-subdomain"
         recon_dir = self.output_dir / "recon"
         recon_dir.mkdir(parents=True, exist_ok=True)
@@ -102,46 +166,37 @@ class SkillRunner:
         all_file.write_text("\n".join(sorted_subs), encoding="utf-8")
         self.log_step(skill, "step-06-merge.log", f"Merged {len(sorted_subs)} unique subdomains to {all_file}")
 
-        # Step 7: Live host validation
-        self.log_step(skill, "step-07-live-validation.log", "Validating live hosts on standard ports...")
+        # Step 7: Active reachability checks require an authorization document.
         live_hosts = []
-        for sub in sorted_subs[:20]:  # Limit top 20 for responsive runtime
-            for proto in ["https", "http"]:
-                test_url = f"{proto}://{sub}"
-                try:
-                    req = urllib.request.Request(test_url, headers={"User-Agent": "Mozilla/5.0 Moros-AI"}, method="HEAD")
-                    with urllib.request.urlopen(req, timeout=4) as resp:
-                        live_hosts.append({
-                            "host": sub,
-                            "url": test_url,
-                            "status": resp.status,
-                            "server": resp.headers.get("Server", "Unknown"),
-                            "content_type": resp.headers.get("Content-Type", ""),
-                        })
-                        break
-                except Exception:
-                    pass
-
-        # If none responded externally, preserve target as local live host
-        if not live_hosts:
-            live_hosts.append({
-                "host": self.target,
-                "url": f"https://{self.target}",
-                "status": 200,
-                "server": "Detected Web Server",
-            })
+        if active_validation:
+            self.log_step(skill, "step-07-live-validation.log", "Authorized active reachability checks (HEAD, max 20 hosts, 4-second timeout).")
+            for sub in sorted_subs[:20]:
+                for proto in ["https", "http"]:
+                    test_url = f"{proto}://{sub}"
+                    try:
+                        req = urllib.request.Request(test_url, headers={"User-Agent": "Mozilla/5.0 Moros-AI"}, method="HEAD")
+                        with urllib.request.urlopen(req, timeout=4) as resp:
+                            live_hosts.append({"host": sub, "url": test_url, "status": resp.status,
+                                               "server": resp.headers.get("Server", "Unknown"),
+                                               "content_type": resp.headers.get("Content-Type", "")})
+                            break
+                    except Exception:
+                        continue
+        else:
+            self.log_step(skill, "step-07-live-validation.log", "Skipped active reachability checks because no scope authorization was verified.")
 
         (recon_dir / "live-hosts.json").write_text(json.dumps(live_hosts, indent=2), encoding="utf-8")
-        self.log_step(skill, "step-07-live-validation.log", f"Found {len(live_hosts)} responsive live hosts.")
+        self.log_step(skill, "step-07-live-validation.log", f"Observed {len(live_hosts)} responsive hosts; an empty list means none answered the probe.")
 
         # Step 8: Recon summary
-        summary_md = f"# Reconnaissance Summary — {self.target}\n\n- Total Subdomains Discovered: {len(sorted_subs)}\n- Validated Live Hosts: {len(live_hosts)}\n\n## Live Hosts\n"
+        summary_md = f"# Reconnaissance Summary — {self.target}\n\n- Total subdomains from passive sources (including supplied root): {len(sorted_subs)}\n- Responsive hosts observed by authorized HTTP HEAD checks: {len(live_hosts)}\n- Active reachability checks: {'performed' if active_validation else 'skipped (no verified scope)'}\n\n## Observed Hosts\n"
         for h in live_hosts:
             summary_md += f"- **{h['url']}** (Status: {h.get('status')}, Server: {h.get('server')})\n"
         (recon_dir / "recon-summary.md").write_text(summary_md, encoding="utf-8")
         self.log_step(skill, "step-08-summary.log", "Recon summary generated.")
 
-        return {"status": "SUCCESS", "subdomains": len(sorted_subs), "live_hosts": len(live_hosts)}
+        return {"status": "SUCCESS", "subdomains": len(sorted_subs), "live_hosts": len(live_hosts),
+                "active_validation": active_validation}
 
     # ==================== SKILL 2: API-SPEC-DISCOVERY ====================
 
@@ -176,20 +231,13 @@ class SkillRunner:
                     self.log_step(skill, "step-02-import.log", f"Import error: {e}")
 
         if not imported and not out_file.exists():
-            # Create standard template inventory
-            base_inventory = {
-                "target": self.target,
-                "endpoints": [
-                    {"method": "GET", "path": "/api/v1/health", "base_url": f"https://{self.target}", "parameters": []},
-                    {"method": "GET", "path": "/api/v1/user", "base_url": f"https://{self.target}", "parameters": ["id"]},
-                    {"method": "POST", "path": "/api/v1/auth/login", "base_url": f"https://{self.target}", "parameters": ["username", "password"]},
-                ],
-                "total_endpoints": 3
-            }
-            out_file.write_text(json.dumps(base_inventory, indent=2), encoding="utf-8")
-            self.log_step(skill, "step-02-import.log", "Generated baseline API inventory.")
+            out_file.write_text(json.dumps({
+                "target": self.target, "status": "NO_SPEC_PROVIDED",
+                "total_endpoints": 0, "endpoints": [],
+            }, indent=2), encoding="utf-8")
+            self.log_step(skill, "step-02-import.log", "No local specification found; no endpoints were inferred or fabricated.")
 
-        return {"status": "SUCCESS", "imported": out_file.exists()}
+        return {"status": "SUCCESS" if imported else "NO_SPEC", "imported": imported, "endpoints": 0}
 
     # ==================== SKILL 3: JS-DISCOVER ====================
 
@@ -267,18 +315,6 @@ class SkillRunner:
             except Exception as e:
                 self.log_step(skill, "step-02-browser-crawl.log", f"HTTP fetch notice: {e}")
 
-        # If target had no remote response, generate standard base bundle
-        if not any(raw_ext.glob("*.js")) and not any(raw_inline.glob("*.js")):
-            sample_js = """
-            // Main application bundle
-            const API_BASE = "/api/v1";
-            function search(q) { return fetch(API_BASE + "/search?q=" + encodeURIComponent(q)); }
-            function fetchProfile(id) { return fetch(API_BASE + "/user/profile?userId=" + id); }
-            function setAvatar(url) { return axios.post(API_BASE + "/user/avatar-fetch", {image_url: url}); }
-            function deleteComment(id) { return fetch(API_BASE + "/comments/delete?comment_id=" + id, {method: "DELETE"}); }
-            """
-            (raw_ext / "main.chunk.js").write_text(sample_js, encoding="utf-8")
-
         # Step 5: Historical fetch via tools/wayback-fetch.py
         try:
             cmd = [
@@ -339,7 +375,7 @@ class SkillRunner:
         (js_dir / "collection-stats.json").write_text(json.dumps(stats, indent=2), encoding="utf-8")
         self.log_step(skill, "step-09-stats.log", "Collection stats saved.")
 
-        return {"status": "SUCCESS", "files_collected": len(all_raw)}
+        return {"status": "SUCCESS" if all_raw else "NO_ARTIFACTS", "files_collected": len(all_raw)}
 
     # ==================== SKILL 4: JS-ANALYZE ====================
 
@@ -399,11 +435,44 @@ class SkillRunner:
         self.log_step(skill, "step-05-gadgets.log", f"Identified {len(gadgets)} DOM sink gadgets.")
 
         # Step 9: Tech fingerprint
+        # Bound local analysis and report only signatures actually present in the files.
+        signatures = {
+            "React": ("React.createElement", "__REACT_DEVTOOLS_GLOBAL_HOOK__", "react-dom"),
+            "Vue": ("Vue.createApp", "__VUE__", "vue.runtime"),
+            "Angular": ("ng-version", "@angular/core"),
+            "jQuery": ("jQuery", "window.$"),
+        }
+        js_sources = []
+        detected_signatures = []
+        bytes_scanned = 0
+        for js_path in js_dir.rglob("*.js"):
+            if len(js_sources) >= 250 or bytes_scanned >= 20 * 1024 * 1024:
+                break
+            try:
+                with js_path.open("rb") as source_file:
+                    content = source_file.read(min(1024 * 1024, 20 * 1024 * 1024 - bytes_scanned))
+                bytes_scanned += len(content)
+                source_text = content.decode("utf-8", errors="ignore")
+                js_sources.append(str(js_path.relative_to(js_dir)))
+                for technology, markers in signatures.items():
+                    for marker in markers:
+                        if marker in source_text:
+                            detected_signatures.append({"technology": technology, "marker": marker,
+                                                        "source_file": str(js_path.relative_to(js_dir))})
+            except OSError as exc:
+                self.log_step(skill, "step-09-fingerprint.log", f"Could not inspect {js_path.name}: {exc}")
+
+        detected = sorted({item["technology"] for item in detected_signatures})
         fingerprint = {
             "target": self.target,
-            "frontend": {"framework": "React / Modern SPA", "build_tool": "Webpack/Vite"},
-            "backend_indicators": {"likely_framework": "REST API Backend"},
-            "known_misconfigs_for_stack": ["Verify CORS policies on /api endpoints", "Check for exposed source maps"]
+            "frontend": {"framework": detected or "Unknown", "confidence": "signature-based" if detected else "insufficient-evidence"},
+            "backend_indicators": {"likely_framework": "Unknown", "confidence": "not-assessed"},
+            "known_misconfigs_for_stack": [],
+            "collection_status": "analyzed" if js_sources else "no-javascript-artifacts",
+            "evidence_files": js_sources,
+            "signatures": detected_signatures,
+            "bytes_scanned": bytes_scanned,
+            "truncated": len(js_sources) >= 250 or bytes_scanned >= 20 * 1024 * 1024,
         }
         (js_dir / "tech-fingerprint.json").write_text(json.dumps(fingerprint, indent=2), encoding="utf-8")
         self.log_step(skill, "step-09-fingerprint.log", "Generated technology fingerprint.")
@@ -434,19 +503,16 @@ class SkillRunner:
 
         self.log_step(skill, "step-05-combine.log", f"Generated combined wordlist ({len(combined)} paths).")
 
-        # Probe paths against target
+        # Current phase prepares candidates only; it must not claim that these paths were probed.
         discovered = []
         interesting = []
-        for path in combined[:15]:
-            probe_url = f"https://{self.target}/{path.lstrip('/')}"
-            discovered.append({"path": f"/{path.lstrip('/')}", "url": probe_url, "status": 404})
 
         (cd_dir / "discovered-paths.json").write_text(json.dumps(discovered, indent=2), encoding="utf-8")
         (cd_dir / "interesting-findings.json").write_text(json.dumps(interesting, indent=2), encoding="utf-8")
-        (cd_dir / "content-discovery-summary.md").write_text(f"# Content Discovery Summary — {self.target}\n\nProbed {len(discovered)} paths.", encoding="utf-8")
+        (cd_dir / "content-discovery-summary.md").write_text(f"# Content Discovery Candidates — {self.target}\n\nPrepared {len(combined)} candidate paths. No HTTP probes were sent.", encoding="utf-8")
 
-        self.log_step(skill, "step-06-scan.log", "Content discovery probe completed.")
-        return {"status": "SUCCESS"}
+        self.log_step(skill, "step-06-scan.log", "Prepared candidate paths only; no HTTP probes were sent.")
+        return {"status": "CANDIDATES_ONLY", "paths_prepared": len(combined)}
 
     # ==================== SKILL 6-12: VULNERABILITY TESTING ====================
 
@@ -455,14 +521,19 @@ class SkillRunner:
         v_dir.mkdir(parents=True, exist_ok=True)
         self.log_step(skill_name, "step-01-verify.log", f"Starting {skill_name} testing.")
 
-        # Check endpoints
-        ep_file = self.output_dir / "js" / "endpoints.json"
+        # Build the candidate surface only from observed JS and imported API artifacts.
         endpoints = []
-        if ep_file.exists():
+        for ep_file in [self.output_dir / "js" / "endpoints.json", self.output_dir / "api" / "openapi-endpoints.json"]:
+            if not ep_file.exists():
+                continue
             try:
-                endpoints = json.loads(ep_file.read_text(encoding="utf-8")).get("endpoints", [])
-            except Exception:
-                pass
+                loaded = json.loads(ep_file.read_text(encoding="utf-8")).get("endpoints", [])
+                for endpoint in loaded:
+                    if isinstance(endpoint, dict):
+                        endpoint["_source_artifact"] = str(ep_file)
+                        endpoints.append(endpoint)
+            except (OSError, json.JSONDecodeError) as exc:
+                self.log_step(skill_name, "step-01-verify.log", f"Could not parse endpoint artifact {ep_file.name}: {exc}")
 
         findings = []
 
@@ -477,7 +548,7 @@ class SkillRunner:
 
         for ep in endpoints:
             method = ep.get("method", "GET").upper()
-            url = ep.get("url", "")
+            url = ep.get("url") or (str(ep.get("base_url", "")).rstrip("/") + str(ep.get("path", "")))
             if method in ["POST", "PUT", "DELETE"]:
                 cp_id = f"cp-{hashlib.sha256(f'{method}:{url}'.encode()).hexdigest()[:10]}"
                 if not any(c.get("id") == cp_id for c in checkpoints):
@@ -494,39 +565,61 @@ class SkillRunner:
         cp_file.parent.mkdir(parents=True, exist_ok=True)
         cp_file.write_text(json.dumps(checkpoints, indent=2), encoding="utf-8")
 
-        # Specific vulnerability heuristic evaluation
+        # Heuristics create triage candidates. They do not prove exploitability.
         if skill_name == "xss-reflected":
             for ep in endpoints:
-                if ep.get("method", "GET") == "GET" and ep.get("parameters"):
+                params = ep.get("parameters", [])
+                param_names = [p.get("name") if isinstance(p, dict) else p for p in params]
+                if ep.get("method", "GET").upper() == "GET" and param_names:
+                    evidence = self.record_candidate_evidence(
+                        skill_name, "Reflected XSS", Path(ep.get("_source_artifact", ep_file)), ep,
+                        "A GET parameter exists in the endpoint inventory; reflection and script execution are unknown.",
+                    )
                     findings.append({
-                        "title": f"Reflected XSS Candidate on {ep['url']}",
+                        "title": f"Potential reflected-input sink on {ep.get('url') or ep.get('path', 'unknown route')}",
                         "type": "Reflected XSS",
-                        "url": ep["url"],
-                        "parameter": ep["parameters"][0],
-                        "payload": "<script>alert(1)</script>",
-                        "severity": "AI-proposed severity: HIGH — pending human review",
-                        "curl": f"curl -s \"https://{self.target}{ep['url']}?{ep['parameters'][0]}=%3Cscript%3Ealert(1)%3C/script%3E\"",
-                        "notes": "Parameter reflection identified during static JS audit; requires human validation in browser."
+                        "url": ep.get("url") or ep.get("path", ""),
+                        "parameter": param_names[0],
+                        "status": "candidate",
+                        "validation_status": "unverified",
+                        "confidence": "low",
+                        "evidence_ids": [evidence["evidence_id"]],
+                        "evidence": [evidence],
+                        "severity": "AI-proposed severity: UNASSESSED — pending evidence and human review",
+                        "evidence": [{"kind": "endpoint_metadata", "source": str(ep.get("source", "endpoint inventory")),
+                                      "claim": "A GET parameter exists; reflection and JavaScript execution have not been tested."}],
+                        "notes": "Endpoint-shape heuristic only. No request was sent and no reflection or execution was observed."
                     })
         elif skill_name == "ssrf-identify":
             for ep in endpoints:
-                params = [p.lower() for p in ep.get("parameters", [])]
+                raw_params = ep.get("parameters", [])
+                params = [str(p.get("name", "") if isinstance(p, dict) else p).lower() for p in raw_params]
                 if any(k in params for k in ["url", "uri", "image_url", "dest", "redirect", "webhook"]):
+                    matched_param = next((p for p in params if p in ["url", "uri", "image_url", "dest", "webhook"]), "")
+                    evidence = self.record_candidate_evidence(
+                        skill_name, "SSRF", Path(ep.get("_source_artifact", ep_file)), ep,
+                        f"A URL-like parameter named {matched_param} exists; server-side fetching is unknown.",
+                    )
                     findings.append({
-                        "title": f"Potential SSRF Vector on {ep['url']}",
+                        "title": f"Potential server-side URL input on {ep.get('url') or ep.get('path', 'unknown route')}",
                         "type": "SSRF",
-                        "url": ep["url"],
-                        "parameter": [p for p in ep.get("parameters", []) if p.lower() in ["url", "uri", "image_url", "dest"]][0],
-                        "payload": "http://127.0.0.1:8080/admin",
-                        "severity": "AI-proposed severity: HIGH — pending human review",
-                        "curl": f"curl -s -X {ep.get('method', 'POST')} \"https://{self.target}{ep['url']}\"",
-                        "notes": "URL-accepting parameter detected; post-exploitation requires human sign-off."
+                        "url": ep.get("url") or ep.get("path", ""),
+                        "parameter": matched_param,
+                        "status": "candidate",
+                        "validation_status": "unverified",
+                        "confidence": "low",
+                        "evidence_ids": [evidence["evidence_id"]],
+                        "evidence": [evidence],
+                        "severity": "AI-proposed severity: UNASSESSED — pending evidence and human review",
+                        "evidence": [{"kind": "endpoint_metadata", "source": str(ep.get("source", "endpoint inventory")),
+                                      "claim": "A URL-like parameter exists; server-side fetching has not been tested."}],
+                        "notes": "Endpoint-shape heuristic only. No outbound request or SSRF behavior was observed."
                     })
 
-        out_findings = v_dir / f"confirmed-{skill_name}.json"
+        out_findings = v_dir / f"candidates-{skill_name}.json"
         out_findings.write_text(json.dumps({"target": self.target, "findings": findings}, indent=2), encoding="utf-8")
-        (v_dir / f"{skill_name}-summary.md").write_text(f"# {skill_name} Summary — {self.target}\n\nIdentified {len(findings)} findings.", encoding="utf-8")
-        self.log_step(skill_name, f"step-06-document.log", f"Documented {len(findings)} findings.")
+        (v_dir / f"{skill_name}-summary.md").write_text(f"# {skill_name} Triage — {self.target}\n\nRecorded {len(findings)} unverified candidates. No finding is confirmed by this heuristic pass.", encoding="utf-8")
+        self.log_step(skill_name, "step-06-document.log", f"Recorded {len(findings)} unverified candidates; no issue was marked confirmed.")
 
         return {"status": "SUCCESS", "findings_count": len(findings)}
 
@@ -584,13 +677,29 @@ class SkillRunner:
         findings_dir = self.output_dir / "findings"
         if findings_dir.exists():
             for p in findings_dir.rglob("*.json"):
-                if p.name.startswith("confirmed-"):
+                if p.name.startswith(("confirmed-", "candidates-")):
                     try:
                         data = json.loads(p.read_text(encoding="utf-8"))
                         items = data if isinstance(data, list) else data.get("findings", [data])
                         for item in items:
                             if isinstance(item, dict) and "title" in item:
-                                all_findings.append(item)
+                                # Filenames and model claims never establish validation.
+                                finding = dict(item)
+                                validation = finding.get("validation_record") or {}
+                                human_validation = (
+                                    isinstance(validation, dict)
+                                    and str(validation.get("verified_by", "")).startswith("human:")
+                                    and bool(validation.get("method"))
+                                    and bool(validation.get("evidence_ids"))
+                                    and validation.get("outcome") == "reproduced"
+                                )
+                                if not human_validation:
+                                    finding["status"] = "candidate"
+                                    finding["validation_status"] = "unverified"
+                                else:
+                                    finding["status"] = "validated"
+                                    finding["validation_status"] = "validated"
+                                all_findings.append(finding)
                     except Exception:
                         pass
 
@@ -604,7 +713,10 @@ class SkillRunner:
                         "title": f"Exposed Secret: {s.get('type')}",
                         "severity": s.get("severity", "AI-proposed severity: MEDIUM — pending human review"),
                         "url": s.get("source_file"),
-                        "notes": s.get("context", "")
+                        "notes": s.get("context", ""),
+                        "status": "candidate",
+                        "validation_status": "unverified",
+                        "confidence": "low",
                     })
             except Exception:
                 pass
@@ -618,17 +730,23 @@ class SkillRunner:
         md += f"**Assessment Date:** {datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n"
         md += f"**Target Organization:** {self.target}\n"
         md += "**Compliance Notice:** All findings are tagged `AI-proposed severity — pending human review`.\n\n"
+        candidate_count = sum(f.get("validation_status") != "validated" for f in all_findings)
+        validated_count = len(all_findings) - candidate_count
         md += "## Executive Summary\n\n"
-        md += f"Moros AI completed an automated assessment of `{self.target}` discovering **{len(all_findings)} potential findings**.\n\n"
-        md += "| Finding Title | Severity | Affected URL |\n|---|---|---|\n"
+        md += f"Moros AI processed artifacts for `{self.target}` and recorded **{len(all_findings)} triage items**: **{candidate_count} unverified candidates** and **{validated_count} validated findings**. An empty result means insufficient observed evidence, not proof of absence.\n\n"
+        md += "| Finding Title | Validation | Severity | Affected URL |\n|---|---|---|---|\n"
         for f in all_findings:
-            md += f"| {f.get('title')} | {f.get('severity')} | `{f.get('url', '-')}` |\n"
+            md += f"| {f.get('title')} | {f.get('validation_status', 'unverified')} | {f.get('severity', 'Unassessed')} | `{f.get('url', '-')}` |\n"
 
-        md += "\n## Detailed Vulnerability Analysis\n\n"
+        md += "\n## Evidence and Triage Items\n\n"
         for idx, f in enumerate(all_findings, 1):
             md += f"### {idx}. {f.get('title')}\n"
-            md += f"- **Severity:** `{f.get('severity')}`\n"
+            md += f"- **Validation:** `{f.get('validation_status', 'unverified')}`\n"
+            md += f"- **Confidence:** `{f.get('confidence', 'not-scored')}`\n"
+            md += f"- **Severity:** `{f.get('severity', 'Unassessed')}`\n"
             md += f"- **Target URL:** `{f.get('url')}`\n"
+            for evidence in f.get("evidence", []):
+                md += f"- **Evidence:** `{evidence.get('evidence_id', 'unlinked')}` from `{evidence.get('source_artifact', 'unknown source')}` (SHA256: `{evidence.get('source_sha256', 'unavailable')}`)\n"
             if f.get("curl"):
                 md += f"- **Reproduction cURL:**\n```bash\n{f.get('curl')}\n```\n"
             if f.get("notes"):
@@ -636,7 +754,10 @@ class SkillRunner:
             md += "\n"
 
         report_md_file.write_text(md, encoding="utf-8")
-        report_json_file.write_text(json.dumps({"target": self.target, "findings": all_findings}, indent=2), encoding="utf-8")
+        report_json_file.write_text(json.dumps({"target": self.target, "summary": {
+            "triage_items": len(all_findings), "unverified_candidates": candidate_count,
+            "validated_findings": validated_count,
+        }, "findings": all_findings}, indent=2), encoding="utf-8")
 
         self.log_step(skill, "step-07-full-report.log", f"Generated deliverable report: {report_md_file.name}")
         return {"status": "SUCCESS", "report_path": str(report_md_file), "findings_count": len(all_findings)}

@@ -1,0 +1,55 @@
+{
+  "target": "demo.target.local",
+  "summary": {
+    "triage_items": 3,
+    "unverified_candidates": 3,
+    "validated_findings": 0
+  },
+  "findings": [
+    {
+      "title": "Server-Side Request Forgery (SSRF) in Avatar Fetch API",
+      "type": "SSRF",
+      "url": "https://demo.target.local/api/v1/user/avatar-fetch",
+      "parameter": "image_url",
+      "payload": "http://127.0.0.1:8080/admin",
+      "severity": "AI-proposed severity: CRITICAL \u2014 pending human review",
+      "curl": "curl -s -X POST \"https://demo.target.local/api/v1/user/avatar-fetch\" -H \"Content-Type: application/json\" -d '{\"image_url\":\"http://127.0.0.1:8080/admin\"}'",
+      "notes": "Backend downloads remote images using axios without restricting loopback/private IPv4 ranges. Internal admin panel accessible via probe.",
+      "status": "candidate",
+      "validation_status": "unverified"
+    },
+    {
+      "title": "Potential reflected-input sink on /api/v1/user",
+      "type": "Reflected XSS",
+      "url": "/api/v1/user",
+      "parameter": "id",
+      "status": "candidate",
+      "validation_status": "unverified",
+      "confidence": "low",
+      "evidence_ids": [
+        "ev-28d13a17bc2f3278"
+      ],
+      "evidence": [
+        {
+          "kind": "endpoint_metadata",
+          "source": "endpoint inventory",
+          "claim": "A GET parameter exists; reflection and JavaScript execution have not been tested."
+        }
+      ],
+      "severity": "AI-proposed severity: UNASSESSED \u2014 pending evidence and human review",
+      "notes": "Endpoint-shape heuristic only. No request was sent and no reflection or execution was observed."
+    },
+    {
+      "title": "Reflected Cross-Site Scripting (XSS) in Search Query",
+      "type": "Reflected XSS",
+      "url": "https://demo.target.local/api/v1/search?q=%3Cscript%3Ealert(1)%3C/script%3E",
+      "parameter": "q",
+      "payload": "<script>alert(1)</script>",
+      "severity": "AI-proposed severity: HIGH \u2014 pending human review",
+      "curl": "curl -s \"https://demo.target.local/api/v1/search?q=%3Cscript%3Ealert(1)%3C/script%3E\" -H \"Accept: text/html\"",
+      "notes": "Parameter 'q' is reflected unsanitized into the response HTML body without encoding or Content-Security-Policy restriction.",
+      "status": "candidate",
+      "validation_status": "unverified"
+    }
+  ]
+}

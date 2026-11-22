@@ -1,7 +1,7 @@
 {
   "skill_reviewed": "api-spec-discovery",
   "target": "demo.target.local",
-  "timestamp": "2026-11-22T13:27:16.032379+00:00",
+  "timestamp": "2026-11-22T13:45:24.711517+00:00",
   "overall_status": "PASS",
   "non_zero_logs_count": 2,
   "logs_verified": [

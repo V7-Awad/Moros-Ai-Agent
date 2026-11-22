@@ -1,0 +1,12 @@
+{
+  "target": "https://demo.target.local",
+  "crawl_time": "2026-11-22T13:45:29.820019+00:00",
+  "pages_visited": 1,
+  "external_js_collected": 0,
+  "inline_scripts_collected": 0,
+  "traffic_requests_logged": 1,
+  "errors": 1,
+  "visited_urls": [
+    "https://demo.target.local"
+  ]
+}

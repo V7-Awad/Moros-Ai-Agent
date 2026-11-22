@@ -94,9 +94,11 @@ class HackbotOrchestrator:
         self.runs_per_skill = runs_per_skill
         self.review_model = review_model
         self.api_spec = Path(api_spec).resolve() if api_spec else None
+        self.scope_authorized = False
 
         self.execution_log: list = []
         self.skill_results: dict = {}  # skill -> [run results]
+        self.failed_skills: list = []
 
         # Ensure output directories
         output_base = self.target_dir / "output"
@@ -142,7 +144,8 @@ class HackbotOrchestrator:
         logger.info("=" * 60)
 
         # Step 1: Verify scope
-        if not self.verify_scope():
+        self.scope_authorized = self.verify_scope()
+        if not self.scope_authorized:
             # Allow only passive recon without scope
             self.skills = [s for s in self.skills if s == "recon-subdomain"]
             if not self.skills:
@@ -179,6 +182,9 @@ class HackbotOrchestrator:
                     if skill_name not in self.skill_results:
                         self.skill_results[skill_name] = []
                     self.skill_results[skill_name].append(result)
+                    if result.get("status") in {"FAILED", "ERROR"}:
+                        self.failed_skills.append({"skill": skill_name, "run_id": run_id,
+                                                   "notes": result.get("notes", "")})
 
                     # Run review-skill after each primary skill
                     if skill_name != "review-skill" and skill_name != "report-conglomeration":
@@ -186,7 +192,12 @@ class HackbotOrchestrator:
 
         # Step 5: Write orchestration log
         self._write_orchestration_log()
-        logger.info("\n✅ Orchestration complete!")
+        if self.failed_skills:
+            logger.error("\n❌ Orchestration finished with %d failed skill run(s).", len(self.failed_skills))
+        else:
+            logger.info("\n✅ Orchestration complete!")
+        return {"status": "FAILED" if self.failed_skills else "SUCCESS",
+                "failed_skills": self.failed_skills}
 
     def _execute_skill(self, skill_name: str, model: str, run_num: int) -> dict:
         """Execute a tool-backed skill with real execution logic."""
@@ -206,7 +217,7 @@ class HackbotOrchestrator:
 
         try:
             if skill_name == "recon-subdomain":
-                res = self.runner.run_recon_subdomain()
+                res = self.runner.run_recon_subdomain(active_validation=self.scope_authorized)
                 result["status"] = res.get("status", "COMPLETED")
                 result["notes"] = f"Found {res.get('subdomains', 0)} subdomains, {res.get('live_hosts', 0)} live hosts"
             elif skill_name == "api-spec-discovery":
@@ -245,7 +256,7 @@ class HackbotOrchestrator:
             result["notes"] = str(e)
 
         result["end_time"] = datetime.now(timezone.utc).isoformat()
-        self._log_event(skill_name, "COMPLETED", f"Status: {result['status']}")
+        self._log_event(skill_name, result["status"], result.get("notes", ""))
         return result
 
     def _execute_api_spec(self) -> dict:
@@ -330,6 +341,8 @@ class HackbotOrchestrator:
             "skills_requested": self.skills,
             "models_used": self.models,
             "runs_per_skill": self.runs_per_skill,
+            "status": "FAILED" if self.failed_skills else "SUCCESS",
+            "failed_skills": self.failed_skills,
             "events": self.execution_log,
             "skill_results": self.skill_results,
         }

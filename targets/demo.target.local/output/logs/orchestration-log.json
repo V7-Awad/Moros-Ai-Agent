@@ -1,10 +1,21 @@
 {
   "target": "demo.target.local",
-  "orchestration_time": "2026-11-22T13:27:16.042610+00:00",
+  "orchestration_time": "2026-11-22T13:45:33.069116+00:00",
   "skills_requested": [
     "recon-subdomain",
     "api-spec-discovery",
-    "content-discovery"
+    "js-discover",
+    "js-analyze",
+    "content-discovery",
+    "xss-reflected",
+    "xss-stored",
+    "xss-dom",
+    "xss-blind",
+    "ssrf-identify",
+    "ssrf-post-exploit",
+    "idp-race-condition",
+    "auth-password-reset-bruteforce",
+    "report-conglomeration"
   ],
   "models_used": [
     "default"
@@ -12,64 +23,286 @@
   "runs_per_skill": 1,
   "events": [
     {
-      "timestamp": "2026-11-22T13:26:59.946330+00:00",
+      "timestamp": "2026-11-22T13:45:08.723581+00:00",
       "skill": "scope-check",
       "status": "PASSED",
       "details": "Found D:\\Moros Ai\\targets\\demo.target.local\\scope-of-work.md"
     },
     {
-      "timestamp": "2026-11-22T13:26:59.946803+00:00",
+      "timestamp": "2026-11-22T13:45:08.723973+00:00",
       "skill": "recon-subdomain",
       "status": "STARTED",
       "details": "Model: default, Run: 1"
     },
     {
-      "timestamp": "2026-11-22T13:27:16.023843+00:00",
+      "timestamp": "2026-11-22T13:45:24.705323+00:00",
       "skill": "recon-subdomain",
       "status": "COMPLETED",
       "details": "Status: SUCCESS"
     },
     {
-      "timestamp": "2026-11-22T13:27:16.027108+00:00",
+      "timestamp": "2026-11-22T13:45:24.707909+00:00",
       "skill": "review-skill",
       "status": "PASSED",
       "details": "Skill recon-subdomain passed verification"
     },
     {
-      "timestamp": "2026-11-22T13:27:16.027413+00:00",
+      "timestamp": "2026-11-22T13:45:24.708284+00:00",
       "skill": "api-spec-discovery",
       "status": "STARTED",
       "details": "Model: default, Run: 1"
     },
     {
-      "timestamp": "2026-11-22T13:27:16.031469+00:00",
+      "timestamp": "2026-11-22T13:45:24.710635+00:00",
       "skill": "api-spec-discovery",
       "status": "COMPLETED",
-      "details": "Status: SUCCESS"
+      "details": "Status: NO_SPEC"
     },
     {
-      "timestamp": "2026-11-22T13:27:16.033875+00:00",
+      "timestamp": "2026-11-22T13:45:24.712656+00:00",
       "skill": "review-skill",
       "status": "PASSED",
       "details": "Skill api-spec-discovery passed verification"
     },
     {
-      "timestamp": "2026-11-22T13:27:16.034153+00:00",
+      "timestamp": "2026-11-22T13:45:24.713069+00:00",
+      "skill": "js-discover",
+      "status": "STARTED",
+      "details": "Model: default, Run: 1"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.267230+00:00",
+      "skill": "js-discover",
+      "status": "COMPLETED",
+      "details": "Status: NO_ARTIFACTS"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.269987+00:00",
+      "skill": "review-skill",
+      "status": "PASSED",
+      "details": "Skill js-discover passed verification"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.270358+00:00",
+      "skill": "js-analyze",
+      "status": "STARTED",
+      "details": "Model: default, Run: 1"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.894230+00:00",
+      "skill": "js-analyze",
+      "status": "COMPLETED",
+      "details": "Status: SUCCESS"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.897290+00:00",
+      "skill": "review-skill",
+      "status": "PASSED",
+      "details": "Skill js-analyze passed verification"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.897651+00:00",
       "skill": "content-discovery",
       "status": "STARTED",
       "details": "Model: default, Run: 1"
     },
     {
-      "timestamp": "2026-11-22T13:27:16.039903+00:00",
+      "timestamp": "2026-11-22T13:45:32.902468+00:00",
       "skill": "content-discovery",
+      "status": "COMPLETED",
+      "details": "Status: CANDIDATES_ONLY"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.904918+00:00",
+      "skill": "review-skill",
+      "status": "PASSED",
+      "details": "Skill content-discovery passed verification"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.905400+00:00",
+      "skill": "xss-reflected",
+      "status": "STARTED",
+      "details": "Model: default, Run: 1"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.925144+00:00",
+      "skill": "xss-reflected",
       "status": "COMPLETED",
       "details": "Status: SUCCESS"
     },
     {
-      "timestamp": "2026-11-22T13:27:16.042400+00:00",
+      "timestamp": "2026-11-22T13:45:32.927897+00:00",
       "skill": "review-skill",
       "status": "PASSED",
-      "details": "Skill content-discovery passed verification"
+      "details": "Skill xss-reflected passed verification"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.928297+00:00",
+      "skill": "xss-stored",
+      "status": "CHECKPOINT",
+      "details": "Awaiting human approval"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.928394+00:00",
+      "skill": "xss-stored",
+      "status": "STARTED",
+      "details": "Model: default, Run: 1"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.951257+00:00",
+      "skill": "xss-stored",
+      "status": "COMPLETED",
+      "details": "Status: SUCCESS"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.954161+00:00",
+      "skill": "review-skill",
+      "status": "PASSED",
+      "details": "Skill xss-stored passed verification"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.954594+00:00",
+      "skill": "xss-dom",
+      "status": "STARTED",
+      "details": "Model: default, Run: 1"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.960352+00:00",
+      "skill": "xss-dom",
+      "status": "COMPLETED",
+      "details": "Status: SUCCESS"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.963249+00:00",
+      "skill": "review-skill",
+      "status": "PASSED",
+      "details": "Skill xss-dom passed verification"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.963702+00:00",
+      "skill": "xss-blind",
+      "status": "CHECKPOINT",
+      "details": "Awaiting human approval"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.963827+00:00",
+      "skill": "xss-blind",
+      "status": "STARTED",
+      "details": "Model: default, Run: 1"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.971166+00:00",
+      "skill": "xss-blind",
+      "status": "COMPLETED",
+      "details": "Status: SUCCESS"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.973754+00:00",
+      "skill": "review-skill",
+      "status": "PASSED",
+      "details": "Skill xss-blind passed verification"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.974097+00:00",
+      "skill": "ssrf-identify",
+      "status": "STARTED",
+      "details": "Model: default, Run: 1"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.980022+00:00",
+      "skill": "ssrf-identify",
+      "status": "COMPLETED",
+      "details": "Status: SUCCESS"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.982438+00:00",
+      "skill": "review-skill",
+      "status": "PASSED",
+      "details": "Skill ssrf-identify passed verification"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.982829+00:00",
+      "skill": "ssrf-post-exploit",
+      "status": "CHECKPOINT",
+      "details": "Awaiting human approval"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.982944+00:00",
+      "skill": "ssrf-post-exploit",
+      "status": "STARTED",
+      "details": "Model: default, Run: 1"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.989182+00:00",
+      "skill": "ssrf-post-exploit",
+      "status": "COMPLETED",
+      "details": "Status: SUCCESS"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.991509+00:00",
+      "skill": "review-skill",
+      "status": "PASSED",
+      "details": "Skill ssrf-post-exploit passed verification"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.991993+00:00",
+      "skill": "idp-race-condition",
+      "status": "CHECKPOINT",
+      "details": "Awaiting human approval"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.992128+00:00",
+      "skill": "idp-race-condition",
+      "status": "STARTED",
+      "details": "Model: default, Run: 1"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:32.998854+00:00",
+      "skill": "idp-race-condition",
+      "status": "COMPLETED",
+      "details": "Status: SUCCESS"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:33.000910+00:00",
+      "skill": "review-skill",
+      "status": "PASSED",
+      "details": "Skill idp-race-condition passed verification"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:33.001397+00:00",
+      "skill": "auth-password-reset-bruteforce",
+      "status": "CHECKPOINT",
+      "details": "Awaiting human approval"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:33.001522+00:00",
+      "skill": "auth-password-reset-bruteforce",
+      "status": "STARTED",
+      "details": "Model: default, Run: 1"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:33.008633+00:00",
+      "skill": "auth-password-reset-bruteforce",
+      "status": "COMPLETED",
+      "details": "Status: SUCCESS"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:33.011618+00:00",
+      "skill": "review-skill",
+      "status": "PASSED",
+      "details": "Skill auth-password-reset-bruteforce passed verification"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:33.012021+00:00",
+      "skill": "report-conglomeration",
+      "status": "STARTED",
+      "details": "Model: default, Run: 1"
+    },
+    {
+      "timestamp": "2026-11-22T13:45:33.068921+00:00",
+      "skill": "report-conglomeration",
+      "status": "COMPLETED",
+      "details": "Status: SUCCESS"
     }
   ],
   "skill_results": {
@@ -78,10 +311,10 @@
         "skill": "recon-subdomain",
         "model": "default",
         "run_number": 1,
-        "start_time": "2026-11-22T13:26:59.946791+00:00",
+        "start_time": "2026-11-22T13:45:08.723960+00:00",
         "status": "SUCCESS",
-        "notes": "Found 1 subdomains, 1 live hosts",
-        "end_time": "2026-11-22T13:27:16.023829+00:00"
+        "notes": "Found 1 subdomains, 0 live hosts",
+        "end_time": "2026-11-22T13:45:24.705277+00:00"
       }
     ],
     "api-spec-discovery": [
@@ -89,10 +322,32 @@
         "skill": "api-spec-discovery",
         "model": "default",
         "run_number": 1,
-        "start_time": "2026-11-22T13:27:16.027399+00:00",
+        "start_time": "2026-11-22T13:45:24.708269+00:00",
+        "status": "NO_SPEC",
+        "notes": "",
+        "end_time": "2026-11-22T13:45:24.710617+00:00"
+      }
+    ],
+    "js-discover": [
+      {
+        "skill": "js-discover",
+        "model": "default",
+        "run_number": 1,
+        "start_time": "2026-11-22T13:45:24.713055+00:00",
+        "status": "NO_ARTIFACTS",
+        "notes": "Collected 0 JS files",
+        "end_time": "2026-11-22T13:45:32.267217+00:00"
+      }
+    ],
+    "js-analyze": [
+      {
+        "skill": "js-analyze",
+        "model": "default",
+        "run_number": 1,
+        "start_time": "2026-11-22T13:45:32.270346+00:00",
         "status": "SUCCESS",
         "notes": "",
-        "end_time": "2026-11-22T13:27:16.031453+00:00"
+        "end_time": "2026-11-22T13:45:32.894215+00:00"
       }
     ],
     "content-discovery": [
@@ -100,10 +355,109 @@
         "skill": "content-discovery",
         "model": "default",
         "run_number": 1,
-        "start_time": "2026-11-22T13:27:16.034142+00:00",
-        "status": "SUCCESS",
+        "start_time": "2026-11-22T13:45:32.897638+00:00",
+        "status": "CANDIDATES_ONLY",
         "notes": "",
-        "end_time": "2026-11-22T13:27:16.039892+00:00"
+        "end_time": "2026-11-22T13:45:32.902454+00:00"
+      }
+    ],
+    "xss-reflected": [
+      {
+        "skill": "xss-reflected",
+        "model": "default",
+        "run_number": 1,
+        "start_time": "2026-11-22T13:45:32.905384+00:00",
+        "status": "SUCCESS",
+        "notes": "Identified 1 candidate findings",
+        "end_time": "2026-11-22T13:45:32.925128+00:00"
+      }
+    ],
+    "xss-stored": [
+      {
+        "skill": "xss-stored",
+        "model": "default",
+        "run_number": 1,
+        "start_time": "2026-11-22T13:45:32.928384+00:00",
+        "status": "SUCCESS",
+        "notes": "Identified 0 candidate findings",
+        "end_time": "2026-11-22T13:45:32.951246+00:00"
+      }
+    ],
+    "xss-dom": [
+      {
+        "skill": "xss-dom",
+        "model": "default",
+        "run_number": 1,
+        "start_time": "2026-11-22T13:45:32.954580+00:00",
+        "status": "SUCCESS",
+        "notes": "Identified 0 candidate findings",
+        "end_time": "2026-11-22T13:45:32.960339+00:00"
+      }
+    ],
+    "xss-blind": [
+      {
+        "skill": "xss-blind",
+        "model": "default",
+        "run_number": 1,
+        "start_time": "2026-11-22T13:45:32.963814+00:00",
+        "status": "SUCCESS",
+        "notes": "Identified 0 candidate findings",
+        "end_time": "2026-11-22T13:45:32.971149+00:00"
+      }
+    ],
+    "ssrf-identify": [
+      {
+        "skill": "ssrf-identify",
+        "model": "default",
+        "run_number": 1,
+        "start_time": "2026-11-22T13:45:32.974087+00:00",
+        "status": "SUCCESS",
+        "notes": "Identified 0 candidate findings",
+        "end_time": "2026-11-22T13:45:32.980009+00:00"
+      }
+    ],
+    "ssrf-post-exploit": [
+      {
+        "skill": "ssrf-post-exploit",
+        "model": "default",
+        "run_number": 1,
+        "start_time": "2026-11-22T13:45:32.982932+00:00",
+        "status": "SUCCESS",
+        "notes": "Identified 0 candidate findings",
+        "end_time": "2026-11-22T13:45:32.989168+00:00"
+      }
+    ],
+    "idp-race-condition": [
+      {
+        "skill": "idp-race-condition",
+        "model": "default",
+        "run_number": 1,
+        "start_time": "2026-11-22T13:45:32.992117+00:00",
+        "status": "SUCCESS",
+        "notes": "Identified 0 candidate findings",
+        "end_time": "2026-11-22T13:45:32.998840+00:00"
+      }
+    ],
+    "auth-password-reset-bruteforce": [
+      {
+        "skill": "auth-password-reset-bruteforce",
+        "model": "default",
+        "run_number": 1,
+        "start_time": "2026-11-22T13:45:33.001511+00:00",
+        "status": "SUCCESS",
+        "notes": "Identified 0 candidate findings",
+        "end_time": "2026-11-22T13:45:33.008617+00:00"
+      }
+    ],
+    "report-conglomeration": [
+      {
+        "skill": "report-conglomeration",
+        "model": "default",
+        "run_number": 1,
+        "start_time": "2026-11-22T13:45:33.012008+00:00",
+        "status": "SUCCESS",
+        "notes": "Generated report with 3 findings",
+        "end_time": "2026-11-22T13:45:33.068906+00:00"
       }
     ]
   }

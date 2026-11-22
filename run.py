@@ -206,7 +206,9 @@ Examples:
     )
 
     try:
-        orchestrator.run()
+        result = orchestrator.run()
+        if result and result.get("status") == "FAILED":
+            sys.exit(1)
     except KeyboardInterrupt:
         print("\n\n⚠️  Scan interrupted by user.")
         sys.exit(130)

@@ -1,3 +1,3 @@
-# Content Discovery Summary — demo.target.local
+# Content Discovery Candidates — demo.target.local
 
-Probed 15 paths.
+Prepared 20 candidate paths. No HTTP probes were sent.

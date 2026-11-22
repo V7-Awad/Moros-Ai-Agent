@@ -43,7 +43,7 @@ targets/<domain>/output/report/
 
 ## Methodology Checklist
 
-- [ ] Step 1: Collect all findings — scan `findings/` recursively for all `confirmed-*.json` and `*-summary.md` files from all skills.
+- [ ] Step 1: Collect triage items — scan `findings/` recursively for `candidates-*.json` and independently validated `confirmed-*.json` files from all skills. A filename alone never proves validation.
   - Expected artifact: Collected findings inventory
   - Log file: `targets/<domain>/output/logs/report-conglomeration/step-01-collect.log`
 
@@ -128,6 +128,7 @@ targets/<domain>/output/report/
 
 ## Important Notes
 
+- **NEVER infer validation from a filename or model statement.** Use the explicit `validation_status` and linked evidence. Keep candidates separate from validated findings.
 - **NEVER remove the "pending human review" tag.** Even in the final report, all severities remain provisional.
 - **Don't auto-chain findings into higher severity.** If multiple low findings could form a chain, present the chain as a **candidate** with "requires human validation."
 - **Include what WASN'T found.** Negative results (tested but no vulnerability found) are valuable for the report consumer.

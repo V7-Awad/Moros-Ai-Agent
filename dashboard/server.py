@@ -290,7 +290,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 has_scope = len(scope_files) > 0
 
                 findings = self.get_target_findings(d.name)
-                sev_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
+                sev_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0, "UNASSESSED": 0}
                 for f in findings:
                     sev = f.get("severity_level", "INFO")
                     sev_counts[sev] = sev_counts.get(sev, 0) + 1
@@ -337,7 +337,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         has_scope = len(scope_files) > 0
 
         findings = self.get_target_findings(target_name)
-        sev_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
+        sev_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0, "UNASSESSED": 0}
         for f in findings:
             sev = f.get("severity_level", "INFO")
             sev_counts[sev] = sev_counts.get(sev, 0) + 1
@@ -425,14 +425,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         findings_dir = output_dir / "findings"
         if findings_dir.exists():
             for fpath in findings_dir.rglob("*.json"):
-                if fpath.name.startswith("confirmed-") or fpath.name.endswith("-results.json"):
+                if fpath.name.startswith(("confirmed-", "candidates-")) or fpath.name.endswith("-results.json"):
                     try:
                         content = json.loads(fpath.read_text(encoding="utf-8"))
                         items = content if isinstance(content, list) else content.get("findings", [content])
                         for item in items:
                             if isinstance(item, dict) and ("type" in item or "title" in item or "url" in item):
-                                raw_sev = item.get("severity", "AI-proposed severity: MEDIUM — pending human review")
-                                sev_lvl = "MEDIUM"
+                                raw_sev = item.get("severity", "AI-proposed severity: UNASSESSED — pending evidence and human review")
+                                sev_lvl = "UNASSESSED" if "UNASSESSED" in raw_sev.upper() else "MEDIUM"
                                 if "CRITICAL" in raw_sev.upper():
                                     sev_lvl = "CRITICAL"
                                 elif "HIGH" in raw_sev.upper():
@@ -454,7 +454,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                                     "curl_command": item.get("curl", ""),
                                     "source_file": str(fpath.relative_to(output_dir)),
                                     "details": item.get("notes", item.get("context", "")),
-                                    "status": item.get("status", "pending_review"),
+                                    "status": item.get("status", "candidate"),
+                                    "validation_status": item.get("validation_status", "unverified"),
+                                    "confidence": item.get("confidence", "not-scored"),
+                                    "evidence_ids": item.get("evidence_ids", []),
                                 })
                     except Exception:
                         pass
