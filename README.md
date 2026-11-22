@@ -11,7 +11,8 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-00e5ff.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-0077ff.svg?style=flat-square)](LICENSE)
-[![Tests Passing](https://img.shields.io/badge/tests-15%20passed%20(100%25)-19e6b0.svg?style=flat-square)](tests/)
+[![Tests Passing](https://img.shields.io/badge/tests-22%20passed%20(100%25)-19e6b0.svg?style=flat-square)](tests/)
+[![SARIF 2.1.0](https://img.shields.io/badge/SARIF-2.1.0%20OASIS-00e5ff.svg?style=flat-square)](#-sarif-210--github-code-scanning-export)
 [![HITL Gating](https://img.shields.io/badge/HITL-Enforceable%20Blocking-f1c26b.svg?style=flat-square)](#-enforceable-human-in-the-loop-hitl-gating)
 [![UI: Neon Cyber](https://img.shields.io/badge/Dashboard-Neon%20Cyber%20Fluid-00e5ff.svg?style=flat-square)](#-interactive-web-dashboard)
 
@@ -30,13 +31,16 @@ Moros strictly enforces an **evidence-first result model**: candidates are tied 
 ## 🛡️ Key Features
 
 - 🧠 **Autonomous ReAct Agent Runtime**: Real decision loop (`Thought` ➔ `Action` ➔ `Observation` ➔ `Final Answer`) with timeout-bounded tool calls and explicit `LLM_UNAVAILABLE` fallback.
+- ⚡ **Interactive Sub-Agent Directives**: Send direct operational instructions to specialist sub-agents (Recon, JS Hunter, XSS, SSRF, Auth/Race, Verifier, Reporting). Sub-agents execute registered tool chains, stream live observations, and record actions in durable sessions.
+- 📊 **OASIS SARIF 2.1.0 Export**: Standardized vulnerability export (`targets/<target>/output/report/findings.sarif`) with CWE mapping, STRIDE threat tags, and security-severity scores for direct ingestion into GitHub Code Scanning Alerts (`upload-sarif`) and ASPM platforms.
+- 🧭 **Multi-Tier Scan Profiles**: Execute targeted assessments using `--scan-mode quick` (fast surface recon & AST discovery), `--scan-mode deep` (full 14-skill exploit suite), or `--scan-mode passive` (zero active probing, purely OSINT & cert logs).
 - 🎛️ **In-Dashboard LLM & API Management**: Switch models, configure endpoints, and validate API connections (DeepSeek, OpenAI, Anthropic Claude, Groq, Gemini, OpenRouter, Ollama, LM Studio, vLLM) directly inside the Web UI.
 - 🛑 **Enforceable Blocking Human-in-the-Loop (HITL)**: Deterministic approval gates (`WAITING_APPROVAL`) that genuinely suspend worker threads before executing state-changing actions (`POST`, `PUT`, `DELETE`, password resets, race conditions) until authorized by the operator.
 - 🖥️ **Full-Screen Neon Cyber Web Dashboard**: Ultra-responsive fluid monitoring interface featuring live multi-agent chat, tool terminal streams, PoC reproduction cards, and visual pipeline graphs.
 - 🧬 **Sub-Agent Session Tracking**: Child agent lifecycle tracking (`agents.jsonl`) recording runtime metrics, model allocations, and finding provenance.
 - 📦 **15 Modular Security Skills**: Subdomain intelligence, headless browser JS crawling, AST parameter extraction, secret scanning, content discovery, XSS (reflected/stored/DOM/blind), SSRF exploitation, and IdP race audits.
 - 🔒 **Scope & Compliance Gating**: Mandatory scope-of-work validation (`scope-of-work.md` / `.pdf`) before offensive execution; runs strictly in passive mode when unverified.
-- 🧪 **Comprehensive Automated Test Suite**: 100% test coverage across agent loops, blocking gates, durable runs, and dependency resolution (`pytest`).
+- 🧪 **Comprehensive Automated Test Suite**: 100% test coverage across agent loops, blocking gates, durable runs, SARIF export, and sub-agent chat (`pytest`).
 
 ---
 
@@ -143,14 +147,50 @@ python run.py --check
 # Initialize a new target workspace
 python setup.py init-target --domain app.example.com
 
-# Run full assessment pipeline
-python run.py --target app.example.com
+# Run full assessment pipeline (deep mode)
+python run.py --target app.example.com --scan-mode deep
+
+# Run quick surface assessment (recon + JS AST discovery)
+python run.py --target app.example.com --scan-mode quick
+
+# Run strictly passive OSINT (zero active probes, crt.sh + Wayback)
+python run.py --target app.example.com --scan-mode passive
 
 # Execute specific micro-skills
 python run.py --target app.example.com --skills recon-subdomain,js-discover,js-analyze
 
 # Dry-run execution plan without sending network requests
 python run.py --target app.example.com --dry-run
+```
+
+---
+
+## 📊 SARIF 2.1.0 & GitHub Code Scanning Export
+
+Moros AI automatically generates standard OASIS SARIF 2.1.0 sidecars (`findings.sarif`) on every report run. This allows enterprise CI/CD pipelines and security teams to publish findings directly into GitHub Security Alerts or ASPM tools:
+
+```yaml
+# Example GitHub Actions Workflow (.github/workflows/security.yml)
+name: Moros AI Security Audit
+on: [push, pull_request]
+
+jobs:
+  pentest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run Moros Assessment
+        run: |
+          pip install -r requirements.txt
+          python run.py --target app.example.com --scan-mode quick
+      - name: Upload SARIF to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: targets/app.example.com/output/report/findings.sarif
 ```
 
 ---
@@ -211,25 +251,32 @@ python -m pytest -v tests/
 
 ```text
 ============================= test session starts =============================
-collected 15 items
+collected 22 items
 
-tests/test_agent_runtime.py::test_tool_registry_registration_and_execution PASSED [  6%]
-tests/test_agent_runtime.py::test_agent_context_and_result_dataclasses PASSED [ 13%]
-tests/test_agent_runtime.py::test_agent_runner_react_loop PASSED         [ 20%]
-tests/test_agent_runtime.py::test_agent_runner_llm_unavailable_fallback PASSED [ 26%]
-tests/test_checkpoint_manager.py::test_checkpoint_creation_and_deterministic_id PASSED [ 33%]
-tests/test_checkpoint_manager.py::test_checkpoint_approval_and_rejection PASSED [ 40%]
-tests/test_checkpoint_manager.py::test_checkpoint_blocking_worker_wakes_on_decision PASSED [ 46%]
-tests/test_checkpoint_manager.py::test_checkpoint_timeout_rejects PASSED [ 53%]
-tests/test_dependency_validation.py::test_missing_dependency_unscheduled_is_blocked PASSED [ 60%]
-tests/test_dependency_validation.py::test_dependency_with_disk_artifact_is_not_blocked PASSED [ 66%]
-tests/test_dependency_validation.py::test_scheduled_prerequisites_are_not_blocked PASSED [ 73%]
-tests/test_run_manager.py::test_run_creation_and_persistence PASSED      [ 80%]
-tests/test_run_manager.py::test_run_event_stream_and_progress PASSED     [ 86%]
-tests/test_run_manager.py::test_finish_run PASSED                        [ 93%]
-tests/test_run_manager.py::test_agent_session_tracking PASSED            [100%]
+tests/test_agent_runtime.py::test_tool_registry_registration_and_execution PASSED [  4%]
+tests/test_agent_runtime.py::test_agent_context_and_result_dataclasses PASSED [  9%]
+tests/test_agent_runtime.py::test_agent_runner_react_loop PASSED         [ 13%]
+tests/test_agent_runtime.py::test_agent_runner_llm_unavailable_fallback PASSED [ 18%]
+tests/test_checkpoint_manager.py::test_checkpoint_creation_and_deterministic_id PASSED [ 22%]
+tests/test_checkpoint_manager.py::test_checkpoint_approval_and_rejection PASSED [ 27%]
+tests/test_checkpoint_manager.py::test_checkpoint_blocking_worker_wakes_on_decision PASSED [ 31%]
+tests/test_checkpoint_manager.py::test_checkpoint_timeout_rejects PASSED [ 36%]
+tests/test_dependency_validation.py::test_missing_dependency_unscheduled_is_blocked PASSED [ 40%]
+tests/test_dependency_validation.py::test_dependency_with_disk_artifact_is_not_blocked PASSED [ 45%]
+tests/test_dependency_validation.py::test_scheduled_prerequisites_are_not_blocked PASSED [ 50%]
+tests/test_run_manager.py::test_run_creation_and_persistence PASSED      [ 54%]
+tests/test_run_manager.py::test_run_event_stream_and_progress PASSED     [ 59%]
+tests/test_run_manager.py::test_finish_run PASSED                        [ 63%]
+tests/test_run_manager.py::test_agent_session_tracking PASSED            [ 68%]
+tests/test_sarif_exporter.py::test_extract_cwe_and_stride PASSED         [ 72%]
+tests/test_sarif_exporter.py::test_build_sarif_report_structure PASSED   [ 77%]
+tests/test_sarif_exporter.py::test_write_sarif_report_atomic PASSED      [ 81%]
+tests/test_scan_modes.py::test_scan_mode_skill_resolution PASSED         [ 86%]
+tests/test_subagent_chat.py::test_roster_active_status PASSED            [ 90%]
+tests/test_subagent_chat.py::test_agent_greetings PASSED                 [ 95%]
+tests/test_subagent_chat.py::test_execute_subagent_chat_deterministic PASSED [100%]
 
-============================= 15 passed in 2.85s ==============================
+============================= 22 passed in 3.04s ==============================
 ```
 
 ---

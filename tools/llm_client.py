@@ -51,56 +51,69 @@ class LLMClient:
         self.model = model
         self.api_key = api_key
         self.base_url = base_url
+        self.last_error = None
         self._detect_provider()
 
     def _detect_provider(self):
         """Auto-detect provider based on environment variables if provider is 'auto'."""
-        if self.provider != "auto":
-            return
+        if self.provider == "auto":
+            selected = os.environ.get("MOROS_LLM_PROVIDER", "").strip().lower()
+            if not selected:
+                # Keep the legacy auto-detection order when no provider was selected in the UI.
+                if os.environ.get("OPENAI_BASE_URL") or os.environ.get("LLM_BASE_URL"):
+                    selected = "custom"
+                elif os.environ.get("DEEPSEEK_API_KEY"):
+                    selected = "deepseek"
+                elif os.environ.get("GROQ_API_KEY"):
+                    selected = "groq"
+                elif os.environ.get("OPENAI_API_KEY"):
+                    selected = "openai"
+                elif os.environ.get("ANTHROPIC_API_KEY"):
+                    selected = "anthropic"
+                elif os.environ.get("GEMINI_API_KEY"):
+                    selected = "gemini"
+                elif os.environ.get("OPENROUTER_API_KEY"):
+                    selected = "openrouter"
+                elif os.environ.get("OLLAMA_BASE_URL") or self._check_ollama():
+                    selected = "ollama"
+                else:
+                    selected = "none"
 
-        # 1. Custom / Generic OpenAI-Compatible Endpoints (vLLM, LM Studio, DeepSeek, Groq, Together, etc.)
-        if os.environ.get("OPENAI_BASE_URL") or os.environ.get("LLM_BASE_URL"):
+            self.provider = selected
+
+        selected = self.provider
+        if selected == "deepseek":
             self.provider = "openai"
-            self.base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("LLM_BASE_URL")
-            self.api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("LLM_API_KEY") or "none"
-            self.model = self.model or os.environ.get("OPENAI_MODEL") or os.environ.get("LLM_MODEL") or "default"
-        # 2. DeepSeek direct API
-        elif os.environ.get("DEEPSEEK_API_KEY"):
-            self.provider = "openai"
-            self.base_url = "https://api.deepseek.com/v1"
-            self.api_key = os.environ.get("DEEPSEEK_API_KEY")
+            self.base_url = self.base_url or "https://api.deepseek.com/v1"
+            self.api_key = self.api_key or os.environ.get("DEEPSEEK_API_KEY")
             self.model = self.model or os.environ.get("DEEPSEEK_MODEL") or "deepseek-chat"
-        # 3. Groq direct API (fast open models)
-        elif os.environ.get("GROQ_API_KEY"):
+        elif selected == "groq":
             self.provider = "openai"
-            self.base_url = "https://api.groq.com/openai/v1"
-            self.api_key = os.environ.get("GROQ_API_KEY")
+            self.base_url = self.base_url or "https://api.groq.com/openai/v1"
+            self.api_key = self.api_key or os.environ.get("GROQ_API_KEY")
             self.model = self.model or os.environ.get("GROQ_MODEL") or "llama-3.3-70b-versatile"
-        # 4. Standard OpenAI
-        elif os.environ.get("OPENAI_API_KEY"):
+        elif selected == "custom":
             self.provider = "openai"
-            self.api_key = os.environ.get("OPENAI_API_KEY")
+            self.base_url = self.base_url or os.environ.get("OPENAI_BASE_URL") or os.environ.get("LLM_BASE_URL")
+            self.api_key = self.api_key or os.environ.get("OPENAI_API_KEY") or os.environ.get("LLM_API_KEY") or "none"
+            self.model = self.model or os.environ.get("OPENAI_MODEL") or os.environ.get("LLM_MODEL") or "default"
+        elif selected == "openai":
+            self.api_key = self.api_key or os.environ.get("OPENAI_API_KEY")
             self.model = self.model or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
-        # 5. Anthropic Claude
-        elif os.environ.get("ANTHROPIC_API_KEY"):
-            self.provider = "anthropic"
-            self.api_key = os.environ.get("ANTHROPIC_API_KEY")
+        elif selected == "anthropic":
+            self.api_key = self.api_key or os.environ.get("ANTHROPIC_API_KEY")
             self.model = self.model or os.environ.get("ANTHROPIC_MODEL") or "claude-3-5-sonnet-20241022"
-        # 6. Google Gemini
-        elif os.environ.get("GEMINI_API_KEY"):
-            self.provider = "gemini"
-            self.api_key = os.environ.get("GEMINI_API_KEY")
-            self.model = self.model or os.environ.get("GEMINI_MODEL") or "gemini-1.5-flash"
-        # 7. OpenRouter
-        elif os.environ.get("OPENROUTER_API_KEY"):
-            self.provider = "openrouter"
-            self.api_key = os.environ.get("OPENROUTER_API_KEY")
+        elif selected == "gemini":
+            self.api_key = self.api_key or os.environ.get("GEMINI_API_KEY")
+            self.model = self.model or os.environ.get("GEMINI_MODEL") or "gemini-3.8-flash"
+        elif selected == "openrouter":
+            self.api_key = self.api_key or os.environ.get("OPENROUTER_API_KEY")
             self.model = self.model or os.environ.get("OPENROUTER_MODEL") or "meta-llama/llama-3.1-8b-instruct"
-        # 8. Local Ollama
-        elif os.environ.get("OLLAMA_BASE_URL") or self._check_ollama():
-            self.provider = "ollama"
-            self.base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        elif selected == "ollama":
+            self.base_url = self.base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
             self.model = self.model or os.environ.get("OLLAMA_MODEL") or "llama3"
+        elif selected == "none":
+            self.provider = "none"
         else:
             self.provider = "none"
 
@@ -133,7 +146,11 @@ class LLMClient:
             elif self.provider == "ollama":
                 return self._call_ollama(prompt, system_prompt, temperature, max_tokens)
         except Exception as e:
-            logger.warning(f"LLM completion failed ({self.provider}/{self.model}): {e}")
+            error_text = str(e)
+            if self.api_key:
+                error_text = error_text.replace(self.api_key, "[redacted]")
+            self.last_error = error_text[:500]
+            logger.warning(f"LLM completion failed ({self.provider}/{self.model}): {self.last_error}")
             return None
 
     def _call_openai_compatible(self, prompt: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
@@ -188,19 +205,45 @@ class LLMClient:
             return data["content"][0]["text"]
 
     def _call_gemini(self, prompt: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
-        model_name = self.model or "gemini-1.5-flash"
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.api_key}"
-
-        combined = f"System: {system_prompt}\n\nUser: {prompt}" if system_prompt else prompt
+        model_name = self.model or "gemini-3.8-flash"
         payload = {
-            "contents": [{"parts": [{"text": combined}]}],
-            "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens}
+            "model": model_name,
+            "input": prompt,
+            "store": False,
+            "generation_config": {
+                "temperature": temperature,
+                "max_output_tokens": max_tokens,
+                "thinking_level": "low",
+            },
         }
+        if system_prompt:
+            payload["system_instruction"] = system_prompt
 
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+        url = "https://generativelanguage.googleapis.com/v1beta/interactions"
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": self.api_key,
+            },
+            method="POST",
+        )
         with urllib.request.urlopen(req, timeout=60) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            return data["candidates"][0]["content"]["parts"][0]["text"]
+        if data.get("status") != "completed":
+            details = data.get("errors") or data.get("status") or "no completed response"
+            raise RuntimeError(f"Gemini interaction did not complete: {details}")
+
+        output = []
+        for step in data.get("steps", []):
+            if step.get("type") == "model_output":
+                for part in step.get("content", []):
+                    if part.get("type") == "text" and part.get("text"):
+                        output.append(part["text"])
+        if not output:
+            raise RuntimeError("Gemini returned no text output")
+        return "\n".join(output)
 
     def _call_ollama(self, prompt: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
         url = f"{(self.base_url or 'http://localhost:11434').rstrip('/')}/api/generate"

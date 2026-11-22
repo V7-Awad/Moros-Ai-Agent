@@ -84,8 +84,8 @@ Examples:
                         help="Custom target directory (default: targets/<domain>)")
     parser.add_argument("--skills", default="all",
                         help="Comma-separated skill names, or 'all' (default: all)")
-    parser.add_argument("--scan-mode", choices=["quick", "full"], default="full",
-                        help="quick runs the core recon/discovery checks; full runs every registered skill")
+    parser.add_argument("--scan-mode", choices=["quick", "deep", "full", "passive"], default="full",
+                        help="Scan profile: quick (surface recon & discovery), deep/full (full 14-skill exploit suite), passive (zero active probes)")
     parser.add_argument("--fail-on-candidate", action="store_true",
                         help="Return exit code 2 when the completed run contains unverified candidate findings (useful in CI)")
     parser.add_argument("--models", default="default",
@@ -170,6 +170,8 @@ Examples:
         if args.scan_mode == "quick":
             skills = ["recon-subdomain", "api-spec-discovery", "js-discover", "js-analyze",
                       "content-discovery", "xss-reflected", "ssrf-identify", "report-conglomeration"]
+        elif args.scan_mode == "passive":
+            skills = ["recon-subdomain", "api-spec-discovery", "js-discover", "js-analyze", "report-conglomeration"]
         else:
             skills = list(SKILL_ORDER)
     else:

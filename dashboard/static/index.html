@@ -787,6 +787,61 @@
         grid-template-columns: repeat(3, minmax(0, 1fr));
       }
     }
+    .agent-workspace {
+      display: grid;
+      grid-template-columns: minmax(245px, .9fr) minmax(0, 1.55fr);
+      gap: 20px;
+      align-items: start;
+      min-width: 0;
+      width: 100%;
+    }
+    .agent-workspace > .card,
+    .agent-chat-identity,
+    .agent-chat-content,
+    #conversationMessages,
+    .agent-roster .parts,
+    .agent-roster .part,
+    .agent-roster .part > div {
+      min-width: 0;
+    }
+    .agent-roster {
+      box-sizing: border-box;
+      overflow: hidden;
+    }
+    .agent-roster .part {
+      box-sizing: border-box;
+      max-width: 100%;
+    }
+    .agent-roster .part > div:nth-child(2) {
+      flex: 1 1 0;
+    }
+    .agent-chat-header {
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .agent-chat-title-row {
+      flex-wrap: wrap;
+    }
+    .agent-chat-role,
+    .agent-chat-tier,
+    #conversationMessages {
+      overflow-wrap: anywhere;
+    }
+    .agent-chat-tier {
+      max-width: 100%;
+      text-align: left !important;
+    }
+    @media (max-width: 1100px) {
+      .agent-workspace {
+        grid-template-columns: minmax(0, 1fr);
+      }
+      .agent-roster {
+        width: 100%;
+      }
+      .agent-chat-card {
+        height: min(720px, 76vh) !important;
+      }
+    }
     @media (max-width: 860px) {
       .wrap {
         grid-template-columns: 1fr;
@@ -1211,10 +1266,10 @@
         </div>
 
         <!-- Two Column Fluid Layout: Left Roster (310px) + Right Chat & Thought Stream (1fr) -->
-        <div style="display:grid; grid-template-columns: 310px minmax(0, 1fr); gap: 20px; align-items:start;">
+        <div class="agent-workspace">
           
           <!-- Left: Sub-Agents Roster Card -->
-          <div class="card" style="padding:16px;">
+          <div class="card agent-roster" style="padding:16px;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; padding-bottom:8px; border-bottom:1px solid var(--line);">
               <h2 style="font-size:12px; text-transform:uppercase; letter-spacing:.08em; margin:0; color:var(--mut);">Sub-Agent Roster</h2>
               <span class="hint mono" id="rosterCountBadge">8 Agents</span>
@@ -1225,20 +1280,20 @@
           </div>
 
           <!-- Right: Chat Dialogue & Thought Stream Card -->
-          <div class="card" style="display:flex; flex-direction:column; height: 720px; padding:0; overflow:hidden;">
+          <div class="card agent-chat-card" style="display:flex; flex-direction:column; height:720px; padding:0; overflow:hidden;">
             <!-- Chat Header -->
-            <div style="padding:14px 18px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; background:rgba(6,6,6,.9);">
-              <div style="display:flex; align-items:center; gap:12px;">
+            <div class="agent-chat-header" style="padding:14px 18px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; background:rgba(6,6,6,.9);">
+              <div class="agent-chat-identity" style="display:flex; align-items:center; gap:12px;">
                 <div id="activeAgentAvatar" style="width:36px; height:36px; border-radius:50%; background:linear-gradient(135deg,var(--blue),var(--cyan)); display:grid; place-items:center; box-shadow:0 0 14px var(--blue-glow); font-size:18px; flex-shrink:0;">🛡️</div>
-                <div>
-                  <div style="display:flex; align-items:center; gap:8px;">
+                <div class="agent-chat-content">
+                  <div class="agent-chat-title-row" style="display:flex; align-items:center; gap:8px;">
                     <strong id="activeAgentName" style="font:700 15px 'Space Grotesk', system-ui, sans-serif; color:#fff;">Coordinator Master</strong>
                     <span id="activeAgentStatusBadge" class="tag ok" style="padding:2px 8px; font-size:10px;">ACTIVE</span>
                   </div>
-                  <div id="activeAgentRole" class="hint" style="font-size:11px; margin-top:2px;">Attack tree orchestration & multi-agent planner</div>
+                  <div id="activeAgentRole" class="hint agent-chat-role" style="font-size:11px; margin-top:2px;">Attack tree orchestration & multi-agent planner</div>
                 </div>
               </div>
-              <div class="mono" style="font-size:11px; color:var(--cyan); text-align:right;" id="activeAgentTier">Frontier (Claude 3.5 / GPT-4o)</div>
+              <div class="mono agent-chat-tier" style="font-size:11px; color:var(--cyan); text-align:right;" id="activeAgentTier">Frontier (Claude 3.5 / GPT-4o)</div>
             </div>
 
             <!-- Messages Stream Area -->
@@ -1248,10 +1303,11 @@
 
             <!-- Steering Quick Prompts -->
             <div style="padding:8px 14px; border-top:1px solid var(--line); background:rgba(8,8,8,.95); display:flex; gap:6px; overflow-x:auto;">
-              <button onclick="setPromptAndSend('Prioritize authentication and login endpoints for security review')" class="ghost" style="padding:4px 10px; font-size:11px; white-space:nowrap;">⚡ Prioritize Auth APIs</button>
-              <button onclick="setPromptAndSend('Explain critical findings and how to reproduce them with curl')" class="ghost" style="padding:4px 10px; font-size:11px; white-space:nowrap;">🔍 Explain Critical Findings</button>
-              <button onclick="setPromptAndSend('Verify scope compliance and ensure no out-of-scope targets are probed')" class="ghost" style="padding:4px 10px; font-size:11px; white-space:nowrap;">🛡️ Scope Compliance</button>
-              <button onclick="setPromptAndSend('Scan for SSRF vulnerabilities and cloud metadata leaks')" class="ghost" style="padding:4px 10px; font-size:11px; white-space:nowrap;">☁️ Probe for SSRF</button>
+              <button onclick="setPromptAndSend('Run subdomain recon and discover alive endpoints')" class="ghost" style="padding:4px 10px; font-size:11px; white-space:nowrap;">🌐 Run Recon</button>
+              <button onclick="setPromptAndSend('Analyze JavaScript files and extract API routes and secrets')" class="ghost" style="padding:4px 10px; font-size:11px; white-space:nowrap;">⚡ Analyze JS</button>
+              <button onclick="setPromptAndSend('List discovered endpoints and evaluate attack surface')" class="ghost" style="padding:4px 10px; font-size:11px; white-space:nowrap;">🔍 Audit Endpoints</button>
+              <button onclick="setPromptAndSend('Verify candidate findings and check reproduction evidence')" class="ghost" style="padding:4px 10px; font-size:11px; white-space:nowrap;">🛡️ Verify Proofs</button>
+              <button onclick="setPromptAndSend('Generate OASIS SARIF 2.1.0 deliverable for GitHub Code Scanning')" class="ghost" style="padding:4px 10px; font-size:11px; white-space:nowrap;">📄 Export SARIF 2.1.0</button>
               <button onclick="setPromptAndSend('Summarize discovered secrets and sensitive tokens from JS bundles')" class="ghost" style="padding:4px 10px; font-size:11px; white-space:nowrap;">🔑 Check Secrets</button>
             </div>
 
@@ -1273,7 +1329,10 @@
               <h1 style="margin:0 0 4px; font:700 20px 'Space Grotesk', system-ui, sans-serif; color:#fff;">Penetration Testing Final Deliverable Report</h1>
               <p class="hint" style="margin:0;">Synthesized report from all skill passes, deduplicated, ready for human sign-off</p>
             </div>
-            <button onclick="window.print()" class="ghost">Print / Save as PDF</button>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <a id="btnDownloadSarif" href="#" target="_blank" class="btn" style="text-decoration:none; font-size:12px; padding:7px 14px;">Download SARIF 2.1.0</a>
+              <button onclick="window.print()" class="ghost">Print / Save as PDF</button>
+            </div>
           </div>
         </div>
         <div class="card" id="reportContent" style="line-height:1.7;">
@@ -1312,20 +1371,27 @@
           </select>
         </div>
         <div>
+          <label style="display:block; margin-bottom:4px; font-weight:600; color:var(--mut);">Scan Profile / Execution Mode</label>
+          <select id="scanModeSelect" class="mono" style="width:100%;">
+            <option value="quick">Quick Scan (Recon, JS AST & Fast Endpoint Triage)</option>
+            <option value="deep">Deep Full Audit (All 14 Skills, Exploit Probes & Race Suite)</option>
+            <option value="passive">Passive OSINT (Zero Active Probes, Wayback & Cert Logs)</option>
+          </select>
+        </div>
+        <div>
           <label style="display:block; margin-bottom:4px; font-weight:600; color:var(--mut);">Model Tier / Provider</label>
           <select id="scanModelSelect" class="mono" style="width:100%;">
             <option value="default">Use configured provider & model</option>
           </select>
           <small id="scanLlmNotice" class="hint">Checking configured model…</small>
         </div>
-        <div style="display:flex; align-items:center; gap:8px;">
-          <input type="checkbox" id="scanDryRunCheck">
-          <label for="scanDryRunCheck" style="color:#e2e8f0;">Dry-run only (simulate execution plan without calling live endpoints)</label>
+        <div class="note" style="border-left-color:var(--warn);">
+          This starts a live assessment and sends requests to the target. Only run it for assets explicitly in your program scope. Without a matching readable scope file, the engine limits itself to passive recon.
         </div>
       </div>
       <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:20px; padding-top:14px; border-top:1px solid var(--line);">
         <button onclick="closeModal('newScanModal')" class="ghost">Cancel</button>
-        <button onclick="submitNewScan()" class="btn">Start Assessment</button>
+        <button onclick="submitNewScan()" class="btn">Start Live Assessment</button>
       </div>
     </div>
   </div>
@@ -1373,7 +1439,7 @@
             <option value="openai">OpenAI (GPT-4o, GPT-4o-mini, o3-mini)</option>
             <option value="anthropic">Anthropic Claude (Claude 3.5 Sonnet)</option>
             <option value="groq">Groq (Llama 3.3 70B, Qwen)</option>
-            <option value="gemini">Google Gemini (Gemini 1.5 Flash / Pro)</option>
+            <option value="gemini">Google Gemini (Gemini 3.8 Flash / 3.1 Pro)</option>
             <option value="openrouter">OpenRouter (Multi-model Gateway)</option>
             <option value="ollama">Ollama (Local / Offline 100%)</option>
             <option value="custom">Custom OpenAI-Compatible (LM Studio / vLLM / LocalAI)</option>
@@ -2239,6 +2305,10 @@
     // --- Report Conglomeration (Offline Markdown Parser) ---
     async function fetchReport() {
       try {
+        const sarifBtn = document.getElementById('btnDownloadSarif');
+        if (sarifBtn && currentTarget) {
+          sarifBtn.href = `/api/targets/${encodeURIComponent(currentTarget)}/sarif`;
+        }
         const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/report`);
         const data = await res.json();
         document.getElementById('reportContent').innerHTML = renderOfflineMarkdown(data.markdown || "# No report content yet.");
@@ -2289,7 +2359,8 @@
       const target = document.getElementById('scanTargetInput').value.trim();
       const skills = document.getElementById('scanSkillsSelect').value;
       const models = document.getElementById('scanModelSelect').value;
-      const dryRun = document.getElementById('scanDryRunCheck').checked;
+      const scanModeEl = document.getElementById('scanModeSelect');
+      const scanMode = scanModeEl ? scanModeEl.value : 'quick';
 
       if (!target) {
         alert("Target domain required");
@@ -2305,7 +2376,7 @@
         const res = await fetch('/api/scan/start', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ target: target, skills: skills, models: models, dry_run: dryRun })
+          body: JSON.stringify({ target: target, skills: skills, models: models, scan_mode: scanMode, dry_run: false })
         });
         const data = await res.json();
         if (data.status === "success") {
@@ -2380,7 +2451,7 @@
           document.getElementById('llmBaseUrlInput').value = data.base_url;
         }
         if (data.has_api_key) {
-          document.getElementById('currentKeyMasked').textContent = "Current active key: " + data.masked_key;
+          document.getElementById('currentKeyMasked').textContent = "API key is configured and hidden.";
         } else {
           document.getElementById('currentKeyMasked').textContent = "No API key configured yet.";
         }
@@ -2414,7 +2485,7 @@
         keyWrap.style.display = 'block';
       } else if (p === 'gemini') {
         urlIn.placeholder = "https://generativelanguage.googleapis.com";
-        if (!modelIn.value || modelIn.value === 'deepseek-chat') modelIn.value = 'gemini-1.5-flash';
+        if (!modelIn.value || modelIn.value === 'deepseek-chat' || modelIn.value.startsWith('gemini-1.5-')) modelIn.value = 'gemini-3.8-flash';
         keyWrap.style.display = 'block';
       } else if (p === 'openrouter') {
         urlIn.placeholder = "https://openrouter.ai/api/v1";

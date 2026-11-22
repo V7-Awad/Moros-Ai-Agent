@@ -985,5 +985,18 @@ class SkillRunner:
             "validated_findings": validated_count,
         }, "findings": all_findings}, indent=2), encoding="utf-8")
 
+        # Generate SARIF 2.1.0 sidecar for GitHub Code Scanning and CI/CD
+        sarif_file = report_dir / "findings.sarif"
+        try:
+            from tools.sarif_exporter import write_sarif_report
+            write_sarif_report(sarif_file, all_findings, target=self.target)
+        except Exception as e:
+            self.log_step(skill, "step-08-sarif-error.log", f"SARIF export failed: {e}")
+
         self.log_step(skill, "step-07-full-report.log", f"Generated deliverable report: {report_md_file.name}")
-        return {"status": "SUCCESS", "report_path": str(report_md_file), "findings_count": len(all_findings)}
+        return {
+            "status": "SUCCESS",
+            "report_path": str(report_md_file),
+            "sarif_path": str(sarif_file) if sarif_file.exists() else None,
+            "findings_count": len(all_findings),
+        }

@@ -23,8 +23,8 @@ Thumbs.db
 desktop.ini
 
 # Target output (never commit real engagement data, except demo)
-targets/*/output/
-targets/*/scope-of-work.*
+targets/*
+!targets/demo.target.local/
 !targets/demo.target.local/**
 
 # Working scratch & IDE internal
