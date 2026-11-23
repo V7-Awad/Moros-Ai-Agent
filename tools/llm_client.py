@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -334,64 +335,71 @@ class LLMClient:
         last_exc = None
 
         for model_name in candidate_models:
-            payload = {
-                "model": model_name,
-                "input": prompt,
-                "store": False,
-                "generation_config": {
-                    "temperature": temperature,
-                    "max_output_tokens": max_tokens,
-                    "thinking_level": "low",
-                },
-            }
-            if system_prompt:
-                payload["system_instruction"] = system_prompt
+            for attempt in range(2):
+                payload = {
+                    "model": model_name,
+                    "input": prompt,
+                    "store": False,
+                    "generation_config": {
+                        "temperature": temperature,
+                        "max_output_tokens": max_tokens,
+                        "thinking_level": "low",
+                    },
+                }
+                if system_prompt:
+                    payload["system_instruction"] = system_prompt
 
-            req = urllib.request.Request(
-                url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "x-goog-api-key": self.api_key,
-                },
-                method="POST",
-            )
-            try:
-                with urllib.request.urlopen(req, timeout=60) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-            except urllib.error.HTTPError as exc:
-                raw_error = exc.read(4096).decode("utf-8", errors="replace")
+                req = urllib.request.Request(
+                    url,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={
+                        "Content-Type": "application/json",
+                        "x-goog-api-key": self.api_key,
+                    },
+                    method="POST",
+                )
                 try:
-                    parsed_error = json.loads(raw_error)
-                    error = parsed_error.get("error", parsed_error)
-                    details = error.get("message", raw_error) if isinstance(error, dict) else str(error)
-                except json.JSONDecodeError:
-                    details = raw_error or exc.reason
-                # If 503 (high demand) or 404 (model not available) and we have fallbacks, try next
-                if exc.code in {503, 404} and model_name != candidate_models[-1]:
-                    logger.warning(f"Gemini {model_name} HTTP {exc.code} ({str(details)[:150]}); trying fallback model {candidate_models[-1]}...")
-                    last_exc = RuntimeError(f"Gemini API HTTP {exc.code}: {str(details)[:400]}")
-                    continue
-                raise RuntimeError(f"Gemini API HTTP {exc.code}: {str(details)[:400]}") from None
-            except (TimeoutError, urllib.error.URLError) as exc:
-                if model_name != candidate_models[-1]:
-                    logger.warning(f"Gemini {model_name} network/timeout issue; trying fallback model {candidate_models[-1]}...")
-                    last_exc = exc
-                    continue
-                raise
+                    with urllib.request.urlopen(req, timeout=60) as resp:
+                        data = json.loads(resp.read().decode("utf-8"))
+                except urllib.error.HTTPError as exc:
+                    raw_error = exc.read(4096).decode("utf-8", errors="replace")
+                    try:
+                        parsed_error = json.loads(raw_error)
+                        error = parsed_error.get("error", parsed_error)
+                        details = error.get("message", raw_error) if isinstance(error, dict) else str(error)
+                    except json.JSONDecodeError:
+                        details = raw_error or exc.reason
+                    if exc.code == 503 and attempt == 0:
+                        logger.warning(f"Gemini {model_name} HTTP 503 spike; backing off 1.5s for retry...")
+                        time.sleep(1.5)
+                        continue
+                    if exc.code in {503, 404} and model_name != candidate_models[-1]:
+                        logger.warning(f"Gemini {model_name} HTTP {exc.code} ({str(details)[:150]}); trying fallback model {candidate_models[-1]}...")
+                        last_exc = RuntimeError(f"Gemini API HTTP {exc.code}: {str(details)[:400]}")
+                        break
+                    raise RuntimeError(f"Gemini API HTTP {exc.code}: {str(details)[:400]}") from None
+                except (TimeoutError, urllib.error.URLError) as exc:
+                    if attempt == 0:
+                        time.sleep(1.0)
+                        continue
+                    if model_name != candidate_models[-1]:
+                        logger.warning(f"Gemini {model_name} network/timeout issue; trying fallback model {candidate_models[-1]}...")
+                        last_exc = exc
+                        break
+                    raise
 
-            if data.get("status") != "completed":
-                details = data.get("errors") or data.get("status") or "no completed response"
-                raise RuntimeError(f"Gemini interaction did not complete: {details}")
+                if data.get("status") != "completed":
+                    details = data.get("errors") or data.get("status") or "no completed response"
+                    raise RuntimeError(f"Gemini interaction did not complete: {details}")
 
-            output = []
-            for step in data.get("steps", []):
-                if step.get("type") == "model_output":
-                    for part in step.get("content", []):
-                        if part.get("type") == "text" and part.get("text"):
-                            output.append(part["text"])
-            if output:
-                return "\n".join(output)
+                output = []
+                for step in data.get("steps", []):
+                    if step.get("type") == "model_output":
+                        for part in step.get("content", []):
+                            if part.get("type") == "text" and part.get("text"):
+                                output.append(part["text"])
+                if output:
+                    return "\n".join(output)
 
         if last_exc:
             raise last_exc

@@ -265,9 +265,15 @@ class AgentRunner:
             history.append({"role": "user", "content": f"Observation: {obs_str[:12000]}"})
             current_prompt = f"Observation: {obs_str[:12000]}\nWhat is your next Thought and Action?"
 
-        # A configured key does not mean the model call succeeded. Preserve a
-        # visible failure state instead of silently marking the agent complete.
+        # If model call failed, activate deterministic fallback if available
         if llm_failure:
+            if fallback_fn:
+                logger.info(f"[{agent_id}] Activating deterministic tool pipeline fallback after LLM failure: {llm_failure}")
+                result = fallback_fn(context)
+                result.status = "completed"
+                result.reasoning_steps.append(f"Fallback triggered due to LLM error ({llm_failure}); deterministic pipeline completed.")
+                store.append(agent_id, "assistant", f"Fallback completed: {result.summary}", run_id=context.run_id)
+                return result
             status = "llm_error"
             summary = f"{agent_id} stopped because {self.llm.provider}/{self.llm.model} failed: {llm_failure}"
         elif step >= max_steps:

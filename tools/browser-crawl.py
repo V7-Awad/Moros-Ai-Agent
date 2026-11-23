@@ -130,7 +130,13 @@ class BrowserCrawler:
         request = route.request
         parsed = urlparse(request.url)
         if self.safe_mode:
-            if (parsed.hostname or "").lower().rstrip(".") != self.target_hostname:
+            h = (parsed.hostname or "").lower().rstrip(".")
+            t = self.target_hostname.lower().rstrip(".")
+            t_bare = t.removeprefix("www.")
+            h_bare = h.removeprefix("www.")
+            is_target = (h == t or h_bare == t_bare or h.endswith("." + t_bare))
+            is_script_asset = (request.resource_type in {"script", "stylesheet"} or parsed.path.endswith((".js", ".css")))
+            if not is_target and not is_script_asset:
                 await route.abort()
                 return
             if request.method not in {"GET", "HEAD"}:

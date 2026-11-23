@@ -337,12 +337,18 @@ class SkillRunner:
         if root_response.get("status") == "response":
             html_content = root_response.get("body", "")
             script_srcs = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
+            final_url = root_response.get("url") or self.http.base_url
             for i, src in enumerate(script_srcs[:100]):
-                full_src = urllib.parse.urljoin(self.http.base_url + "/", src)
+                full_src = urllib.parse.urljoin(final_url + "/", src)
+                parsed_src = urllib.parse.urlparse(full_src)
+                from scoped_http import is_in_target_scope
+                if not is_in_target_scope(parsed_src.hostname, self.http.target):
+                    continue
                 bundle = self.http.request(full_src, method="GET")
                 if bundle.get("status") != "response" or bundle.get("status_code") != 200:
                     continue
-                fname = re.sub(r'[^\w\-.]', '_', urllib.parse.urlparse(src).path.split("/")[-1] or f"bundle_{i}.js")
+                clean_path = parsed_src.path.rstrip("/")
+                fname = re.sub(r'[^\w\-.]', '_', clean_path.split("/")[-1] or f"bundle_{i}.js")
                 if not fname.endswith(".js"):
                     fname += ".js"
                 out_path = raw_ext / fname
@@ -1239,6 +1245,48 @@ class SkillRunner:
                         "validation_status": "unverified",
                         "confidence": "low",
                         "evidence_fingerprint": s.get("value_fingerprint"),
+                    })
+            except Exception:
+                pass
+
+        # Pull interesting content discovery findings
+        cd_file = self.output_dir / "content-discovery" / "interesting-findings.json"
+        if cd_file.exists():
+            try:
+                cd_data = json.loads(cd_file.read_text(encoding="utf-8"))
+                cd_items = cd_data if isinstance(cd_data, list) else cd_data.get("findings", [])
+                for item in cd_items:
+                    if isinstance(item, dict) and ("url" in item or "path" in item):
+                        all_findings.append({
+                            "title": item.get("title") or f"Sensitive Route Discovered: {item.get('path', item.get('url'))}",
+                            "type": "Content Discovery",
+                            "severity": item.get("severity", "Triage Severity: LOW — informational route"),
+                            "url": item.get("url") or f"{self.http.base_url}{item.get('path', '')}",
+                            "source_artifact": str(cd_file),
+                            "notes": item.get("notes") or f"Status: {item.get('status_code')}, Content-Type: {item.get('content_type', '')}",
+                            "status": "candidate",
+                            "validation_status": "unverified",
+                            "confidence": "medium",
+                        })
+            except Exception:
+                pass
+
+        # Pull DOM sink gadgets
+        gad_file = self.output_dir / "js" / "gadgets.json"
+        if gad_file.exists():
+            try:
+                g_data = json.loads(gad_file.read_text(encoding="utf-8"))
+                for g in g_data.get("gadgets", []):
+                    all_findings.append({
+                        "title": f"DOM Sink Gadget: {g.get('type')}",
+                        "type": "DOM XSS",
+                        "severity": g.get("severity", "Triage Severity: MEDIUM — pending human review"),
+                        "url": f"{self.http.base_url}/{g.get('source_file', '')}",
+                        "source_artifact": str(gad_file),
+                        "notes": f"DOM gadget pattern '{g.get('type')}' in {g.get('source_file')}.",
+                        "status": "candidate",
+                        "validation_status": "unverified",
+                        "confidence": "medium",
                     })
             except Exception:
                 pass

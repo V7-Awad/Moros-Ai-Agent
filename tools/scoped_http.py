@@ -10,10 +10,32 @@ import urllib.request
 from typing import Any, Dict, Optional
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Do not silently follow redirects outside the selected assessment host."""
+def is_in_target_scope(host: str, target: str) -> bool:
+    """Return True if host is the exact target or a direct subdomain/www-equivalent."""
+    h = (host or "").lower().rstrip(".")
+    t = (target or "").lower().rstrip(".")
+    t_bare = t.removeprefix("www.")
+    h_bare = h.removeprefix("www.")
+    return h == t or h_bare == t_bare or h.endswith("." + t_bare)
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow redirects safely within the authorized target domain."""
+
+    def __init__(self, target_host: str):
+        super().__init__()
+        self.target_host = target_host
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urllib.parse.urlparse(newurl)
+        if parsed.scheme in {"http", "https"} and is_in_target_scope(parsed.hostname, self.target_host):
+            return urllib.request.Request(
+                newurl,
+                headers=dict(req.headers),
+                origin_req_host=req.origin_req_host,
+                unverifiable=req.unverifiable,
+                method=req.get_method(),
+            )
         return None
 
 
@@ -34,7 +56,7 @@ class ScopedHttpClient:
         self.request_count = 0
         self._last_request_at = 0.0
         self._lock = threading.Lock()
-        self._opener = urllib.request.build_opener(_NoRedirect())
+        self._opener = urllib.request.build_opener(_SafeRedirectHandler(self.target))
 
     def request(self, url_or_path: str, method: str = "GET", params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         method = method.upper()
@@ -45,9 +67,9 @@ class ScopedHttpClient:
         url = urllib.parse.urljoin(self.base_url + "/", raw)
         parsed = urllib.parse.urlparse(url)
         if (parsed.scheme not in {"http", "https"} or not parsed.hostname
-                or parsed.hostname.lower().rstrip(".") != self.target
+                or not is_in_target_scope(parsed.hostname, self.target)
                 or parsed.username or parsed.password or parsed.port not in {None, 80, 443}):
-            return {"status": "blocked", "reason": "URL is outside the exact target host or uses a disallowed port."}
+            return {"status": "blocked", "reason": "URL is outside the authorized target domain or uses a disallowed port."}
 
         if params:
             query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
