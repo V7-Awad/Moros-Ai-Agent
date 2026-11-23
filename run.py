@@ -122,6 +122,18 @@ Examples:
                         help="List all dynamically installed skills in skills/ and exit")
     parser.add_argument("--max-subagents", type=int, default=10,
                         help="Maximum autonomous child subagents the agent can spawn (default: 10)")
+    parser.add_argument("--cookie", default=None,
+                        help="Session cookie string for authenticated testing (e.g. 'session=xyz; user_id=123')")
+    parser.add_argument("--auth-header", default=None,
+                        help="Custom authorization header (e.g. 'Authorization: Bearer eyJ...')")
+    parser.add_argument("--auth-file", default=None,
+                        help="Path to JSON file containing auth headers/cookies")
+    parser.add_argument("--in-scope", default=None,
+                        help="Comma-separated list of allowed host patterns (e.g. '*.target.com,target.com')")
+    parser.add_argument("--out-of-scope", default=None,
+                        help="Comma-separated list of forbidden host patterns (e.g. 'blog.target.com,status.target.com')")
+    parser.add_argument("--bug-bounty-id", default=None,
+                        help="Bug bounty identifier to send in X-Bug-Bounty header (e.g. 'hackerone-handle')")
     parser.add_argument("--dashboard", action="store_true",
                         help="Launch local web dashboard viewer")
     parser.add_argument("--port", type=int, default=8080,
@@ -144,6 +156,38 @@ Examples:
         if args.model:
             env_model = prov_info.get("env_model", f"{args.provider.upper()}_MODEL")
             os.environ[env_model] = args.model
+
+    # Configure Authenticated Scanning & Session Credentials
+    if args.cookie:
+        os.environ["MOROS_AUTH_COOKIE"] = args.cookie
+    if args.auth_header:
+        os.environ["MOROS_AUTH_HEADER"] = args.auth_header
+    if args.bug_bounty_id:
+        os.environ["MOROS_BUG_BOUNTY_ID"] = args.bug_bounty_id
+    if args.auth_file:
+        auth_p = Path(args.auth_file)
+        if auth_p.is_file():
+            try:
+                auth_data = json.loads(auth_p.read_text(encoding="utf-8"))
+                if "cookie" in auth_data:
+                    os.environ["MOROS_AUTH_COOKIE"] = str(auth_data["cookie"])
+                if "cookies" in auth_data:
+                    c_str = "; ".join(f"{k}={v}" for k, v in auth_data["cookies"].items()) if isinstance(auth_data["cookies"], dict) else str(auth_data["cookies"])
+                    os.environ["MOROS_AUTH_COOKIE"] = c_str
+                if "authorization" in auth_data:
+                    os.environ["MOROS_AUTH_HEADER"] = f"Authorization: {auth_data['authorization']}"
+                if "headers" in auth_data and isinstance(auth_data["headers"], dict):
+                    for hk, hv in auth_data["headers"].items():
+                        if hk.lower() == "authorization":
+                            os.environ["MOROS_AUTH_HEADER"] = f"{hk}: {hv}"
+            except Exception as e:
+                print(f"⚠️  Warning: Failed to parse --auth-file: {e}")
+
+    # Configure Strict Scope Boundaries
+    if args.in_scope:
+        os.environ["MOROS_IN_SCOPE"] = args.in_scope
+    if args.out_of_scope:
+        os.environ["MOROS_OUT_OF_SCOPE"] = args.out_of_scope
 
     registry = SkillRegistry()
     installed_skills = registry.list_skills()

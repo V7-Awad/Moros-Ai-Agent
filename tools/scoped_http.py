@@ -7,7 +7,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+try:
+    from scope_validator import ScopeValidator
+except ImportError:
+    from tools.scope_validator import ScopeValidator
 
 
 def is_in_target_scope(host: str, target: str) -> bool:
@@ -41,7 +45,10 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 class ScopedHttpClient:
     def __init__(self, target: str, max_requests: int = 150, delay_seconds: float = 0.3,
-                 timeout_seconds: float = 15.0, max_body_bytes: int = 5_242_880):
+                 timeout_seconds: float = 15.0, max_body_bytes: int = 5_242_880,
+                 auth_headers: Optional[Dict[str, str]] = None,
+                 cookies: Optional[str] = None,
+                 scope_validator: Optional[ScopeValidator] = None):
         parsed = urllib.parse.urlparse(target if "://" in target else f"https://{target}")
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError("Target must be an HTTP(S) URL or hostname without credentials")
@@ -58,6 +65,16 @@ class ScopedHttpClient:
         self._lock = threading.Lock()
         self._opener = urllib.request.build_opener(_SafeRedirectHandler(self.target))
 
+        # Authentication & Session support
+        self.auth_headers = dict(auth_headers or {})
+        env_auth = os.environ.get("MOROS_AUTH_HEADER", "").strip()
+        if env_auth and ":" in env_auth:
+            k, v = env_auth.split(":", 1)
+            self.auth_headers[k.strip()] = v.strip()
+
+        self.cookies = cookies or os.environ.get("MOROS_AUTH_COOKIE", "").strip()
+        self.scope_validator = scope_validator or ScopeValidator(self.target)
+
     def request(self, url_or_path: str, method: str = "GET", params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         method = method.upper()
         if method not in {"GET", "HEAD"}:
@@ -66,10 +83,15 @@ class ScopedHttpClient:
         raw = str(url_or_path or "")
         url = urllib.parse.urljoin(self.base_url + "/", raw)
         parsed = urllib.parse.urlparse(url)
-        if (parsed.scheme not in {"http", "https"} or not parsed.hostname
-                or not is_in_target_scope(parsed.hostname, self.target)
-                or parsed.username or parsed.password or parsed.port not in {None, 80, 443}):
-            return {"status": "blocked", "reason": "URL is outside the authorized target domain or uses a disallowed port."}
+
+        # Check host and port
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.port not in {None, 80, 443}:
+            return {"status": "blocked", "reason": "Disallowed port or invalid URL scheme"}
+
+        # Check strict scope rules
+        allowed, reason = self.scope_validator.is_allowed(parsed.hostname)
+        if not allowed:
+            return {"status": "blocked", "reason": reason}
 
         if params:
             query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
@@ -90,6 +112,14 @@ class ScopedHttpClient:
         bug_bounty_id = os.environ.get("MOROS_BUG_BOUNTY_ID", "").strip()
         if bug_bounty_id:
             headers["X-Bug-Bounty"] = bug_bounty_id
+
+        # Attach custom authentication headers
+        if self.auth_headers:
+            headers.update(self.auth_headers)
+
+        # Attach session cookies
+        if self.cookies:
+            headers["Cookie"] = self.cookies
         request = urllib.request.Request(url, headers=headers, method=method)
         started = time.monotonic()
         try:

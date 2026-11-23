@@ -1376,6 +1376,25 @@ class SkillRunner:
             except Exception:
                 pass
 
+        # Generate Automated Reproducible PoC scripts for all actionable findings
+        try:
+            try:
+                from poc_generator import PoCGenerator
+            except ImportError:
+                from tools.poc_generator import PoCGenerator
+
+            poc_gen = PoCGenerator(self.target, self.output_dir)
+            for f in all_findings:
+                if f.get("url"):
+                    try:
+                        pocs = poc_gen.generate_poc(f, custom_headers=getattr(self.http, "auth_headers", None))
+                        f["poc_sh"] = pocs["poc_sh"]
+                        f["poc_py"] = pocs["poc_py"]
+                    except Exception:
+                        pass
+        except Exception as e:
+            self.log_step(skill, "step-02-poc.log", f"PoC generation notice: {e}")
+
         date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
         report_md_file = report_dir / f"hackbot-report-{self.target}-{date_str}.md"
         report_json_file = report_dir / f"hackbot-report-{self.target}-{date_str}.json"
@@ -1389,11 +1408,12 @@ class SkillRunner:
         validated_count = len(all_findings) - candidate_count
         md += "## Executive Summary\n\n"
         md += f"Moros AI processed artifacts for `{self.target}` and recorded **{len(all_findings)} triage items**: **{candidate_count} unverified candidates** and **{validated_count} validated findings**. An empty result means insufficient observed evidence, not proof of absence.\n\n"
-        md += "| Finding Title | Validation | Severity | Affected URL |\n|---|---|---|---|\n"
+        md += "| Finding Title | Validation | Severity | Affected URL | PoC Script |\n|---|---|---|---|---|\n"
         for f in all_findings:
-            md += f"| {f.get('title')} | {f.get('validation_status', 'unverified')} | {f.get('severity', 'Unassessed')} | `{f.get('url', '-')}` |\n"
+            poc_link = f"`{f.get('poc_sh')}`" if f.get('poc_sh') else "-"
+            md += f"| {f.get('title')} | {f.get('validation_status', 'unverified')} | {f.get('severity', 'Unassessed')} | `{f.get('url', '-')}` | {poc_link} |\n"
 
-        md += "\n## Evidence and Triage Items\n\n"
+        md += "\n## Evidence, Reproduction PoCs & Triage Items\n\n"
         for idx, f in enumerate(all_findings, 1):
             md += f"### {idx}. {f.get('title')}\n"
             md += f"- **Validation:** `{f.get('validation_status', 'unverified')}`\n"
@@ -1402,6 +1422,10 @@ class SkillRunner:
             md += f"- **Target URL:** `{f.get('url')}`\n"
             if f.get("source_artifact"):
                 md += f"- **Source artifact:** `{f.get('source_artifact')}`\n"
+            if f.get("poc_sh"):
+                md += f"- **cURL Reproduction PoC:** `{f.get('poc_sh')}`\n"
+            if f.get("poc_py"):
+                md += f"- **Python Reproduction Script:** `{f.get('poc_py')}`\n"
             for evidence in f.get("evidence", []):
                 md += f"- **Evidence:** `{evidence.get('evidence_id', 'unlinked')}` from `{evidence.get('source_artifact', 'unknown source')}` (SHA256: `{evidence.get('source_sha256', 'unavailable')}`)\n"
             if f.get("curl"):
@@ -1423,6 +1447,30 @@ class SkillRunner:
             write_sarif_report(sarif_file, all_findings, target=self.target)
         except Exception as e:
             self.log_step(skill, "step-08-sarif-error.log", f"SARIF export failed: {e}")
+
+        # Send Webhook Alert if configured
+        try:
+            try:
+                from alert_dispatcher import AlertDispatcher
+            except ImportError:
+                from tools.alert_dispatcher import AlertDispatcher
+
+            dispatcher = AlertDispatcher()
+            if dispatcher.is_configured():
+                high_count = sum(any(s in str(f.get("severity", "")).upper() for s in ["HIGH", "CRITICAL"]) for f in all_findings)
+                dispatcher.send_alert(
+                    title=f"Assessment Complete: {self.target}",
+                    message=f"Moros AI recorded {len(all_findings)} triage findings ({high_count} High/Critical).",
+                    severity="HIGH" if high_count > 0 else "INFO",
+                    fields={
+                        "Target": self.target,
+                        "Total Findings": str(len(all_findings)),
+                        "High/Critical": str(high_count),
+                        "Report": report_md_file.name
+                    }
+                )
+        except Exception as e:
+            self.log_step(skill, "step-09-alert-error.log", f"Alert dispatch notice: {e}")
 
         self.log_step(skill, "step-07-full-report.log", f"Generated deliverable report: {report_md_file.name}")
         return {

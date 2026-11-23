@@ -215,10 +215,17 @@ class AgentRunner:
             store.append(agent_id, "assistant", llm_response, step=step, run_id=context.run_id)
             history.append({"role": "assistant", "content": llm_response})
 
+            # Live Terminal Visualizer: Display Thought
+            thought_match = re.search(r"Thought:\s*(.+?)(?=\nAction:|\nFinal Answer:|\Z)", llm_response, re.DOTALL | re.IGNORECASE)
+            if thought_match:
+                t_str = thought_match.group(1).strip().replace("\n", " ")
+                print(f"  🧠 \033[36m[{agent_id.upper()} THOUGHT]\033[0m {t_str[:160]}...")
+
             # Check for Final Answer
             final_match = re.search(r"Final Answer:\s*(.+)", llm_response, re.DOTALL | re.IGNORECASE)
             if final_match:
                 final_text = final_match.group(1).strip()
+                print(f"  🎯 \033[35m[{agent_id.upper()} FINAL ANSWER]\033[0m {final_text[:200]}")
                 reasoning_steps.append(f"Step {step}: Concluded with final answer.")
                 return AgentResult(
                     status="completed",
@@ -233,8 +240,6 @@ class AgentRunner:
             # Extract Action: tool_name(...)
             action_match = re.search(r"Action:\s*([a-zA-Z0-9_-]+)\s*\((.*?)\)", llm_response, re.DOTALL)
             if not action_match:
-                # No tool called, extract general thought
-                thought_match = re.search(r"Thought:\s*(.+)", llm_response, re.DOTALL)
                 thought_text = thought_match.group(1).strip() if thought_match else llm_response.strip()
                 reasoning_steps.append(f"Step {step}: {thought_text[:120]}...")
                 current_prompt = "Observation: No tool action was specified. If you are finished, output 'Final Answer: <summary>'. Otherwise, call a valid Action."
@@ -245,12 +250,17 @@ class AgentRunner:
             args_str = action_match.group(2).strip()
             parsed_args = self._parse_tool_args(args_str)
 
+            print(f"  ⚡ \033[33m[{agent_id.upper()} ACTION]\033[0m \033[1m{tool_name}\033[0m({args_str[:120]})")
             reasoning_steps.append(f"Step {step}: Invoked {tool_name}")
             store.append(agent_id, "tool_call", f"Calling {tool_name} with args {parsed_args}", tool=tool_name, run_id=context.run_id)
 
             # Execute tool safely via registry
             tool_output = tools.execute(tool_name, parsed_args, timeout_seconds=context.budget.get("timeout_seconds", 120))
             obs_str = json.dumps(tool_output, default=str)
+
+            status_icon = "✅" if tool_output.get("status") == "success" else "⚠️"
+            obs_preview = obs_str[:140].replace("\n", " ")
+            print(f"  👁️ \033[32m[{agent_id.upper()} OBSERVATION {status_icon}]\033[0m {obs_preview}...")
 
             # Collect artifacts / findings if returned
             if tool_output.get("status") == "success":

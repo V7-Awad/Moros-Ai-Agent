@@ -32,6 +32,7 @@ from llm_client import LLMClient
 from skill_runner import SkillRunner
 from conversation_store import ConversationStore
 from run_manager import RunManager
+from scope_validator import ScopeValidator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -119,12 +120,15 @@ class HackbotOrchestrator:
         # Initialize durable run tracking.
         self.run_manager = RunManager(self.target_dir)
         self.current_run = None
+        self.scope_validator = ScopeValidator(self.target, target_dir=self.target_dir)
 
         # "default" must auto-detect configured providers; model labels are not providers.
         self.llm = self._llm_for_model(self.models[0] if self.models else "default")
         self.runner = SkillRunner(self.target, self.target_dir, self.llm,
                                   max_http_requests=self.max_http_requests,
                                   request_delay=self.request_delay)
+        if hasattr(self.runner, "http"):
+            self.runner.http.scope_validator = self.scope_validator
 
     @staticmethod
     def _llm_for_model(model_name: str) -> LLMClient:
