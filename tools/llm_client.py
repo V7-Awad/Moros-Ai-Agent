@@ -213,8 +213,11 @@ class LLMClient:
             # Route all known OpenAI-compatible providers
             info = KNOWN_PROVIDERS[selected]
             self.provider = "openai"
-            self.base_url = self.base_url or os.environ.get("OPENAI_BASE_URL") or info["base_url"]
-            self.api_key = self.api_key or os.environ.get(info["env_key"]) or os.environ.get("OPENAI_API_KEY")
+            prov_env_base = os.environ.get(f"{selected.upper()}_BASE_URL")
+            if selected == "openai":
+                prov_env_base = prov_env_base or os.environ.get("OPENAI_BASE_URL")
+            self.base_url = self.base_url or prov_env_base or info["base_url"]
+            self.api_key = self.api_key or os.environ.get(info["env_key"]) or (os.environ.get("OPENAI_API_KEY") if selected == "openai" else None)
             self.model = self.model or os.environ.get(info["env_model"]) or info["default_model"]
         elif selected in ["custom", "openai_compatible"] or self.base_url or os.environ.get("OPENAI_BASE_URL"):
             # Custom OpenAI compatible gateway (LM Studio, vLLM, LocalAI, etc.)
@@ -225,7 +228,7 @@ class LLMClient:
         elif selected != "none":
             # Universal fallback: Any arbitrary provider name with an API key or base URL is routed as OpenAI-compatible
             self.provider = "openai"
-            self.base_url = self.base_url or os.environ.get(f"{selected.upper()}_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+            self.base_url = self.base_url or os.environ.get(f"{selected.upper()}_BASE_URL") or "https://api.openai.com/v1"
             self.api_key = self.api_key or os.environ.get(f"{selected.upper()}_API_KEY") or os.environ.get("OPENAI_API_KEY")
             self.model = self.model or os.environ.get(f"{selected.upper()}_MODEL") or "default"
         else:
@@ -244,7 +247,7 @@ class LLMClient:
         """Return True if an LLM backend is configured and ready."""
         return self.provider != "none" and bool(self.api_key or self.provider == "ollama")
 
-    def complete(self, prompt: str, system_prompt: str = "", temperature: float = 0.2, max_tokens: int = 4000) -> Optional[str]:
+    def complete(self, prompt: str, system_prompt: str = "", temperature: float = 0.2, max_tokens: int = 8192) -> Optional[str]:
         """Generate text completion from the configured LLM backend."""
         if not self.is_available():
             logger.debug("No LLM API key configured — skipping model inference.")
@@ -319,55 +322,80 @@ class LLMClient:
             return data["content"][0]["text"]
 
     def _call_gemini(self, prompt: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
-        model_name = self.model or "gemini-3.8-flash"
-        payload = {
-            "model": model_name,
-            "input": prompt,
-            "store": False,
-            "generation_config": {
-                "temperature": temperature,
-                "max_output_tokens": max_tokens,
-                "thinking_level": "low",
-            },
-        }
-        if system_prompt:
-            payload["system_instruction"] = system_prompt
+        primary_model = self.model or "gemini-3.8-flash"
+        # Candidate models to try in order on capacity spikes / deprecation
+        candidate_models = [primary_model]
+        if "3.8" in primary_model and "gemini-3.5-flash" not in candidate_models:
+            candidate_models.append("gemini-3.5-flash")
+        elif "3.5" in primary_model and "gemini-3.8-flash" not in candidate_models:
+            candidate_models.append("gemini-3.8-flash")
 
         url = "https://generativelanguage.googleapis.com/v1beta/interactions"
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "x-goog-api-key": self.api_key,
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            raw_error = exc.read(4096).decode("utf-8", errors="replace")
-            try:
-                parsed_error = json.loads(raw_error)
-                error = parsed_error.get("error", parsed_error)
-                details = error.get("message", raw_error) if isinstance(error, dict) else str(error)
-            except json.JSONDecodeError:
-                details = raw_error or exc.reason
-            raise RuntimeError(f"Gemini API HTTP {exc.code}: {str(details)[:400]}") from None
-        if data.get("status") != "completed":
-            details = data.get("errors") or data.get("status") or "no completed response"
-            raise RuntimeError(f"Gemini interaction did not complete: {details}")
+        last_exc = None
 
-        output = []
-        for step in data.get("steps", []):
-            if step.get("type") == "model_output":
-                for part in step.get("content", []):
-                    if part.get("type") == "text" and part.get("text"):
-                        output.append(part["text"])
-        if not output:
-            raise RuntimeError("Gemini returned no text output")
-        return "\n".join(output)
+        for model_name in candidate_models:
+            payload = {
+                "model": model_name,
+                "input": prompt,
+                "store": False,
+                "generation_config": {
+                    "temperature": temperature,
+                    "max_output_tokens": max_tokens,
+                    "thinking_level": "low",
+                },
+            }
+            if system_prompt:
+                payload["system_instruction"] = system_prompt
+
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": self.api_key,
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                raw_error = exc.read(4096).decode("utf-8", errors="replace")
+                try:
+                    parsed_error = json.loads(raw_error)
+                    error = parsed_error.get("error", parsed_error)
+                    details = error.get("message", raw_error) if isinstance(error, dict) else str(error)
+                except json.JSONDecodeError:
+                    details = raw_error or exc.reason
+                # If 503 (high demand) or 404 (model not available) and we have fallbacks, try next
+                if exc.code in {503, 404} and model_name != candidate_models[-1]:
+                    logger.warning(f"Gemini {model_name} HTTP {exc.code} ({str(details)[:150]}); trying fallback model {candidate_models[-1]}...")
+                    last_exc = RuntimeError(f"Gemini API HTTP {exc.code}: {str(details)[:400]}")
+                    continue
+                raise RuntimeError(f"Gemini API HTTP {exc.code}: {str(details)[:400]}") from None
+            except (TimeoutError, urllib.error.URLError) as exc:
+                if model_name != candidate_models[-1]:
+                    logger.warning(f"Gemini {model_name} network/timeout issue; trying fallback model {candidate_models[-1]}...")
+                    last_exc = exc
+                    continue
+                raise
+
+            if data.get("status") != "completed":
+                details = data.get("errors") or data.get("status") or "no completed response"
+                raise RuntimeError(f"Gemini interaction did not complete: {details}")
+
+            output = []
+            for step in data.get("steps", []):
+                if step.get("type") == "model_output":
+                    for part in step.get("content", []):
+                        if part.get("type") == "text" and part.get("text"):
+                            output.append(part["text"])
+            if output:
+                return "\n".join(output)
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("Gemini returned no text output")
 
     def _call_ollama(self, prompt: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
         url = f"{(self.base_url or 'http://localhost:11434').rstrip('/')}/api/generate"

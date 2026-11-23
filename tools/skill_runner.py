@@ -845,16 +845,236 @@ class SkillRunner:
                         "notes": "Endpoint-shape heuristic only. No outbound request or SSRF behavior was observed."
                     })
 
+        elif skill_name == "xss-dom":
+            # Scan collected JS bundles for dangerous DOM sources and sinks
+            js_dir = self.output_dir / "js"
+            js_candidates = list((js_dir / "beautified").rglob("*.js")) or list((js_dir / "raw").rglob("*.js"))
+            sink_patterns = [
+                ("innerHTML", re.compile(r'\.innerHTML\s*=', re.IGNORECASE)),
+                ("outerHTML", re.compile(r'\.outerHTML\s*=', re.IGNORECASE)),
+                ("document.write", re.compile(r'document\.(write|writeln)\s*\(', re.IGNORECASE)),
+                ("insertAdjacentHTML", re.compile(r'\.insertAdjacentHTML\s*\(', re.IGNORECASE)),
+                ("eval", re.compile(r'\beval\s*\(', re.IGNORECASE)),
+                ("setTimeout", re.compile(r'\bsetTimeout\s*\(\s*["\'`]', re.IGNORECASE)),
+                ("location.href", re.compile(r'location\.(href|assign|replace)\s*=', re.IGNORECASE)),
+            ]
+            source_patterns = [
+                ("location.search", re.compile(r'location\.(search|hash|pathname|href)', re.IGNORECASE)),
+                ("document.URL", re.compile(r'document\.(URL|documentURI|referrer)', re.IGNORECASE)),
+                ("window.name", re.compile(r'window\.name', re.IGNORECASE)),
+            ]
+            for js_path in js_candidates[:60]:
+                try:
+                    content = js_path.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    continue
+                for sink_name, sink_re in sink_patterns:
+                    matches = list(sink_re.finditer(content))
+                    if not matches:
+                        continue
+                    m = matches[0]
+                    line_no = content[:m.start()].count("\n") + 1
+                    snippet = content[max(0, m.start() - 60):min(len(content), m.end() + 60)].strip()
+                    has_source = any(src_re.search(content) for _, src_re in source_patterns)
+                    evidence = self.record_candidate_evidence(
+                        skill_name, "DOM XSS", js_path, {"file": js_path.name, "sink": sink_name, "line": line_no},
+                        f"Potentially dangerous DOM sink '{sink_name}' identified at line {line_no} in {js_path.name}.",
+                    )
+                    findings.append({
+                        "title": f"Potential DOM XSS Sink '{sink_name}' in {js_path.name}",
+                        "type": "DOM XSS",
+                        "url": f"{self.http.base_url}/{js_path.name}#L{line_no}",
+                        "sink": sink_name,
+                        "line": line_no,
+                        "snippet": snippet,
+                        "has_source_co_located": has_source,
+                        "status": "candidate",
+                        "validation_status": "unverified",
+                        "confidence": "medium" if has_source else "low",
+                        "evidence_ids": [evidence["evidence_id"]],
+                        "evidence": [evidence],
+                        "severity": "Triage Severity: UNASSESSED — pending evidence and human review",
+                        "notes": f"DOM sink '{sink_name}' detected. Static analysis candidate; manual context trace to source is required."
+                    })
+
+        elif skill_name == "xss-stored":
+            storage_params = {"comment", "message", "body", "bio", "content", "text", "description", "title", "name", "feedback", "review", "note", "status", "profile", "post"}
+            for ep in endpoints:
+                raw_params = ep.get("parameters", [])
+                params = [str(p.get("name", "") if isinstance(p, dict) else p).lower() for p in raw_params]
+                matched = [p for p in params if p in storage_params]
+                url = ep.get("url") or (str(ep.get("base_url", "")).rstrip("/") + str(ep.get("path", "")))
+                is_storage_route = any(w in url.lower() for w in ["comment", "feedback", "review", "profile", "message", "post", "ticket"])
+                if matched or is_storage_route:
+                    param_name = matched[0] if matched else "path_context"
+                    evidence = self.record_candidate_evidence(
+                        skill_name, "Stored XSS", Path(ep.get("_source_artifact", ep_file)), ep,
+                        f"Stored input candidate parameter '{param_name}' or route '{url}' identified.",
+                    )
+                    findings.append({
+                        "title": f"Stored Input Candidate on {url}",
+                        "type": "Stored XSS",
+                        "url": url,
+                        "parameter": param_name,
+                        "status": "candidate",
+                        "validation_status": "unverified",
+                        "confidence": "low",
+                        "evidence_ids": [evidence["evidence_id"]],
+                        "evidence": [evidence],
+                        "severity": "Triage Severity: UNASSESSED — pending evidence and human review",
+                        "notes": "Identified parameter or endpoint structure indicative of persistent data storage. No stored payload was submitted."
+                    })
+
+        elif skill_name == "xss-blind":
+            blind_params = {"contact", "feedback", "support", "ticket", "inquiry", "report", "bug", "message", "subject", "email_body", "user_agent", "referrer"}
+            callback_listener = os.environ.get("MOROS_CALLBACK_URL", "").strip()
+            for ep in endpoints:
+                raw_params = ep.get("parameters", [])
+                params = [str(p.get("name", "") if isinstance(p, dict) else p).lower() for p in raw_params]
+                matched = [p for p in params if p in blind_params]
+                url = ep.get("url") or (str(ep.get("base_url", "")).rstrip("/") + str(ep.get("path", "")))
+                is_blind_route = any(w in url.lower() for w in ["contact", "support", "feedback", "report", "ticket", "help"])
+                if matched or is_blind_route:
+                    param_name = matched[0] if matched else "contact_context"
+                    evidence = self.record_candidate_evidence(
+                        skill_name, "Blind XSS", Path(ep.get("_source_artifact", ep_file)), ep,
+                        f"Out-of-band / asynchronous input candidate on parameter '{param_name}'.",
+                    )
+                    findings.append({
+                        "title": f"Blind XSS Candidate Entry Point on {url}",
+                        "type": "Blind XSS",
+                        "url": url,
+                        "parameter": param_name,
+                        "callback_listener_configured": bool(callback_listener),
+                        "status": "candidate",
+                        "validation_status": "unverified",
+                        "confidence": "low",
+                        "evidence_ids": [evidence["evidence_id"]],
+                        "evidence": [evidence],
+                        "severity": "Triage Severity: UNASSESSED — pending evidence and human review",
+                        "notes": "Candidate for asynchronous / admin-rendered XSS. Safe OOB monitoring recommended."
+                    })
+
+        elif skill_name == "ssrf-post-exploit":
+            ssrf_cand_file = self.output_dir / "findings" / "ssrf-identify" / "candidates-ssrf-identify.json"
+            if not ssrf_cand_file.is_file():
+                ssrf_cand_file = v_dir / "candidates-ssrf-identify.json"
+            upstream_candidates = []
+            if ssrf_cand_file.is_file():
+                try:
+                    c_data = json.loads(ssrf_cand_file.read_text(encoding="utf-8"))
+                    upstream_candidates = c_data.get("findings", [])
+                except Exception:
+                    pass
+            for cand in upstream_candidates:
+                cand_url = cand.get("url", "")
+                param = cand.get("parameter", "")
+                evidence = self.record_candidate_evidence(
+                    skill_name, "SSRF Post-Exploit", ssrf_cand_file, cand,
+                    f"Generated remediation & post-exploitation assessment vectors for SSRF candidate {cand_url} (param: {param}).",
+                )
+                findings.append({
+                    "title": f"SSRF Impact Analysis & Boundary Vectors for {cand_url}",
+                    "type": "SSRF Post-Exploit",
+                    "url": cand_url,
+                    "parameter": param,
+                    "boundary_vectors": [
+                        {"target": "AWS Metadata (IMDSv1)", "url": "http://169.254.169.254/latest/meta-data/"},
+                        {"target": "GCP Metadata", "url": "http://metadata.google.internal/computeMetadata/v1/"},
+                        {"target": "Localhost Services", "url": "http://127.0.0.1:8080/"},
+                        {"target": "RFC 1918 Internal Ranges", "cidr": "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16"},
+                    ],
+                    "status": "candidate",
+                    "validation_status": "unverified",
+                    "confidence": "low",
+                    "evidence_ids": [evidence["evidence_id"]],
+                    "evidence": [evidence],
+                    "severity": "Triage Severity: UNASSESSED — pending evidence and human review",
+                    "notes": "Post-exploitation boundary map generated. Active metadata probes require explicit scope authorization and HITL approval."
+                })
+
+        elif skill_name == "idp-race-condition":
+            race_tokens = ["oauth", "token", "authorize", "callback", "exchange", "coupon", "redeem", "transfer", "invite", "mfa", "otp", "claim", "gift"]
+            for ep in endpoints:
+                url = ep.get("url") or (str(ep.get("base_url", "")).rstrip("/") + str(ep.get("path", "")))
+                if any(w in url.lower() for w in race_tokens):
+                    evidence = self.record_candidate_evidence(
+                        skill_name, "Race Condition", Path(ep.get("_source_artifact", ep_file)), ep,
+                        f"State mutation or one-time redemption route '{url}' identified as race condition candidate.",
+                    )
+                    findings.append({
+                        "title": f"Candidate IdP / State Mutation Race Condition on {url}",
+                        "type": "Race Condition",
+                        "url": url,
+                        "status": "candidate",
+                        "validation_status": "unverified",
+                        "confidence": "low",
+                        "evidence_ids": [evidence["evidence_id"]],
+                        "evidence": [evidence],
+                        "severity": "Triage Severity: UNASSESSED — pending evidence and human review",
+                        "notes": "Single-use token or stateful exchange route identified. Concurrency testing requires authorized multi-request burst evaluation."
+                    })
+
+        elif skill_name == "auth-password-reset-bruteforce":
+            reset_tokens = ["forgot", "reset", "recover", "verify-otp", "verify-code", "challenge", "password_reset"]
+            for ep in endpoints:
+                url = ep.get("url") or (str(ep.get("base_url", "")).rstrip("/") + str(ep.get("path", "")))
+                if any(w in url.lower() for w in reset_tokens):
+                    parsed = urllib.parse.urlparse(url if "://" in url else urllib.parse.urljoin(self.http.base_url + "/", url))
+                    clean_url = urllib.parse.urlunparse(parsed._replace(query="", fragment=""))
+                    headers_found = {}
+                    if parsed.hostname == self.http.target:
+                        probe = self.http.request(clean_url, method="HEAD")
+                        headers_found = probe.get("headers", {})
+                    has_ratelimit = any(k.startswith(("x-ratelimit", "retry-after")) for k in headers_found)
+                    evidence = self.record_candidate_evidence(
+                        skill_name, "Password Reset Flow", Path(ep.get("_source_artifact", ep_file)), ep,
+                        f"Password reset / recovery route '{url}' identified (Rate limit headers present: {has_ratelimit}).",
+                    )
+                    findings.append({
+                        "title": f"Authentication Recovery Endpoint: {url}",
+                        "type": "Auth Password Reset",
+                        "url": url,
+                        "rate_limiting_detected": has_ratelimit,
+                        "status": "candidate",
+                        "validation_status": "unverified",
+                        "confidence": "low" if has_ratelimit else "medium",
+                        "evidence_ids": [evidence["evidence_id"]],
+                        "evidence": [evidence],
+                        "severity": "Triage Severity: UNASSESSED — pending evidence and human review",
+                        "notes": "Password reset flow evaluated. Anti-automation, token entropy, and rate limiting verification recommended."
+                    })
+
         out_findings = v_dir / f"candidates-{skill_name}.json"
         if skill_name == "xss-reflected":
             requests_used = self.http.request_count - request_count_before
             result_status = "COMPLETED"
             summary = (f"Sent {requests_used} same-host GET marker probes. "
                        f"Observed {len(findings)} harmless marker reflections; none is confirmed as executable XSS.")
+        elif skill_name == "xss-dom":
+            result_status = "COMPLETED"
+            summary = (f"Analyzed JavaScript artifacts for DOM XSS sources & sinks. "
+                       f"Identified {len(findings)} candidate sink locations.")
+        elif skill_name in ["xss-stored", "xss-blind"]:
+            result_status = "CANDIDATES_ONLY"
+            summary = (f"Recorded {len(findings)} candidate entry points for {skill_name}. "
+                       "Active payload storage / OOB callbacks were not triggered.")
         elif skill_name == "ssrf-identify":
             result_status = "CANDIDATES_ONLY"
             summary = (f"Recorded {len(findings)} URL-like parameter candidates. "
                        "No SSRF callback or server-side fetch test was sent.")
+        elif skill_name == "ssrf-post-exploit":
+            result_status = "COMPLETED"
+            summary = (f"Mapped boundary exploitation vectors for {len(findings)} SSRF candidates. "
+                       "No unauthorized cloud metadata egress was attempted.")
+        elif skill_name == "idp-race-condition":
+            result_status = "CANDIDATES_ONLY"
+            summary = (f"Identified {len(findings)} state mutation / token redemption race condition candidates. "
+                       "No concurrent request flooding was executed.")
+        elif skill_name == "auth-password-reset-bruteforce":
+            requests_used = self.http.request_count - request_count_before
+            result_status = "COMPLETED"
+            summary = (f"Evaluated {len(findings)} password reset and recovery mechanisms ({requests_used} HEAD probes).")
         else:
             result_status = "NOT_IMPLEMENTED"
             summary = "This skill is not implemented as an active check yet; no vulnerability test was performed."
