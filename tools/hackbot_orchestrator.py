@@ -248,8 +248,16 @@ class HackbotOrchestrator:
             self.run_manager.update_skill_progress(run_id, b_skill, status="blocked", summary=reason)
             self._log_event(b_skill, "BLOCKED", reason)
 
-        # Step 4: Order skills according to dependency chain
-        ordered_skills = [s for s in SKILL_ORDER if s in self.skills and s not in blocked_skills]
+        # Step 4: Order skills according to dynamic dependency chain
+        reg_order = SkillRegistry().get_execution_order(self.skills)
+        ordered_skills = [s for s in reg_order if s in self.skills and s not in blocked_skills]
+        for s in self.skills:
+            if s not in ordered_skills and s not in blocked_skills and s not in ("review-skill", "report-conglomeration"):
+                ordered_skills.append(s)
+        if "review-skill" in self.skills and "review-skill" not in ordered_skills and "review-skill" not in blocked_skills:
+            ordered_skills.append("review-skill")
+        if "report-conglomeration" in self.skills and "report-conglomeration" not in ordered_skills and "report-conglomeration" not in blocked_skills:
+            ordered_skills.append("report-conglomeration")
         logger.info(f"Execution order: {' → '.join(ordered_skills)}")
 
         # Step 5: Execute each scheduled skill

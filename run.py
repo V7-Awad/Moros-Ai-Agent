@@ -26,6 +26,8 @@ PROJECT_ROOT = Path(__file__).parent.resolve()
 sys.path.insert(0, str(PROJECT_ROOT / "tools"))
 
 from hackbot_orchestrator import HackbotOrchestrator, SKILL_ORDER
+from skill_registry import SkillRegistry
+from llm_client import load_dotenv_if_present, KNOWN_PROVIDERS
 
 
 BANNER = r"""
@@ -110,6 +112,16 @@ Examples:
                         help="Show execution plan without running anything")
     parser.add_argument("--check", action="store_true",
                         help="Check prerequisites only")
+    parser.add_argument("--provider", choices=list(KNOWN_PROVIDERS.keys()) + ["ollama"], default=None,
+                        help="LLM provider for agentic reasoning (e.g. deepseek, openai, anthropic, groq)")
+    parser.add_argument("--api-key", default=None,
+                        help="API key for the selected provider (e.g. sk-...)")
+    parser.add_argument("--model", default=None,
+                        help="Model name to use (e.g. deepseek-chat, deepseek-reasoner)")
+    parser.add_argument("--list-skills", action="store_true",
+                        help="List all dynamically installed skills in skills/ and exit")
+    parser.add_argument("--max-subagents", type=int, default=10,
+                        help="Maximum autonomous child subagents the agent can spawn (default: 10)")
     parser.add_argument("--dashboard", action="store_true",
                         help="Launch local web dashboard viewer")
     parser.add_argument("--port", type=int, default=8080,
@@ -120,6 +132,33 @@ Examples:
                         help=argparse.SUPPRESS)
 
     args = parser.parse_args()
+    load_dotenv_if_present()
+
+    # Configure provider overrides if specified on CLI
+    if args.provider:
+        os.environ["MOROS_LLM_PROVIDER"] = args.provider
+        prov_info = KNOWN_PROVIDERS.get(args.provider, {})
+        if args.api_key:
+            env_key = prov_info.get("env_key", f"{args.provider.upper()}_API_KEY")
+            os.environ[env_key] = args.api_key
+        if args.model:
+            env_model = prov_info.get("env_model", f"{args.provider.upper()}_MODEL")
+            os.environ[env_model] = args.model
+
+    registry = SkillRegistry()
+    installed_skills = registry.list_skills()
+    all_skill_ids = [s["id"] for s in installed_skills]
+
+    # Handle --list-skills
+    if args.list_skills:
+        print("\n📦 Installed Security Skills in Moros AI:")
+        print(f"{'Skill ID':<32} {'Category':<22} {'Type'}")
+        print("-" * 68)
+        for s in installed_skills:
+            stype = "Custom" if s.get("is_custom") else "Core"
+            print(f"{s['id']:<32} {s.get('category', 'Offensive'):<22} {stype}")
+        print(f"\nTotal: {len(installed_skills)} skills available.\n")
+        sys.exit(0)
 
     # Check dashboard flag or subcommands
     if args.dashboard or args.command == "view":
@@ -173,14 +212,14 @@ Examples:
         elif args.scan_mode == "passive":
             skills = ["recon-subdomain", "api-spec-discovery", "js-discover", "js-analyze", "report-conglomeration"]
         else:
-            skills = list(SKILL_ORDER)
+            skills = registry.get_execution_order()
     else:
         skills = [s.strip() for s in args.skills.split(",")]
-        # Validate skill names
+        # Validate skill names against all dynamically discovered skills
         for s in skills:
-            if s not in SKILL_ORDER:
-                print(f"\n❌ Unknown skill: {s}")
-                print(f"   Available skills: {', '.join(SKILL_ORDER)}")
+            if s not in all_skill_ids:
+                print(f"\n❌ Unknown skill: '{s}'")
+                print(f"   Available skills ({len(all_skill_ids)}): {', '.join(all_skill_ids)}")
                 sys.exit(1)
 
     # Parse models

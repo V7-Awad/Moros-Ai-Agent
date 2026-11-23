@@ -320,3 +320,207 @@ class AgentRunner:
             val = m[1] or m[2] or m[3]
             args[k] = val
         return args
+
+
+def build_default_agent_tools(
+    context: AgentContext,
+    llm_client: Optional[LLMClient] = None,
+    allow_subagents: bool = True,
+    max_subagents: int = 5,
+) -> ToolRegistry:
+    """
+    Constructs a full-featured offensive security toolkit for Moros AI agents.
+    Provides HTTP, Code Search, Endpoint Discovery, Finding Recording, and
+    Dynamic Autonomous Subagent Spawning.
+    """
+    registry = ToolRegistry()
+
+    # Tool 1: http_get
+    def http_get(url: str, headers: Dict[str, str] = None) -> Dict[str, Any]:
+        """Perform a scoped GET request against a target URL."""
+        from scoped_http import ScopedHttpClient, is_in_target_scope
+        import urllib.parse
+        parsed = urllib.parse.urlparse(url if "://" in url else f"https://{url}")
+        host = (parsed.hostname or "").lower()
+        if not is_in_target_scope(host, context.target):
+            return {"status": "error", "error": f"URL host '{host}' is outside authorized target scope '{context.target}'"}
+
+        try:
+            client = ScopedHttpClient(target=context.target, max_requests=100, delay_seconds=0.2)
+            resp = client.get(url, headers=headers or {})
+            return {
+                "status": "success",
+                "status_code": resp.get("status_code"),
+                "url": resp.get("url", url),
+                "headers": resp.get("headers", {}),
+                "body_preview": (resp.get("body", "") or "")[:1500],
+                "body_len": len(resp.get("body", "") or ""),
+            }
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+    registry.register(
+        "http_get",
+        http_get,
+        "Fetch a URL via HTTP GET within authorized target scope.",
+        {"url": "Target URL to request", "headers": "Optional request headers dictionary"}
+    )
+
+    # Tool 2: search_code
+    def search_code(query: str, file_pattern: str = "*.js") -> Dict[str, Any]:
+        """Search beautified JavaScript or output files for security patterns or keywords."""
+        out_dir = context.target_dir / "output"
+        matches = []
+        if out_dir.exists():
+            for f in out_dir.rglob(file_pattern):
+                if f.is_file() and f.stat().st_size < 10_000_000:
+                    try:
+                        content = f.read_text(encoding="utf-8", errors="ignore")
+                        for line_num, line in enumerate(content.splitlines(), start=1):
+                            if query.lower() in line.lower():
+                                matches.append({
+                                    "file": f.name,
+                                    "line": line_num,
+                                    "snippet": line.strip()[:200],
+                                })
+                                if len(matches) >= 25:
+                                    break
+                    except Exception:
+                        continue
+                if len(matches) >= 25:
+                    break
+        return {"status": "success", "query": query, "matches_count": len(matches), "matches": matches}
+
+    registry.register(
+        "search_code",
+        search_code,
+        "Search downloaded JS bundles and artifacts for keywords (e.g. 'token', 'jwt', 'redirect', 'api').",
+        {"query": "Keyword or pattern to search for", "file_pattern": "Glob pattern (default: *.js)"}
+    )
+
+    # Tool 3: get_endpoints
+    def get_endpoints(filter_keyword: str = "") -> Dict[str, Any]:
+        """Retrieve discovered target endpoints and routes."""
+        endpoints = []
+        for ep_rel in ["recon/endpoints.txt", "content/discovered-endpoints.txt", "api/openapi-endpoints.json"]:
+            ep_file = context.target_dir / "output" / ep_rel
+            if ep_file.exists():
+                try:
+                    if ep_file.suffix == ".json":
+                        data = json.loads(ep_file.read_text(encoding="utf-8"))
+                        if isinstance(data, list):
+                            endpoints.extend([str(item.get("path", item)) for item in data])
+                        elif isinstance(data, dict):
+                            endpoints.extend(list(data.keys()))
+                    else:
+                        lines = [l.strip() for l in ep_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+                        endpoints.extend(lines)
+                except Exception:
+                    pass
+
+        unique_eps = sorted(list(set(endpoints)))
+        if filter_keyword:
+            unique_eps = [e for e in unique_eps if filter_keyword.lower() in e.lower()]
+        return {"status": "success", "total_found": len(unique_eps), "endpoints": unique_eps[:50]}
+
+    registry.register(
+        "get_endpoints",
+        get_endpoints,
+        "List discovered endpoints from reconnaissance, API specs, and content crawler.",
+        {"filter_keyword": "Optional substring filter (e.g. 'auth', 'api', 'admin')"}
+    )
+
+    # Tool 4: record_finding
+    def record_finding(title: str, severity: str, url: str, evidence: str = "", cwe: str = "CWE-200", notes: str = "") -> Dict[str, Any]:
+        """Record an offensive security candidate finding into the assessment ledger."""
+        finding = {
+            "title": title,
+            "severity": severity.upper(),
+            "url": url,
+            "cwe": cwe,
+            "evidence": evidence,
+            "notes": notes,
+            "skill": context.skill,
+            "status": "candidate",
+            "validation_status": "unverified",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        findings_dir = context.target_dir / "output" / "findings"
+        findings_dir.mkdir(parents=True, exist_ok=True)
+        candidates_file = findings_dir / f"candidates-{safe_agent_name(context.skill)}.json"
+        existing = []
+        if candidates_file.exists():
+            try:
+                content = json.loads(candidates_file.read_text(encoding="utf-8"))
+                existing = content if isinstance(content, list) else content.get("findings", [])
+            except Exception:
+                existing = []
+        existing.append(finding)
+        candidates_file.write_text(json.dumps({"target": context.target, "skill": context.skill, "findings": existing}, indent=2), encoding="utf-8")
+        return {"status": "success", "recorded_finding": finding}
+
+    registry.register(
+        "record_finding",
+        record_finding,
+        "Record a suspected vulnerability candidate (e.g. DOM XSS, Open Redirect, JWT misconfig).",
+        {"title": "Finding title", "severity": "LOW, MEDIUM, HIGH, CRITICAL", "url": "Affected URL/endpoint", "evidence": "Snippet or proof", "cwe": "CWE identifier", "notes": "Analysis notes"}
+    )
+
+    # Tool 5: spawn_subagent (Autonomous dynamic subagent delegation)
+    if allow_subagents:
+        subagents_spawned = [0]
+
+        def spawn_subagent(role: str, goal: str, target_url: str = "", context_notes: str = "") -> Dict[str, Any]:
+            """Autonomously spawn a specialized subagent to investigate a specific component or endpoint."""
+            if subagents_spawned[0] >= max_subagents:
+                return {"status": "error", "error": f"Maximum subagents limit ({max_subagents}) reached for this session."}
+
+            subagents_spawned[0] += 1
+            sub_id = f"subagent-{safe_agent_name(role)}-{subagents_spawned[0]}"
+            logger.info(f"[{context.skill}] 🤖 Spawning autonomous subagent #{subagents_spawned[0]}: {role} ('{goal}')")
+
+            sub_context = AgentContext(
+                target=context.target,
+                target_dir=context.target_dir,
+                skill=sub_id,
+                run_id=context.run_id,
+                scope=context.scope,
+                budget={"max_steps": 5, "max_tokens": 4000, "timeout_seconds": 120}
+            )
+
+            # Child gets standard toolkit without recursive subagent spawning
+            sub_tools = build_default_agent_tools(
+                sub_context,
+                llm_client=llm_client,
+                allow_subagents=False,
+            )
+
+            runner = AgentRunner(llm_client=llm_client)
+            system_prompt = (
+                f"You are {role}, an elite offensive security subagent in Moros AI.\n"
+                f"Your target domain is: {context.target}\n"
+                f"Your specific goal: {goal}\n"
+                "Use your tools (http_get, search_code, get_endpoints, record_finding) to investigate thoroughly.\n"
+                "Conclude with 'Final Answer: <summary of what was verified and findings recorded>'."
+            )
+            user_prompt = f"Target URL: {target_url}\nContext: {context_notes}\nBegin autonomous investigation."
+
+            result = runner.run(sub_context, sub_tools, system_prompt, user_prompt)
+            return {
+                "status": "success",
+                "subagent_id": sub_id,
+                "role": role,
+                "result_status": result.status,
+                "summary": result.summary,
+                "findings_recorded": len(result.findings),
+            }
+
+        registry.register(
+            "spawn_subagent",
+            spawn_subagent,
+            "Autonomously spawn a child specialist subagent to independently investigate a specific vector (e.g. JWT, GraphQL, Race Condition).",
+            {"role": "Specialist name (e.g. 'JWT Hunter', 'SSRF Investigator')", "goal": "Specific objective", "target_url": "Target URL to examine", "context_notes": "Context notes for the subagent"}
+        )
+
+    return registry
+
