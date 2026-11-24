@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "moros-ai"
 version = "1.0.0"
-description = "Autonomous Agentic Web Penetration Testing System"
+description = "Offensive Security and Web Penetration Testing Automation Framework"
 authors = [{name = "Moros AI Team"}]
 license = {text = "MIT"}
 readme = "README.md"

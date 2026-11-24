@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-run_manager.py — Durable Run Lifecycle & State Management for Moros AI.
+run_manager.py — Run Lifecycle & State Management for Moros.
 
-Implements Priority 3 of the Moros AI Architecture:
+Provides:
 - Durable run records under targets/<target>/output/runs/<run_id>/
-- Run persistence surviving process restarts
+- Run persistence across process restarts
 - Event timeline stream in events.jsonl
 - Artifact & Checkpoint manifests
 - Safe resume, list, and abort capabilities
@@ -137,7 +137,7 @@ class RunManager:
     def register_agent_session(self, run_id: str, agent_id: str, skill: str,
                                parent_agent_id: str = "coordinator",
                                status: str = "running", model: str = "default") -> Dict[str, Any]:
-        """Record child agent session in agents.jsonl (Priority 1: Real Sub-Agent Sessions)."""
+        """Record child agent session in agents.jsonl."""
         run_path = self._run_dir(run_id)
         if not run_path.exists():
             return {}

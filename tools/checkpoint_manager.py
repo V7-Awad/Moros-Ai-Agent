@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-checkpoint_manager.py — Enforceable Blocking Human-in-the-Loop (HITL) Engine.
+checkpoint_manager.py — Blocking Human-in-the-Loop (HITL) Engine for Moros.
 
-Implements Priority 2 of the Moros AI Architecture:
-- True worker thread blocking before state-changing or dangerous actions
-- Explicit deterministic state machine:
+Provides:
+- Worker thread blocking before state-changing or high-impact actions
+- Deterministic state machine:
   CREATED -> WAITING_APPROVAL -> APPROVED | REJECTED | TIMEOUT | CANCELLED
-- Persistent JSON storage under targets/<target>/output/logs/checkpoints.json
-- Dashboard / CLI approval waking via thread events and durable file polling
+- Persistent checkpoint records under targets/<target>/output/logs/checkpoints.json
+- Dashboard / CLI approval waking via thread events and durable file updates
 """
 
 import hashlib

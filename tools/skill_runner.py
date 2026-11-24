@@ -1262,12 +1262,12 @@ class SkillRunner:
         }
 
         if not passed:
-            nudge = (
-                f"Your work on {target_skill_name} was just reviewed and it was found that either you missed "
-                f"a step of analysis or did not generate an artifact of sufficient proof. Look at the Markdown checklist "
-                f"and the output for each step, find what you missed, and complete the step."
+            retry_note = (
+                f"Automated verification for {target_skill_name} failed: missing expected output artifacts or zero-byte logs. "
+                f"Check required methodology steps and repeat unverified checks."
             )
-            review_result["nudge_prompt"] = nudge
+            review_result["retry_directive"] = retry_note
+            review_result["nudge_prompt"] = retry_note
 
         out_path = review_dir / f"{target_skill_name}-review-1.json"
         out_path.write_text(json.dumps(review_result, indent=2), encoding="utf-8")

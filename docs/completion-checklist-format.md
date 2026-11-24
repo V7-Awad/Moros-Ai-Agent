@@ -22,7 +22,7 @@ Every skill's SKILL.md must include a **Methodology Checklist** section using th
    - The expected artifact file exists AND is non-zero bytes
    - The corresponding log file exists AND is non-zero bytes
 3. **The review-skill verifies all three conditions.** If any condition fails, the step is marked FAILED.
-4. **On failure**, the review-skill generates a nudge prompt and re-invokes the original skill (bounded retries).
+4. **On failure**, the review-skill issues a retry directive and re-invokes the skill runner (bounded retries).
 5. **Log files must contain:**
    - Timestamp of execution
    - Command or action performed

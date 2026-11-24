@@ -1,6 +1,6 @@
-# Hackbot — Architecture & Operations Guide
+# Moros — Architecture & Operations Guide
 
-> **Hackbot** is a modular, skill-based AI agent system for authorized dynamic (black-box) web application penetration testing.
+> **Moros** is a modular, skill-based offensive security automation framework for authorized dynamic (black-box) web application penetration testing.
 
 ---
 

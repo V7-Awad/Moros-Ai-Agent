@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-agent_runtime.py — Explicit Agent Runtime & ReAct Tool Loop for Moros AI.
+agent_runtime.py — Agent Runtime & ReAct Tool Loop for Moros.
 
-Implements Priority 0 & Priority 1 of the Moros AI Architecture:
-- Structured AgentContext & AgentResult interfaces
+Provides:
+- Structured AgentContext & AgentResult execution state
 - Bounded tool registry with execution timeouts
 - Multi-step ReAct (Reasoning + Action) execution loop
-- Full conversation persistence (system, user, assistant, tool, observation)
-- Explicit LLM_UNAVAILABLE state detection & handling
+- Conversation persistence (system, user, assistant, tool, observation)
+- Explicit LLM_UNAVAILABLE state detection & offline fallback
 """
 
 import json
@@ -511,11 +511,10 @@ def build_default_agent_tools(
 
             runner = AgentRunner(llm_client=llm_client)
             system_prompt = (
-                f"You are {role}, an elite offensive security subagent in Moros AI.\n"
-                f"Your target domain is: {context.target}\n"
-                f"Your specific goal: {goal}\n"
-                "Use your tools (http_get, search_code, get_endpoints, record_finding) to investigate thoroughly.\n"
-                "Conclude with 'Final Answer: <summary of what was verified and findings recorded>'."
+                f"Role: {role} security testing module for target '{context.target}'.\n"
+                f"Objective: {goal}\n"
+                "Available tools: http_get, search_code, get_endpoints, record_finding.\n"
+                "Execute necessary investigation steps and conclude with 'Final Answer: <summary of verified findings>'."
             )
             user_prompt = f"Target URL: {target_url}\nContext: {context_notes}\nBegin autonomous investigation."
 

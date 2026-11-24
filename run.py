@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-run.py — Main entry point for Moros AI Agent (Hackbot).
+run.py — Main entry point for Moros offensive security testing framework.
 
 Usage:
     python run.py --target example.com
@@ -37,8 +37,8 @@ BANNER = r"""
  | |  | | (_) | | | (_) \__ \/ ___ \ | | 
  |_|  |_|\___/|_|  \___/|___/_/   \_\___|
                                           
-  Agentic Web Pentest Automation System
-  ⚠️  AUTHORIZED TESTING ONLY
+  Web Penetration Testing Automation Framework
+  [!] AUTHORIZED SECURITY ASSESSMENTS ONLY
 """
 
 

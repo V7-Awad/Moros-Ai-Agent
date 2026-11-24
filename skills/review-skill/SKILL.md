@@ -2,21 +2,20 @@
 name: review-skill
 description: >
   Completion verification skill that runs after each primary skill to verify every checklist
-  item was actually completed with valid artifacts and non-zero log files. Preferably run on
-  a different model than the skill being reviewed. Generates nudge prompts on failure and
-  manages bounded retry loops.
+  item was actually completed with valid artifacts and non-zero log files. Enforces artifact
+  integrity checks and manages bounded retry loops.
 ---
 
 # Review Skill — Completion Verification
 
 ## Purpose
 
-Fight **completion bias** — the tendency of LLMs to report tasks as complete when steps were skipped or only partially executed. This skill mechanically verifies that every claimed action actually produced the expected output.
+Enforce strict verification of execution artifacts. This module inspects output directories and logs to guarantee that every claimed methodology step produced valid, non-empty artifacts rather than unverified assertions.
 
 ## When to Run
 
 - **After every primary skill completes.** No exceptions.
-- **Preferably on a different model** than the one that ran the skill being reviewed (avoids a model marking its own homework).
+- **Independent verification:** Runs as an isolated verification pass to avoid false-positive completion flags.
 
 ## Inputs
 
@@ -105,17 +104,17 @@ Create a structured JSON review result:
 
 **On any FAIL status:**
 
-1. Generate a **nudge prompt** (kept deliberately generic to avoid biasing the retry):
+1. Generate a **retry directive** specifying missing artifacts:
 
-   > "Your work on `<skill-name>` was just reviewed and it was found that either you missed a step of analysis or did not generate an artifact of sufficient proof. Look at the Markdown checklist and the output for each step, find what you missed, and complete the step."
+   > "Verification check for `<skill-name>` failed: missing expected output artifacts or empty log files. Review required methodology steps and repeat unverified checks."
 
-2. Include specific failed step numbers (but NOT the specific fix — let the skill figure it out):
+2. Include specific failed step numbers:
 
    > "Specifically, steps <N>, <M> did not pass verification. Their artifacts or logs are missing or empty."
 
-3. Re-invoke the original skill with this nudge prompt appended.
+3. Re-invoke the target skill with this retry directive.
 
-4. After the retry, run this review skill again.
+4. After the retry, run this review verification again.
 
 ### Step 6: Retry Bounds
 
@@ -134,7 +133,7 @@ Create a structured JSON review result:
 }
 ```
 
-This report is surfaced to the human operator — the system does NOT silently give up or silently declare success.
+This report is surfaced to the human operator — the system does NOT silently give up or declare unverified success.
 
 ## Methodology Checklist
 
@@ -154,13 +153,13 @@ This report is surfaced to the human operator — the system does NOT silently g
   - Expected artifact: `targets/<domain>/output/logs/review/<skill>-review-<run>.json`
   - Log file: (same log file as step 1)
 
-- [ ] Step 5: If failures found, generate nudge prompt and trigger retry (bounded)
-  - Expected artifact: Nudge prompt (if applicable)
+- [ ] Step 5: If failures found, generate retry directive and trigger bounded retry
+  - Expected artifact: Retry directive (if applicable)
   - Log file: (same log file as step 1)
 
 ## Important Notes
 
-- **Different model is strongly preferred.** If the skill ran on Claude, have Gemini or GPT review it, and vice versa. Same-model review is significantly less effective at catching completion bias.
-- **Empty logs are the #1 red flag.** A zero-byte log file almost always means the step was silently skipped. Even a step that legitimately found nothing should log "searched X files, found 0 results."
+- **Independent execution is strongly recommended.** Automated verification passes should run under separate process context.
+- **Empty logs are the #1 red flag.** A zero-byte log file almost always means the step was skipped. Even a step that legitimately found nothing should log "searched X files, found 0 results."
 - **Don't trust self-reported completion.** The checkbox being marked `[x]` is necessary but NOT sufficient. The artifact and log must independently confirm the work was done.
-- **Suspiciously small logs.** A log file that exists but is under 50 bytes is almost certainly a stub. Flag it for deeper inspection.
+- **Suspiciously small logs.** A log file that exists but is under 50 bytes is often a stub. Flag it for deeper inspection.
