@@ -2046,6 +2046,15 @@
               <h4 style="margin:0 0 6px; font-size:13px; color:var(--cyan);">Remediation & Technical Evidence</h4>
               <p style="margin:0; font-size:13px; color:#cbd5e1; line-height:1.6;">${escapeHtml(f.details || 'No extended details recorded.')}</p>
               ${f.evidence_ids && f.evidence_ids.length ? `<p class="mono" style="margin:8px 0 0; font-size:11px; color:var(--cyan);">Evidence IDs: ${escapeHtml(f.evidence_ids.join(', '))}</p>` : ''}
+              ${(f.poc_sh || f.poc_py) ? `
+                <div style="margin-top:8px; padding:6px 10px; background:rgba(0,229,255,0.06); border-radius:6px; border:1px solid rgba(0,229,255,0.15);">
+                  <strong style="font-size:11px; color:var(--cyan); text-transform:uppercase;">Generated Reproduction Scripts:</strong>
+                  <div class="mono" style="font-size:11px; margin-top:3px; color:#94a3b8;">
+                    ${f.poc_sh ? `<span>Bash: <code>${escapeHtml(f.poc_sh)}</code></span> ` : ''}
+                    ${f.poc_py ? `<span>| Python: <code>${escapeHtml(f.poc_py)}</code></span>` : ''}
+                  </div>
+                </div>
+              ` : ''}
             </div>
           </div>
         `;

@@ -100,3 +100,22 @@ def test_alert_dispatcher_safe_handling():
         assert dispatcher.is_configured() is False
         # Should not crash when not configured
         dispatcher.send_alert("Test Alert", "Test Message", "HIGH")
+
+
+def test_alert_dispatcher_telegram_and_slack():
+    env = {
+        "TELEGRAM_BOT_TOKEN": "mock-token",
+        "TELEGRAM_CHAT_ID": "12345",
+        "SLACK_WEBHOOK_URL": "https://hooks.slack.com/services/mock",
+    }
+    with patch.dict("os.environ", env, clear=True):
+        dispatcher = AlertDispatcher()
+        assert dispatcher.is_configured() is True
+        with patch("urllib.request.urlopen") as mock_open:
+            dispatcher.send_alert(
+                "SQLi Vulnerability",
+                "Discovered parameter injection on /api/items",
+                "HIGH",
+                fields={"Target": "target.com", "Param": "id"}
+            )
+            assert mock_open.call_count == 2

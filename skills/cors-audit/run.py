@@ -8,8 +8,13 @@ import json
 import sys
 from pathlib import Path
 
-# Add tools to sys.path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "tools"))
+_skill_dir = Path(__file__).parent.resolve()
+_project_root = _skill_dir
+while _project_root != _project_root.parent:
+    if (_project_root / "tools").is_dir() and (_project_root / "run.py").is_file():
+        break
+    _project_root = _project_root.parent
+sys.path.insert(0, str(_project_root / "tools"))
 from scoped_http import ScopedHttpClient, is_in_target_scope
 
 

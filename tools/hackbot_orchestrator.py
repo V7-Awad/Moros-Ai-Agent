@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -92,7 +93,7 @@ class HackbotOrchestrator:
                  review_model: str = None, api_spec: str = None,
                  active_host_limit: int = 100, root_only_active: bool = False,
                  https_only: bool = False, max_http_requests: int = 150,
-                 request_delay: float = 0.3):
+                 request_delay: float = 0.3, parallel: bool = False):
         self.target = target
         self.target_dir = Path(target_dir)
         self.skills = skills
@@ -105,7 +106,9 @@ class HackbotOrchestrator:
         self.https_only = https_only
         self.max_http_requests = max(1, max_http_requests)
         self.request_delay = max(0.0, request_delay)
+        self.parallel = parallel
         self.scope_authorized = False
+        self._lock = threading.Lock()
 
         self.execution_log: list = []
         self.skill_results: dict = {}  # skill -> [run results]
@@ -129,6 +132,14 @@ class HackbotOrchestrator:
                                   request_delay=self.request_delay)
         if hasattr(self.runner, "http"):
             self.runner.http.scope_validator = self.scope_validator
+
+        # Load dynamic skill dependencies
+        try:
+            for s in SkillRegistry().list_skills():
+                if s.get("dependencies"):
+                    SKILL_DEPENDENCIES[s["id"]] = s["dependencies"]
+        except Exception:
+            pass
 
     @staticmethod
     def _llm_for_model(model_name: str) -> LLMClient:
@@ -245,6 +256,36 @@ class HackbotOrchestrator:
                 return {"status": "FAILED", "failed_skills": [{"skill": "scope-check", "notes": "No authorization"}]}
             logger.warning("⚠️  Running in PASSIVE-ONLY mode (no scope-of-work)")
 
+        # Step 2.5: WAF Detection & Adaptive Pacing
+        try:
+            from waf_detector import WafDetector
+            from tech_profiler import TechProfiler
+            probe_resp = self.runner.http.request(f"https://{self.target}/")
+            if probe_resp.get("status") == "response":
+                waf_info = WafDetector().inspect_response(
+                    probe_resp.get("status_code", 0),
+                    probe_resp.get("headers", {}),
+                    probe_resp.get("body", "")
+                )
+                if waf_info.get("waf_detected"):
+                    detected_names = ", ".join(d["waf"] for d in waf_info["detected_wafs"])
+                    logger.warning(f"🛡️  WAF Detected: {detected_names}. Applying adaptive evasion pacing ({waf_info['recommended_delay']}s delay).")
+                    self.runner.http.delay_seconds = max(self.runner.http.delay_seconds, waf_info["recommended_delay"])
+
+                tech_info = TechProfiler().profile_target(
+                    probe_resp.get("headers", {}),
+                    probe_resp.get("body", "")
+                )
+                if tech_info.get("technologies"):
+                    logger.info(f"🧩 Target Technologies: {', '.join(tech_info['technologies'])}")
+                    boosted = tech_info.get("prioritized_skills", [])
+                    if boosted:
+                        elevated = [s for s in self.skills if s in boosted]
+                        remainder = [s for s in self.skills if s not in boosted]
+                        self.skills = elevated + remainder
+        except Exception as e:
+            logger.debug(f"Target profiling non-fatal error: {e}")
+
         # Step 3: Validate dependencies & mark blocked skills
         blocked_skills = self.validate_dependencies()
         for b_skill, reason in blocked_skills.items():
@@ -264,34 +305,97 @@ class HackbotOrchestrator:
             ordered_skills.append("report-conglomeration")
         logger.info(f"Execution order: {' → '.join(ordered_skills)}")
 
-        # Step 5: Execute each scheduled skill
-        for skill_name in ordered_skills:
-            logger.info(f"\n{'='*40}")
-            logger.info(f"STARTING SKILL: {skill_name}")
-            logger.info(f"{'='*40}")
+        # Step 5: Execute each scheduled skill (serial or parallel)
+        serial_prereqs = {"recon-subdomain", "api-spec-discovery", "js-discover", "js-analyze", "content-discovery"}
+        serial_finalizers = {"review-skill", "report-conglomeration"}
 
-            # Check if dynamic predecessor failed in this run
-            deps = SKILL_DEPENDENCIES.get(skill_name, [])
+        if self.parallel:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            prereq_skills = [s for s in ordered_skills if s in serial_prereqs]
+            finalizer_skills = [s for s in ordered_skills if s in serial_finalizers]
+            parallel_skills = [s for s in ordered_skills if s not in serial_prereqs and s not in serial_finalizers]
+
+            # Phase A: Run prerequisite skills serially
+            for skill_name in prereq_skills:
+                self._execute_skill_with_tracking(skill_name, run_id)
+
+            # Phase B: Run independent vuln skills in parallel
+            if parallel_skills:
+                logger.info(f"\n🔀 Running {len(parallel_skills)} skills in parallel: {', '.join(parallel_skills)}")
+                with ThreadPoolExecutor(max_workers=min(4, len(parallel_skills))) as executor:
+                    futures = {
+                        executor.submit(self._execute_skill_with_tracking, s, run_id): s
+                        for s in parallel_skills
+                    }
+                    for future in as_completed(futures):
+                        skill_name = futures[future]
+                        try:
+                            future.result()
+                        except Exception as exc:
+                            logger.error(f"Parallel skill '{skill_name}' raised: {exc}")
+
+            # Phase C: Run finalizers serially
+            for skill_name in finalizer_skills:
+                self._execute_skill_with_tracking(skill_name, run_id)
+        else:
+            for skill_name in ordered_skills:
+                self._execute_skill_with_tracking(skill_name, run_id)
+
+        # Step 6: Write orchestration log & finalize durable run
+        self._write_orchestration_log()
+        final_status = "failed" if self.failed_skills else "completed"
+        self.run_manager.finish_run(run_id, status=final_status)
+
+        # Step 7: Build Directed Attack Surface Graph
+        try:
+            from attack_graph import AttackGraphBuilder
+            builder = AttackGraphBuilder(self.target, Path(self.target_dir))
+            builder.build_graph()
+            logger.info("🗺️  Attack Graph generated at output/report/attack-graph.json")
+        except Exception as e:
+            logger.debug(f"Attack graph build non-fatal error: {e}")
+
+        if self.failed_skills:
+            logger.error("\n❌ Orchestration finished with %d failed skill run(s).", len(self.failed_skills))
+        else:
+            logger.info("\n✅ Orchestration complete!")
+        return {"status": "FAILED" if self.failed_skills else "SUCCESS",
+                "run_id": run_id,
+                "failed_skills": self.failed_skills}
+
+    def _execute_skill_with_tracking(self, skill_name: str, run_id: str):
+        """Execute a skill across configured models and track progress."""
+        logger.info(f"\n{'='*40}")
+        logger.info(f"STARTING SKILL: {skill_name}")
+        logger.info(f"{'='*40}")
+
+        # Check if dynamic predecessor failed in this run
+        deps = SKILL_DEPENDENCIES.get(skill_name, [])
+        with self._lock:
             failed_dep = next((d for d in deps if any(f["skill"] == d for f in self.failed_skills)), None)
-            if failed_dep:
-                reason = f"Prerequisite skill '{failed_dep}' failed earlier in this run."
-                logger.warning(f"🚫 Skipping skill '{skill_name}': {reason}")
+        if failed_dep:
+            reason = f"Prerequisite skill '{failed_dep}' failed earlier in this run."
+            logger.warning(f"🚫 Skipping skill '{skill_name}': {reason}")
+            with self._lock:
                 self.skill_results[skill_name] = [{"skill": skill_name, "status": "BLOCKED", "notes": reason}]
                 self.run_manager.update_skill_progress(run_id, skill_name, status="blocked", summary=reason)
                 self._log_event(skill_name, "BLOCKED", reason)
-                continue
+            return
 
-            # Run skill with each model
-            for model in self.models:
-                for run_num in range(1, self.runs_per_skill + 1):
-                    sub_run_id = f"{skill_name}_{model}_run{run_num}"
-                    logger.info(f"  Run: {sub_run_id}")
+        # Run skill with each model
+        for model in self.models:
+            for run_num in range(1, self.runs_per_skill + 1):
+                sub_run_id = f"{skill_name}_{model}_run{run_num}"
+                logger.info(f"  Run: {sub_run_id}")
+                with self._lock:
                     self.run_manager.update_skill_progress(run_id, skill_name, status="running")
                     self.llm = self._llm_for_model(model)
                     self.runner.llm = self.llm
 
-                    result = self._execute_skill(skill_name, model, run_num)
+                result = self._execute_skill(skill_name, model, run_num)
 
+                with self._lock:
                     if skill_name not in self.skill_results:
                         self.skill_results[skill_name] = []
                     self.skill_results[skill_name].append(result)
@@ -310,22 +414,9 @@ class HackbotOrchestrator:
                             summary=result.get("notes", "")
                         )
 
-                    # Run review-skill after each primary skill
-                    if skill_name != "review-skill" and skill_name != "report-conglomeration":
-                        self._run_review(skill_name, model, run_num)
-
-        # Step 6: Write orchestration log & finalize durable run
-        self._write_orchestration_log()
-        final_status = "failed" if self.failed_skills else "completed"
-        self.run_manager.finish_run(run_id, status=final_status)
-
-        if self.failed_skills:
-            logger.error("\n❌ Orchestration finished with %d failed skill run(s).", len(self.failed_skills))
-        else:
-            logger.info("\n✅ Orchestration complete!")
-        return {"status": "FAILED" if self.failed_skills else "SUCCESS",
-                "run_id": run_id,
-                "failed_skills": self.failed_skills}
+                # Run review-skill after each primary skill
+                if skill_name != "review-skill" and skill_name != "report-conglomeration":
+                    self._run_review(skill_name, model, run_num)
 
     def _execute_skill(self, skill_name: str, model: str, run_num: int) -> dict:
         """Execute a tool-backed skill with real execution logic."""
@@ -494,19 +585,20 @@ class HackbotOrchestrator:
     def _log_event(self, skill: str, status: str, details: str):
         """Log an orchestration event."""
         timestamp = datetime.now(timezone.utc).isoformat()
-        self.execution_log.append({
-            "timestamp": timestamp,
-            "skill": skill,
-            "status": status,
-            "details": details,
-        })
-        # Keep a human-readable agent timeline alongside the structured log.
-        self.conversations.append(
-            skill,
-            "tool",
-            f"[{status}] {details}" if details else f"[{status}]",
-            source="orchestrator",
-        )
+        with self._lock:
+            self.execution_log.append({
+                "timestamp": timestamp,
+                "skill": skill,
+                "status": status,
+                "details": details,
+            })
+            # Keep a human-readable agent timeline alongside the structured log.
+            self.conversations.append(
+                skill,
+                "tool",
+                f"[{status}] {details}" if details else f"[{status}]",
+                source="orchestrator",
+            )
 
     def _write_orchestration_log(self):
         """Write the full orchestration log to disk."""
@@ -554,6 +646,8 @@ def main():
                         help="Maximum same-host GET/HEAD requests per scan (default: 40)")
     parser.add_argument("--request-delay", type=float, default=0.4,
                         help="Minimum seconds between target requests (default: 0.4)")
+    parser.add_argument("--parallel", action="store_true",
+                        help="Execute independent skills in parallel using ThreadPoolExecutor")
 
     args = parser.parse_args()
 
@@ -574,6 +668,7 @@ def main():
         models=models,
         runs_per_skill=args.runs_per_skill,
         review_model=args.review_model,
+        parallel=args.parallel,
     )
 
     orchestrator.run()

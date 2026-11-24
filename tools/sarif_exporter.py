@@ -148,6 +148,15 @@ def _build_rule(rule_id: str, finding: Dict[str, Any]) -> Dict[str, Any]:
 
     desc = finding.get("notes") or finding.get("description") or title
 
+    try:
+        from cvss_calculator import score_finding
+        cvss_data = score_finding(finding)
+        cvss_score_val = float(cvss_data.get("cvss_score", score))
+        sec_severity_val = max(cvss_score_val, float(score)) if severity_norm in ("critical", "high") else cvss_score_val
+    except Exception:
+        cvss_data = {"cvss_version": "3.1", "cvss_score": float(score), "cvss_severity": severity_norm.title(), "cvss_vector": ""}
+        sec_severity_val = float(score)
+
     return {
         "id": rule_id,
         "name": re.sub(r"[^a-zA-Z0-9_-]", "_", title),
@@ -155,11 +164,12 @@ def _build_rule(rule_id: str, finding: Dict[str, Any]) -> Dict[str, Any]:
         "fullDescription": {"text": desc},
         "defaultConfiguration": {"level": level},
         "help": {
-            "text": f"Vulnerability: {title}\nCWE: {cwe_id}\nSeverity: {severity_norm.upper()}\n\nRemediation:\n{finding.get('remediation', 'Sanitize and validate inputs, enforce strict server-side authorization controls.')}",
-            "markdown": f"### {title}\n\n**CWE:** `{cwe_id}` | **Severity:** `{severity_norm.upper()}`\n\n#### Description\n{desc}\n\n#### Remediation\n{finding.get('remediation', 'Implement strict server-side validation and authorization gates.')}"
+            "text": f"Vulnerability: {title}\nCWE: {cwe_id}\nSeverity: {severity_norm.upper()}\nCVSS Score: {cvss_data.get('cvss_score')}\nCVSS Vector: {cvss_data.get('cvss_vector')}\n\nRemediation:\n{finding.get('remediation', 'Sanitize and validate inputs, enforce strict server-side authorization controls.')}",
+            "markdown": f"### {title}\n\n**CWE:** `{cwe_id}` | **Severity:** `{severity_norm.upper()}` | **CVSS:** `{cvss_data.get('cvss_score')}` ({cvss_data.get('cvss_vector')})\n\n#### Description\n{desc}\n\n#### Remediation\n{finding.get('remediation', 'Implement strict server-side validation and authorization gates.')}"
         },
         "properties": {
-            "security-severity": score,
+            "security-severity": str(sec_severity_val),
+            "cvss": cvss_data,
             "tags": tags,
             "cwe": [cwe_id],
         }

@@ -344,6 +344,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_json(self.get_scan_status(target))
             return
 
+        # 5b. Scan progress SSE stream
+        if path == "/api/scan/stream":
+            target = query.get("target", [None])[0]
+            self.handle_sse_stream(target)
+            return
+
         # 6. Active runs across targets
         if path == "/api/runs/active":
             active_runs = []
@@ -620,25 +626,53 @@ class DashboardHandler(BaseHTTPRequestHandler):
         }
 
     def get_notification_config(self):
-        return {"has_discord_webhook": bool(os.environ.get("DISCORD_WEBHOOK_URL", "").strip())}
+        return {
+            "has_discord_webhook": bool(os.environ.get("DISCORD_WEBHOOK_URL", "").strip()),
+            "has_telegram": bool(os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() and os.environ.get("TELEGRAM_CHAT_ID", "").strip()),
+            "has_slack_webhook": bool(os.environ.get("SLACK_WEBHOOK_URL", "").strip()),
+        }
 
     def save_notification_config(self, body):
-        webhook_url = str(body.get("discord_webhook_url", "")).strip()
-        if not is_valid_discord_webhook_url(webhook_url):
-            return {"status": "error", "message": "Enter a valid HTTPS Discord webhook URL."}
-
         env_file = PROJECT_ROOT / ".env"
+        lines = env_file.read_text(encoding="utf-8").splitlines() if env_file.is_file() else []
+        saved = []
+
+        if "discord_webhook_url" in body:
+            webhook_url = str(body.get("discord_webhook_url", "")).strip()
+            if webhook_url:
+                if not is_valid_discord_webhook_url(webhook_url):
+                    return {"status": "error", "message": "Enter a valid HTTPS Discord webhook URL."}
+                lines = [line for line in lines if not line.strip().startswith("DISCORD_WEBHOOK_URL=")]
+                lines.append(f"DISCORD_WEBHOOK_URL={webhook_url}")
+                os.environ["DISCORD_WEBHOOK_URL"] = webhook_url
+                saved.append("Discord")
+
+        if "telegram_bot_token" in body and "telegram_chat_id" in body:
+            tg_token = str(body.get("telegram_bot_token", "")).strip()
+            tg_chat = str(body.get("telegram_chat_id", "")).strip()
+            if tg_token and tg_chat:
+                lines = [line for line in lines if not line.strip().startswith(("TELEGRAM_BOT_TOKEN=", "TELEGRAM_CHAT_ID="))]
+                lines.append(f"TELEGRAM_BOT_TOKEN={tg_token}")
+                lines.append(f"TELEGRAM_CHAT_ID={tg_chat}")
+                os.environ["TELEGRAM_BOT_TOKEN"] = tg_token
+                os.environ["TELEGRAM_CHAT_ID"] = tg_chat
+                saved.append("Telegram")
+
+        if "slack_webhook_url" in body:
+            slack_url = str(body.get("slack_webhook_url", "")).strip()
+            if slack_url:
+                lines = [line for line in lines if not line.strip().startswith("SLACK_WEBHOOK_URL=")]
+                lines.append(f"SLACK_WEBHOOK_URL={slack_url}")
+                os.environ["SLACK_WEBHOOK_URL"] = slack_url
+                saved.append("Slack")
+
         try:
-            lines = env_file.read_text(encoding="utf-8").splitlines() if env_file.is_file() else []
-            lines = [line for line in lines if not line.strip().startswith("DISCORD_WEBHOOK_URL=")]
-            lines.append(f"DISCORD_WEBHOOK_URL={webhook_url}")
             env_file.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
         except OSError:
-            logger.exception("Failed to save Discord notification settings")
-            return {"status": "error", "message": "Could not save Discord settings locally."}
+            logger.exception("Failed to save notification settings")
+            return {"status": "error", "message": "Could not save notification settings locally."}
 
-        os.environ["DISCORD_WEBHOOK_URL"] = webhook_url
-        return {"status": "success", "message": "Discord scan notifications are configured."}
+        return {"status": "success", "message": f"Configured alerts: {', '.join(saved) if saved else 'Saved.'}"}
 
     def save_llm_config(self, body):
         provider = str(body.get("provider", "openai")).strip().lower()
@@ -1396,6 +1430,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                                     "validation_status": "validated" if human_validation else "unverified",
                                     "confidence": item.get("confidence", "not-scored"),
                                     "evidence_ids": item.get("evidence_ids", []),
+                                    "poc_sh": item.get("poc_sh", ""),
+                                    "poc_py": item.get("poc_py", ""),
                                 })
                     except Exception:
                         pass
@@ -1655,6 +1691,71 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "start_time": scan_info.get("start_time"),
             "logs": "".join(scan_info.get("logs", [])),
         }
+
+    def handle_sse_stream(self, target):
+        """Server-Sent Events endpoint streaming scan progress."""
+        if not target:
+            self.send_error_json("Target parameter is required", status=400)
+            return
+
+        try:
+            from setup import validate_target_name
+            validate_target_name(target)
+        except ValueError:
+            self.send_error_json("Invalid target name", status=400)
+            return
+
+        target_path = TARGETS_DIR / target
+        if not target_path.exists():
+            self.send_error_json(f"Target '{target}' not found", status=404)
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        rm = RunManager(target_path)
+        last_event_count = 0
+        iterations = 0
+        max_iterations = 60
+
+        try:
+            while iterations < max_iterations:
+                scan_status = self.get_scan_status(target)
+                runs = rm.list_runs()
+                latest_run = runs[0] if runs else None
+                run_id = latest_run.get("run_id") if latest_run else None
+
+                events = []
+                if run_id:
+                    events = rm.get_event_stream(run_id)
+
+                payload = {
+                    "scan_status": scan_status,
+                    "latest_run": latest_run,
+                    "new_events": events[last_event_count:] if len(events) > last_event_count else [],
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                last_event_count = len(events)
+
+                data = f"data: {json.dumps(payload)}\n\n"
+                self.wfile.write(data.encode("utf-8"))
+                self.wfile.flush()
+
+                scan_info = active_scans.get(target)
+                if not scan_info or scan_info.get("status") in ("completed", "failed", "stopped"):
+                    if latest_run and latest_run.get("status") in ("completed", "failed"):
+                        break
+
+                time.sleep(1.0)
+                iterations += 1
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as exc:
+            logger.debug("SSE stream terminated: %s", exc)
 
 
 def run_dashboard(host="127.0.0.1", port=8080, open_browser=True, default_target=None):

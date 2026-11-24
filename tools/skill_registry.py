@@ -189,6 +189,7 @@ class SkillRegistry:
         description = "Specialized security skill for autonomous offensive assessment."
         category = "Core Offensive" if not is_custom else "Custom Security"
         checklist = []
+        dependencies = []
 
         if skill_file.is_file():
             try:
@@ -211,6 +212,11 @@ class SkillRegistry:
 
                 # Extract Checklist
                 checklist = re.findall(r"^-\s*\[[ xX]\]\s*(.+)$", text, re.MULTILINE)
+
+                # Extract Dependencies
+                m_deps = re.search(r"## Dependencies\s*\n(.*?)(?=\n##|\Z)", text, re.DOTALL)
+                if m_deps:
+                    dependencies = re.findall(r"-\s*`?([a-zA-Z0-9_-]+)`?", m_deps.group(1))
             except Exception as e:
                 logger.warning(f"Failed to parse {skill_file}: {e}")
 
@@ -223,6 +229,8 @@ class SkillRegistry:
                 category = m_data.get("category", category)
                 description = m_data.get("description", description)
                 is_custom = m_data.get("is_custom", is_custom)
+                if "dependencies" in m_data:
+                    dependencies = m_data["dependencies"]
             except Exception:
                 pass
 
@@ -233,5 +241,6 @@ class SkillRegistry:
             "description": description,
             "is_custom": is_custom,
             "checklist": checklist,
+            "dependencies": dependencies,
             "path": str(skill_file.parent),
         }

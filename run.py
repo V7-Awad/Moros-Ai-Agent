@@ -140,6 +140,8 @@ Examples:
                         help="Comma-separated list of forbidden host patterns (e.g. 'blog.target.com,status.target.com')")
     parser.add_argument("--bug-bounty-id", default=None,
                         help="Bug bounty identifier to send in X-Bug-Bounty header (e.g. 'hackerone-handle')")
+    parser.add_argument("--parallel", action="store_true",
+                        help="Execute independent skills in parallel using ThreadPoolExecutor")
     parser.add_argument("--dashboard", action="store_true",
                         help="Launch local web dashboard viewer")
     parser.add_argument("--port", type=int, default=8080,
@@ -328,6 +330,7 @@ Examples:
         https_only=args.https_only,
         max_http_requests=args.max_http_requests,
         request_delay=args.request_delay,
+        parallel=args.parallel,
     )
 
     scan_started_at = time.time()

@@ -11,9 +11,10 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-00e5ff.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-0077ff.svg?style=flat-square)](LICENSE)
-[![Tests Passing](https://img.shields.io/badge/tests-53%20passed%20(100%25)-19e6b0.svg?style=flat-square)](tests/)
+[![Tests Passing](https://img.shields.io/badge/tests-62%20passed%20(100%25)-19e6b0.svg?style=flat-square)](tests/)
 [![Manual](https://img.shields.io/badge/Documentation-PDF%20Manual-0284c7.svg?style=flat-square)](MOROS_AI_OPERATOR_GUIDE.pdf)
-[![Skills](https://img.shields.io/badge/skills-31%20installed-7c3aed.svg?style=flat-square)](#-extensible-skills-suite)
+[![Skills](https://img.shields.io/badge/skills-32%20installed-7c3aed.svg?style=flat-square)](#-extensible-skills-suite)
+[![CVSS v3.1](https://img.shields.io/badge/CVSS-v3.1%20FIRST%20Official-ff0055.svg?style=flat-square)](#-cvss-v31-scoring-engine)
 [![SARIF 2.1.0](https://img.shields.io/badge/SARIF-2.1.0%20OASIS-00e5ff.svg?style=flat-square)](#-sarif-210--github-code-scanning-export)
 [![HITL Gating](https://img.shields.io/badge/HITL-Enforceable%20Blocking-f1c26b.svg?style=flat-square)](#-enforceable-human-in-the-loop-hitl-gating)
 [![UI: Neon Cyber](https://img.shields.io/badge/Dashboard-Neon%20Cyber%20Fluid-00e5ff.svg?style=flat-square)](#-interactive-web-dashboard)
@@ -33,6 +34,10 @@ Moros strictly enforces an **evidence-first result model**: candidates are tied 
 ## 🛡️ Key Features
 
 - 🧠 **Autonomous ReAct Agent Runtime**: Real decision loop (`Thought` ➔ `Action` ➔ `Observation` ➔ `Final Answer`) with timeout-bounded tool calls and explicit `LLM_UNAVAILABLE` fallback.
+- 🛡️ **WAF Detection & Adaptive Evasion Pacing**: Automated fingerprinting of Cloudflare, AWS WAF, Akamai, Imperva, ModSecurity, and F5 BIG-IP with automatic dynamic request delay scaling and concurrency throttling to avoid IP bans.
+- 🧩 **Tech-Stack Profiling & Dynamic Skill Routing**: Auto-detects frameworks (Spring Boot, Django, Laravel, Express, Next.js, WordPress, GraphQL) and intelligently prioritizes matching attack vectors.
+- 🎯 **Official CVSS v3.1 Base Scoring**: Computes exact FIRST CVSS v3.1 mathematical scores, qualitative severities, and full Vector Strings for all findings and SARIF exports.
+- 🗺️ **Directed Attack Graph & Surface Mapping**: Synthesizes assets, subdomains, endpoints, and vulnerability sinks into a directed graph with interactive Mermaid visualization.
 - 💾 **Learning Engine & Persistent SQLite Memory**: Bounded signal scoring, FTS5-backed knowledge retrieval, cross-session recall (`recall()`), and pattern distillation (`distill()`) to prevent repetitive false positives.
 - ⚡ **Interactive Sub-Agent Directives**: Send direct operational instructions to specialist sub-agents (Recon, JS Hunter, XSS, SSRF, Auth/Race, Verifier, Reporting). Sub-agents execute registered tool chains, stream live observations, and record actions in durable sessions.
 - 🎯 **31 Extensible Security Micro-Skills**: Built-in coverage across IDOR/BOLA, SSTI, SQLi, SSRF, XSS, CRLF injection, Subdomain Takeover, Path Traversal, XXE, Host Header Injection, Rate Limiting, and Business Logic analysis.
@@ -254,6 +259,133 @@ skills/
 
 ---
 
+## 🤖 Universal Multi-LLM Provider Configuration
+
+Moros AI features a universal, vendor-neutral LLM runtime. You can point the agentic reasoning engine to any cloud API or local weights:
+
+| Provider | `--provider` | Default Model | Environment Variable |
+|:---|:---|:---|:---|
+| **DeepSeek** | `deepseek` | `deepseek-chat` | `DEEPSEEK_API_KEY` |
+| **OpenAI** | `openai` | `gpt-4o-mini` | `OPENAI_API_KEY` |
+| **Anthropic** | `anthropic` | `claude-3-5-sonnet-20241022` | `ANTHROPIC_API_KEY` |
+| **Groq** | `groq` | `llama-3.3-70b-versatile` | `GROQ_API_KEY` |
+| **Google Gemini** | `gemini` | `gemini-1.5-flash` | `GEMINI_API_KEY` |
+| **OpenRouter** | `openrouter` | `meta-llama/llama-3.3-70b-instruct` | `OPENROUTER_API_KEY` |
+| **xAI / Grok** | `xai` | `grok-beta` | `XAI_API_KEY` |
+| **Mistral** | `mistral` | `mistral-large-latest` | `MISTRAL_API_KEY` |
+| **Together AI** | `together` | `meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo` | `TOGETHER_API_KEY` |
+| **Cerebras** | `cerebras` | `llama3.1-70b` | `CEREBRAS_API_KEY` |
+| **SambaNova** | `sambanova` | `Meta-Llama-3.1-70B-Instruct` | `SAMBANOVA_API_KEY` |
+| **Fireworks** | `fireworks` | `accounts/fireworks/models/llama-v3p1-70b-instruct` | `FIREWORKS_API_KEY` |
+| **Perplexity** | `perplexity` | `sonar-pro` | `PERPLEXITY_API_KEY` |
+| **Cohere** | `cohere` | `command-r-plus` | `COHERE_API_KEY` |
+| **Ollama (Local)** | `ollama` | `llama3.2` | `OLLAMA_HOST` (default: `http://localhost:11434`) |
+
+```bash
+# Example: Running Moros AI with DeepSeek Reasoner
+python run.py --target example.com --provider deepseek --model deepseek-reasoner --api-key sk-xxxx
+
+# Example: Running Moros AI with local Ollama
+python run.py --target example.com --provider ollama --model llama3.2
+```
+
+---
+
+## 🔑 Authenticated Scanning
+
+Moros AI supports authenticated dynamic application security testing (DAST) without manual session re-negotiation:
+
+```bash
+# 1. Direct session cookie
+python run.py --target app.example.com --cookie "session_id=s%3A98765; role=admin"
+
+# 2. Bearer token / custom header
+python run.py --target api.example.com --auth-header "Authorization: Bearer eyJhbGciOi..."
+
+# 3. Auth configuration file (JSON)
+python run.py --target app.example.com --auth-file "targets/app.example.com/auth.json"
+```
+
+The auth JSON file supports structured cookie jars and headers:
+```json
+{
+  "headers": {
+    "Authorization": "Bearer eyJhbGci...",
+    "X-Tenant-ID": "acme-corp"
+  },
+  "cookies": {
+    "session_token": "abc123xyz"
+  }
+}
+```
+
+---
+
+## 🎯 Scope & Rules of Engagement Engine
+
+To guarantee zero out-of-scope interactions during automated scans, Moros AI uses a multi-tier boundary validator:
+
+1. **CLI Scope Overrides:**
+   ```bash
+   python run.py --target example.com \
+     --in-scope "*.example.com,example.com" \
+     --out-of-scope "checkout.example.com,payment.example.com" \
+     --bug-bounty-id "hackerone-operator"
+   ```
+2. **Target `scope.json`:** Auto-generated during `python setup.py init-target --domain example.com`:
+   ```json
+   {
+     "target": "example.com",
+     "in_scope": ["example.com", "*.example.com"],
+     "out_of_scope": ["internal.example.com"],
+     "notes": "Define precise scope boundaries here"
+   }
+   ```
+3. **Signed Scope-of-Work Verification:** Requires `scope-of-work.md` or `.pdf` in the target directory before active attack skills can fire.
+
+---
+
+## 💥 Automated Proof-of-Concept (PoC) Generation
+
+Every verified candidate vulnerability automatically triggers Moros AI's `PoCGenerator`. The system generates reproducible, standalone reproduction scripts in two formats under `targets/<target>/output/pocs/`:
+
+1. **Bash / cURL (`poc-*.sh`):** Copy-pasteable terminal command with exact headers, cookies, and injection vectors.
+2. **Python (`poc-*.py`):** Standalone Python reproduction script using standard libraries with response assertion checks.
+
+Findings recorded in `findings.sarif` and the Web Dashboard automatically link to both PoC scripts for rapid triage.
+
+---
+
+## 🔔 Real-Time Webhook Alerting
+
+Moros AI provides real-time notifications for critical findings and scan completion across team collaboration channels:
+
+```bash
+# Configure in .env or environment
+export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."
+export TELEGRAM_BOT_TOKEN="123456:ABC-DEF..."
+export TELEGRAM_CHAT_ID="-100123456789"
+export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
+```
+
+---
+
+## 🔀 Parallel Skill Execution
+
+Accelerate scan completion using multi-threaded independent skill execution:
+
+```bash
+# Execute independent vulnerability checks in parallel
+python run.py --target example.com --parallel --max-subagents 10
+```
+- **Phase A (Serial Prereqs):** Recon, JS crawler, and AST analyzer execute first.
+- **Phase B (Parallel Independents):** IDOR, SSRF, XSS, CRLF, SSTI, SQLi, and custom skills execute concurrently across threads.
+- **Phase C (Serial Finalizers):** Reviewer verification and report conglomeration assemble the final unified deliverables.
+
+---
+
+---
+
 ## 🧪 Automated Testing
 
 Verify system stability with the complete automated test suite:
@@ -264,32 +396,67 @@ python -m pytest -v tests/
 
 ```text
 ============================= test session starts =============================
-collected 53 items (100% passing)
+collected 62 items (100% passing)
 
-tests/test_agent_runtime.py::test_tool_registry_registration_and_execution PASSED [  4%]
-tests/test_agent_runtime.py::test_agent_context_and_result_dataclasses PASSED [  9%]
-tests/test_agent_runtime.py::test_agent_runner_react_loop PASSED         [ 13%]
-tests/test_agent_runtime.py::test_agent_runner_llm_unavailable_fallback PASSED [ 18%]
-tests/test_checkpoint_manager.py::test_checkpoint_creation_and_deterministic_id PASSED [ 22%]
-tests/test_checkpoint_manager.py::test_checkpoint_approval_and_rejection PASSED [ 27%]
-tests/test_checkpoint_manager.py::test_checkpoint_blocking_worker_wakes_on_decision PASSED [ 31%]
-tests/test_checkpoint_manager.py::test_checkpoint_timeout_rejects PASSED [ 36%]
-tests/test_dependency_validation.py::test_missing_dependency_unscheduled_is_blocked PASSED [ 40%]
-tests/test_dependency_validation.py::test_dependency_with_disk_artifact_is_not_blocked PASSED [ 45%]
-tests/test_dependency_validation.py::test_scheduled_prerequisites_are_not_blocked PASSED [ 50%]
-tests/test_run_manager.py::test_run_creation_and_persistence PASSED      [ 54%]
-tests/test_run_manager.py::test_run_event_stream_and_progress PASSED     [ 59%]
-tests/test_run_manager.py::test_finish_run PASSED                        [ 63%]
-tests/test_run_manager.py::test_agent_session_tracking PASSED            [ 68%]
-tests/test_sarif_exporter.py::test_extract_cwe_and_stride PASSED         [ 72%]
-tests/test_sarif_exporter.py::test_build_sarif_report_structure PASSED   [ 77%]
-tests/test_sarif_exporter.py::test_write_sarif_report_atomic PASSED      [ 81%]
-tests/test_scan_modes.py::test_scan_mode_skill_resolution PASSED         [ 86%]
-tests/test_subagent_chat.py::test_roster_active_status PASSED            [ 90%]
-tests/test_subagent_chat.py::test_agent_greetings PASSED                 [ 95%]
-tests/test_subagent_chat.py::test_execute_subagent_chat_deterministic PASSED [100%]
+tests/test_advanced_features.py::test_scope_validator_in_and_out_of_scope PASSED [  1%]
+tests/test_advanced_features.py::test_poc_generator PASSED               [  3%]
+tests/test_advanced_features.py::test_scoped_http_client_authenticated_headers PASSED [  4%]
+tests/test_advanced_features.py::test_scope_validator_reads_env_vars PASSED [  6%]
+tests/test_advanced_features.py::test_alert_dispatcher_safe_handling PASSED [  8%]
+tests/test_advanced_features.py::test_alert_dispatcher_telegram_and_slack PASSED [  9%]
+tests/test_agent_runtime.py::test_tool_registry_registration_and_execution PASSED [ 11%]
+tests/test_agent_runtime.py::test_agent_context_and_result_dataclasses PASSED [ 12%]
+tests/test_agent_runtime.py::test_agent_runner_react_loop PASSED         [ 14%]
+tests/test_agent_runtime.py::test_agent_runner_llm_unavailable_fallback PASSED [ 16%]
+tests/test_checkpoint_manager.py::test_checkpoint_creation_and_deterministic_id PASSED [ 17%]
+tests/test_checkpoint_manager.py::test_checkpoint_approval_and_rejection PASSED [ 19%]
+tests/test_checkpoint_manager.py::test_checkpoint_blocking_worker_wakes_on_decision PASSED [ 20%]
+tests/test_checkpoint_manager.py::test_checkpoint_timeout_rejects PASSED [ 22%]
+tests/test_dependency_validation.py::test_missing_dependency_unscheduled_is_blocked PASSED [ 24%]
+tests/test_dependency_validation.py::test_dependency_with_disk_artifact_is_not_blocked PASSED [ 25%]
+tests/test_dependency_validation.py::test_scheduled_prerequisites_are_not_blocked PASSED [ 27%]
+tests/test_dynamic_skills_and_subagents.py::test_dynamic_skills_discovery PASSED [ 29%]
+tests/test_dynamic_skills_and_subagents.py::test_build_default_agent_tools_with_subagents PASSED [ 30%]
+tests/test_dynamic_skills_and_subagents.py::test_spawn_subagent_execution PASSED [ 32%]
+tests/test_dynamic_skills_and_subagents.py::test_custom_skill_execution_via_script PASSED [ 33%]
+tests/test_integration.py::test_dry_run_exits_cleanly PASSED             [ 35%]
+tests/test_integration.py::test_list_skills PASSED                       [ 37%]
+tests/test_integration.py::test_check_prerequisites PASSED               [ 38%]
+tests/test_integration.py::test_init_target_creates_scope_files PASSED   [ 40%]
+tests/test_learning_engine.py::test_learning_engine_lifecycle PASSED     [ 41%]
+tests/test_run_manager.py::test_run_creation_and_persistence PASSED      [ 43%]
+tests/test_run_manager.py::test_run_event_stream_and_progress PASSED     [ 45%]
+tests/test_run_manager.py::test_finish_run PASSED                        [ 46%]
+tests/test_run_manager.py::test_agent_session_tracking PASSED            [ 48%]
+tests/test_sarif_exporter.py::test_extract_cwe_and_stride PASSED         [ 50%]
+tests/test_sarif_exporter.py::test_build_sarif_report_structure PASSED   [ 51%]
+tests/test_sarif_exporter.py::test_write_sarif_report_atomic PASSED      [ 53%]
+tests/test_scan_modes.py::test_scan_mode_skill_resolution PASSED         [ 54%]
+tests/test_scan_modes.py::test_quick_mode_skill_subset PASSED            [ 56%]
+tests/test_scan_modes.py::test_passive_mode_excludes_active_vuln_skills PASSED [ 58%]
+tests/test_scan_modes.py::test_deep_mode_includes_all_custom_skills PASSED [ 59%]
+tests/test_skill_registry.py::test_list_skills PASSED                    [ 61%]
+tests/test_skill_registry.py::test_create_and_get_custom_skill PASSED    [ 62%]
+tests/test_skill_registry.py::test_execution_order_with_custom_skill PASSED [ 64%]
+tests/test_skill_registry.py::test_core_skill_delete_protection PASSED   [ 66%]
+tests/test_skill_registry.py::test_delete_custom_skill PASSED            [ 67%]
+tests/test_subagent_chat.py::test_roster_active_status PASSED            [ 69%]
+tests/test_subagent_chat.py::test_agent_greetings PASSED                 [ 70%]
+tests/test_subagent_chat.py::test_execute_subagent_chat_deterministic PASSED [ 72%]
+tests/test_universal_llm.py::test_known_providers_populated PASSED       [ 74%]
+tests/test_universal_llm.py::test_provider_direct_instantiation PASSED   [ 75%]
+tests/test_universal_llm.py::test_universal_custom_provider PASSED       [ 77%]
+tests/test_universal_llm.py::test_xai_grok_provider PASSED               [ 79%]
+tests/test_universal_llm.py::test_mistral_provider PASSED                [ 80%]
+tests/test_vuln_skills.py::test_vuln_skills_dom_xss PASSED               [ 82%]
+tests/test_vuln_skills.py::test_vuln_skills_stored_xss PASSED            [ 83%]
+tests/test_vuln_skills.py::test_vuln_skills_blind_xss PASSED             [ 85%]
+tests/test_vuln_skills.py::test_vuln_skills_ssrf_and_post_exploit PASSED [ 87%]
+tests/test_vuln_skills.py::test_vuln_skills_idp_race_condition PASSED    [ 88%]
+tests/test_vuln_skills.py::test_vuln_skills_auth_password_reset PASSED   [ 90%]
+tests/test_vuln_skills.py::test_all_registered_vuln_skills_are_implemented PASSED [100%]
 
-============================= 53 passed in 13.62s =============================
+============================= 62 passed in 9.84s ==============================
 ```
 
 ---

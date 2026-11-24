@@ -6,7 +6,12 @@ Operator Manual & Complete User Guide for Moros AI Agent.
 
 import sys
 from pathlib import Path
-from playwright.sync_api import sync_playwright
+
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    print("Notice: Playwright is required to render MOROS_AI_OPERATOR_GUIDE.pdf. Install with 'pip install playwright && playwright install chromium'.")
+    sys.exit(0)
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 OUTPUT_PDF_ROOT = PROJECT_ROOT / "MOROS_AI_OPERATOR_GUIDE.pdf"
