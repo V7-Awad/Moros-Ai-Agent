@@ -295,10 +295,19 @@ class LLMClient:
             headers["HTTP-Referer"] = "https://github.com/V7-Awad/Moros-Ai-Agent"
             headers["X-Title"] = "Moros AI Pentest Agent"
 
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        return data["choices"][0]["message"]["content"]
+        for attempt in range(3):
+            try:
+                req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                return data["choices"][0]["message"]["content"]
+            except urllib.error.HTTPError as exc:
+                if exc.code in (429, 503) and attempt < 2:
+                    wait = (attempt + 1) * 2
+                    logger.warning(f"{self.provider}/{self.model} HTTP {exc.code}; retrying in {wait}s...")
+                    time.sleep(wait)
+                    continue
+                raise
 
     def _call_anthropic(self, prompt: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
         url = "https://api.anthropic.com/v1/messages"

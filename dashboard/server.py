@@ -45,25 +45,6 @@ from tools.skill_registry import SkillRegistry, CORE_SKILLS
 
 logger = logging.getLogger(__name__)
 
-# List of all 14 skills in dependency order
-ALL_SKILLS = [
-    "recon-subdomain",
-    "api-spec-discovery",
-    "js-discover",
-    "js-analyze",
-    "content-discovery",
-    "xss-reflected",
-    "xss-stored",
-    "xss-dom",
-    "xss-blind",
-    "ssrf-identify",
-    "ssrf-post-exploit",
-    "idp-race-condition",
-    "auth-password-reset-bruteforce",
-    "review-skill",
-    "report-conglomeration",
-]
-
 # In-memory scan manager
 active_scans = {}  # target -> {thread, status, logs, start_time, pid}
 
@@ -384,9 +365,83 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_json(self.get_notification_config())
             return
 
+        # 8. Learning Engine Endpoints
+        if path == "/api/learning/stats":
+            try:
+                from learning_engine.engine import LearningEngine
+                engine = LearningEngine()
+                self.send_json(engine.distill())
+            except Exception as e:
+                self.send_json({"error": str(e)}, status=500)
+            return
+
+        if path == "/api/learning/recall":
+            try:
+                q = query.get("q", [""])[0]
+                limit = int(query.get("limit", [10])[0])
+                from learning_engine.engine import LearningEngine
+                engine = LearningEngine()
+                self.send_json({"results": engine.recall(q, limit=limit)})
+            except Exception as e:
+                self.send_json({"error": str(e)}, status=500)
+            return
+
+        if path == "/api/learning/graph":
+            try:
+                from learning_engine.engine import LearningEngine
+                engine = LearningEngine()
+                self.send_json(engine.knowledge_graph())
+            except Exception as e:
+                self.send_json({"error": str(e)}, status=500)
+            return
+
         self.send_error_json("Unknown API endpoint", status=404)
 
     def handle_api_post(self, path, body):
+        # Learning Engine Endpoints
+        if path == "/api/learning/finding":
+            try:
+                from learning_engine.engine import LearningEngine
+                engine = LearningEngine()
+                res = engine.record_finding(
+                    target=body.get("target", "unknown"),
+                    vuln_class=body.get("vuln_class", "general"),
+                    title=body.get("title", ""),
+                    severity=body.get("severity", "medium"),
+                    confidence=float(body.get("confidence", 0.5)),
+                    evidence=body.get("evidence"),
+                    signals=body.get("signals"),
+                    source=body.get("source", "dashboard"),
+                )
+                self.send_json(res)
+            except Exception as e:
+                self.send_json({"error": str(e)}, status=500)
+            return
+
+        if path == "/api/learning/triage":
+            try:
+                from learning_engine.engine import LearningEngine
+                engine = LearningEngine()
+                res = engine.record_triage(
+                    finding_id=body.get("finding_id", ""),
+                    verdict=body.get("verdict", "unverified"),
+                    reason=body.get("reason"),
+                    reviewer=body.get("reviewer", "dashboard"),
+                )
+                self.send_json(res)
+            except Exception as e:
+                self.send_json({"error": str(e)}, status=500)
+            return
+
+        if path == "/api/learning/score":
+            try:
+                from learning_engine.scoring.engine import score
+                res = score(body.get("signals", {}))
+                self.send_json(res)
+            except Exception as e:
+                self.send_json({"error": str(e)}, status=500)
+            return
+
         # 1. Create target
         if path == "/api/targets/create":
             domain = str(body.get("domain", "")).strip()
@@ -427,7 +482,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
 
             try:
-                res = self.start_scan_job(target, skills, models, dry_run, scan_mode=scan_mode)
+                max_sub = int(body.get("max_subagents", 10))
+                res = self.start_scan_job(target, skills, models, dry_run, scan_mode=scan_mode, max_subagents=max_sub)
                 self.send_json(res)
             except Exception as exc:
                 logger.exception("Failed to enqueue dashboard scan for %s", target)
@@ -1498,7 +1554,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     # ==================== SCAN MANAGEMENT ====================
 
-    def start_scan_job(self, target, skills, models, dry_run=False, scan_mode="quick"):
+    def start_scan_job(self, target, skills, models, dry_run=False, scan_mode="quick", max_subagents=10):
         if target in active_scans and active_scans[target]["status"] == "running":
             return {"status": "error", "message": f"A scan is already running for {target}"}
 
@@ -1527,6 +1583,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "--https-only",
                 "--max-http-requests", "40",
                 "--request-delay", "0.4",
+                "--max-subagents", str(max_subagents),
             ]
             if dry_run:
                 cmd.append("--dry-run")

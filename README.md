@@ -11,8 +11,9 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-00e5ff.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-0077ff.svg?style=flat-square)](LICENSE)
-[![Tests Passing](https://img.shields.io/badge/tests-32%20passed%20(100%25)-19e6b0.svg?style=flat-square)](tests/)
+[![Tests Passing](https://img.shields.io/badge/tests-53%20passed%20(100%25)-19e6b0.svg?style=flat-square)](tests/)
 [![Manual](https://img.shields.io/badge/Documentation-PDF%20Manual-0284c7.svg?style=flat-square)](MOROS_AI_OPERATOR_GUIDE.pdf)
+[![Skills](https://img.shields.io/badge/skills-31%20installed-7c3aed.svg?style=flat-square)](#-extensible-skills-suite)
 [![SARIF 2.1.0](https://img.shields.io/badge/SARIF-2.1.0%20OASIS-00e5ff.svg?style=flat-square)](#-sarif-210--github-code-scanning-export)
 [![HITL Gating](https://img.shields.io/badge/HITL-Enforceable%20Blocking-f1c26b.svg?style=flat-square)](#-enforceable-human-in-the-loop-hitl-gating)
 [![UI: Neon Cyber](https://img.shields.io/badge/Dashboard-Neon%20Cyber%20Fluid-00e5ff.svg?style=flat-square)](#-interactive-web-dashboard)
@@ -32,7 +33,9 @@ Moros strictly enforces an **evidence-first result model**: candidates are tied 
 ## 🛡️ Key Features
 
 - 🧠 **Autonomous ReAct Agent Runtime**: Real decision loop (`Thought` ➔ `Action` ➔ `Observation` ➔ `Final Answer`) with timeout-bounded tool calls and explicit `LLM_UNAVAILABLE` fallback.
+- 💾 **Learning Engine & Persistent SQLite Memory**: Bounded signal scoring, FTS5-backed knowledge retrieval, cross-session recall (`recall()`), and pattern distillation (`distill()`) to prevent repetitive false positives.
 - ⚡ **Interactive Sub-Agent Directives**: Send direct operational instructions to specialist sub-agents (Recon, JS Hunter, XSS, SSRF, Auth/Race, Verifier, Reporting). Sub-agents execute registered tool chains, stream live observations, and record actions in durable sessions.
+- 🎯 **31 Extensible Security Micro-Skills**: Built-in coverage across IDOR/BOLA, SSTI, SQLi, SSRF, XSS, CRLF injection, Subdomain Takeover, Path Traversal, XXE, Host Header Injection, Rate Limiting, and Business Logic analysis.
 - 📊 **OASIS SARIF 2.1.0 Export**: Standardized vulnerability export (`targets/<target>/output/report/findings.sarif`) with CWE mapping, STRIDE threat tags, and security-severity scores for direct ingestion into GitHub Code Scanning Alerts (`upload-sarif`) and ASPM platforms.
 - 🧭 **Multi-Tier Scan Profiles**: Execute targeted assessments using `--scan-mode quick` (fast surface recon & AST discovery), `--scan-mode deep` (full exploit suite & race audits), or `--scan-mode passive` (zero active probing, purely OSINT & cert logs).
 - 🎛️ **In-Dashboard LLM & API Management**: Switch models, configure endpoints, and validate API connections (DeepSeek, OpenAI, Anthropic Claude, Groq, Gemini, OpenRouter, Ollama, LM Studio, vLLM) directly inside the Web UI.
@@ -261,7 +264,7 @@ python -m pytest -v tests/
 
 ```text
 ============================= test session starts =============================
-collected 22 items
+collected 53 items (100% passing)
 
 tests/test_agent_runtime.py::test_tool_registry_registration_and_execution PASSED [  4%]
 tests/test_agent_runtime.py::test_agent_context_and_result_dataclasses PASSED [  9%]
@@ -286,7 +289,7 @@ tests/test_subagent_chat.py::test_roster_active_status PASSED            [ 90%]
 tests/test_subagent_chat.py::test_agent_greetings PASSED                 [ 95%]
 tests/test_subagent_chat.py::test_execute_subagent_chat_deterministic PASSED [100%]
 
-============================= 22 passed in 3.04s ==============================
+============================= 53 passed in 13.62s =============================
 ```
 
 ---

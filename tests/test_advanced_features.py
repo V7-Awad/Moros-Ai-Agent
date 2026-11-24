@@ -78,6 +78,20 @@ def test_scoped_http_client_authenticated_headers():
 
     assert client.auth_headers["Authorization"] == "Bearer test-jwt-token"
     assert client.cookies == "session=abc123xyz"
+    assert hasattr(client, "get")
+    assert hasattr(client, "head")
+
+
+def test_scope_validator_reads_env_vars(monkeypatch):
+    monkeypatch.setenv("MOROS_IN_SCOPE", "api.test.com,*.cdn.test.com")
+    monkeypatch.setenv("MOROS_OUT_OF_SCOPE", "blog.test.com")
+    sv = ScopeValidator("test.com")
+    assert "api.test.com" in sv.in_scope
+    assert "blog.test.com" in sv.out_of_scope
+    allowed, _ = sv.is_allowed("api.test.com")
+    assert allowed
+    allowed, _ = sv.is_allowed("blog.test.com")
+    assert not allowed
 
 
 def test_alert_dispatcher_safe_handling():

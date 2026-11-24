@@ -41,9 +41,11 @@ class AgentContext:
     artifacts: List[Dict[str, Any]] = field(default_factory=list)
     conversation: List[Dict[str, Any]] = field(default_factory=list)
     budget: Dict[str, Any] = field(default_factory=lambda: {
-        "max_steps": 6,
-        "max_tokens": 4000,
-        "timeout_seconds": 180,
+        "max_steps": 25,
+        "max_tokens": 8192,
+        "timeout_seconds": 600,
+        "max_history_items": 40,
+        "max_prompt_chars": 48000,
     })
 
 
@@ -195,10 +197,12 @@ class AgentRunner:
             logger.info(f"[{agent_id}] ReAct Step {step}/{max_steps}")
 
             # Send prompt to LLM (expanded context window)
+            max_history_items = context.budget.get("max_history_items", 40)
+            max_prompt_chars = context.budget.get("max_prompt_chars", 48000)
             step_prompt = "\n\n".join(
                 f"{item['role'].upper()}: {item['content']}"
-                for item in history[-40:]
-            )[-48000:]
+                for item in history[-max_history_items:]
+            )[-max_prompt_chars:]
             llm_response = self.llm.complete(
                 step_prompt,
                 system_prompt=full_system_prompt,
@@ -495,7 +499,7 @@ def build_default_agent_tools(
                 skill=sub_id,
                 run_id=context.run_id,
                 scope=context.scope,
-                budget={"max_steps": 5, "max_tokens": 4000, "timeout_seconds": 120}
+                budget={"max_steps": 15, "max_tokens": 8192, "timeout_seconds": 300}
             )
 
             # Child gets standard toolkit without recursive subagent spawning

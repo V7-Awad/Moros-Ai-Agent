@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moros-ai"
+version = "1.0.0"
+description = "Autonomous Agentic Web Penetration Testing System"
+authors = [{name = "Moros AI Team"}]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "playwright>=1.40.0",
+    "jsbeautifier>=1.14.0",
+    "PyYAML>=6.0",
+]
+
+[project.scripts]
+moros = "run:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

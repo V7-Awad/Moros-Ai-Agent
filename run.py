@@ -87,7 +87,7 @@ Examples:
     parser.add_argument("--skills", default="all",
                         help="Comma-separated skill names, or 'all' (default: all)")
     parser.add_argument("--scan-mode", choices=["quick", "deep", "full", "passive"], default="full",
-                        help="Scan profile: quick (surface recon & discovery), deep/full (full 14-skill exploit suite), passive (zero active probes)")
+                        help="Scan profile: quick (surface recon & discovery), deep/full (full exploit suite), passive (zero active probes)")
     parser.add_argument("--fail-on-candidate", action="store_true",
                         help="Return exit code 2 when the completed run contains unverified candidate findings (useful in CI)")
     parser.add_argument("--models", default="default",
@@ -112,7 +112,7 @@ Examples:
                         help="Show execution plan without running anything")
     parser.add_argument("--check", action="store_true",
                         help="Check prerequisites only")
-    parser.add_argument("--provider", choices=list(KNOWN_PROVIDERS.keys()) + ["ollama"], default=None,
+    parser.add_argument("--provider", choices=list(KNOWN_PROVIDERS.keys()), default=None,
                         help="LLM provider for agentic reasoning (e.g. deepseek, openai, anthropic, groq)")
     parser.add_argument("--api-key", default=None,
                         help="API key for the selected provider (e.g. sk-...)")
@@ -128,6 +128,12 @@ Examples:
                         help="Custom authorization header (e.g. 'Authorization: Bearer eyJ...')")
     parser.add_argument("--auth-file", default=None,
                         help="Path to JSON file containing auth headers/cookies")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="Enable verbose debug output")
+    parser.add_argument("--quiet", "-q", action="store_true",
+                        help="Suppress informational output, show only errors and results")
+    parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                        default="INFO", help="Set logging verbosity")
     parser.add_argument("--in-scope", default=None,
                         help="Comma-separated list of allowed host patterns (e.g. '*.target.com,target.com')")
     parser.add_argument("--out-of-scope", default=None,
@@ -145,6 +151,14 @@ Examples:
 
     args = parser.parse_args()
     load_dotenv_if_present()
+
+    import logging
+    if args.verbose:
+        logging.basicConfig(level=logging.DEBUG, force=True)
+    elif args.quiet:
+        logging.basicConfig(level=logging.ERROR, force=True)
+    else:
+        logging.basicConfig(level=getattr(logging, args.log_level, logging.INFO), force=True)
 
     # Configure provider overrides if specified on CLI
     if args.provider:

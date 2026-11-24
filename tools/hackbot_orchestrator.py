@@ -401,6 +401,11 @@ class HackbotOrchestrator:
                 result["status"] = res.get("status", "COMPLETED")
                 result["notes"] = f"Generated report with {res.get('findings_count', 0)} findings"
             else:
+                # Share remaining HTTP budget with custom skill runner if available
+                if hasattr(self.runner, "http") and hasattr(self.runner.http, "max_requests"):
+                    remaining_budget = max(0, self.runner.http.max_requests - self.runner.http.request_count)
+                    os.environ["MOROS_HTTP_REQUESTS_REMAINING"] = str(remaining_budget)
+
                 # Dynamic custom skill execution
                 res = self.runner.run_custom_skill(skill_name)
                 result["status"] = res.get("status", "COMPLETED")

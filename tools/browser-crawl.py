@@ -31,8 +31,8 @@ from urllib.parse import urljoin, urlparse
 try:
     from playwright.async_api import async_playwright
 except ImportError:
-    print("ERROR: playwright not installed. Run: pip install playwright && playwright install chromium")
-    sys.exit(1)
+    print(json.dumps({"status": "SKIPPED", "reason": "playwright not installed"}))
+    sys.exit(0)
 
 logging.basicConfig(
     level=logging.INFO,

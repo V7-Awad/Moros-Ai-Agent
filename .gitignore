@@ -26,6 +26,18 @@ desktop.ini
 targets/*
 !targets/demo.target.local/
 !targets/demo.target.local/**
+targets/demo.target.local/output/runs/
+targets/demo.target.local/output/conversations/
+
+# Reference materials
+_ref/
+
+# Learning Engine DB
+learning_engine/memory/*.db
+learning_engine/memory/*.db-journal
+learning_engine/memory/*.db-wal
+*.db
+*.sqlite3
 
 # Working scratch & IDE internal
 .work/

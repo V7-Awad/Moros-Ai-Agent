@@ -273,6 +273,12 @@ def build_sarif_report(
         if f.get("curl"):
             res_item["properties"]["moros"]["reproduction_curl"] = f.get("curl")
 
+        if f.get("poc_sh") or f.get("poc_py"):
+            res_item["properties"]["moros"]["poc_scripts"] = {
+                "bash": f.get("poc_sh", ""),
+                "python": f.get("poc_py", ""),
+            }
+
         results.append(res_item)
 
     driver: Dict[str, Any] = {

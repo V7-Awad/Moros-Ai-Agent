@@ -10,6 +10,7 @@ Enforces in-scope and out-of-scope boundaries:
 
 import fnmatch
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -29,6 +30,21 @@ class ScopeValidator:
 
         if target_dir:
             self._load_from_target_dir(Path(target_dir))
+
+        # Also read from env vars set by --in-scope / --out-of-scope CLI flags
+        env_in = os.environ.get("MOROS_IN_SCOPE", "").strip()
+        if env_in:
+            for s in env_in.split(","):
+                s_clean = s.strip().lower()
+                if s_clean and s_clean not in self.in_scope:
+                    self.in_scope.append(s_clean)
+
+        env_out = os.environ.get("MOROS_OUT_OF_SCOPE", "").strip()
+        if env_out:
+            for s in env_out.split(","):
+                s_clean = s.strip().lower()
+                if s_clean and s_clean not in self.out_of_scope:
+                    self.out_of_scope.append(s_clean)
 
         # Default in-scope if empty
         if not self.in_scope and self.target:

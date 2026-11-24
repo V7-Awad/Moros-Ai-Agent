@@ -33,7 +33,7 @@ def test_agent_context_and_result_dataclasses(tmp_path):
         run_id="test-run-1"
     )
     assert ctx.target == "example.com"
-    assert ctx.budget["max_steps"] == 6
+    assert ctx.budget["max_steps"] == 25
 
     res = AgentResult(
         status="completed",

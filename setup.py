@@ -9,6 +9,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -102,6 +103,42 @@ def init_target(domain: str):
         if not gitkeep.exists() and not any(d.iterdir()):
             gitkeep.touch()
 
+    # Create scope.json template
+    scope_json = target_dir / "scope.json"
+    if not scope_json.exists():
+        scope_template = {
+            "target": domain,
+            "in_scope": [domain, f"*.{domain}"],
+            "out_of_scope": [],
+            "notes": "Edit this file to define precise scope boundaries"
+        }
+        scope_json.write_text(
+            json.dumps(scope_template, indent=2) + "\n",
+            encoding="utf-8"
+        )
+
+    # Create scope-of-work.md template
+    scope_md = target_dir / "scope-of-work.md"
+    if not scope_md.exists():
+        scope_md.write_text(
+            f"# Scope of Work — {domain}\n\n"
+            f"## Authorization\n"
+            f"This assessment of `{domain}` is authorized under:\n"
+            f"- [ ] Bug Bounty Program\n"
+            f"- [ ] Penetration Testing Agreement\n"
+            f"- [ ] Written Authorization\n\n"
+            f"## In Scope\n"
+            f"- `{domain}`\n"
+            f"- `*.{domain}`\n\n"
+            f"## Out of Scope\n"
+            f"- (add excluded hosts here)\n\n"
+            f"## Rules of Engagement\n"
+            f"- Non-destructive testing only\n"
+            f"- No denial of service\n"
+            f"- No data exfiltration\n",
+            encoding="utf-8"
+        )
+
     print(f"✅ Target initialized: {target_dir}")
     print(f"   📁 Output directories created")
     print(f"   ⚠️  Place your scope-of-work.pdf in: {target_dir}/")
@@ -125,11 +162,7 @@ def check_system():
     packages = {
         "playwright": "playwright",
         "jsbeautifier": "jsbeautifier",
-        "requests": "requests",
-        "bs4": "beautifulsoup4",
-        "rich": "rich",
-        "click": "click",
-        "tqdm": "tqdm",
+        "yaml": "PyYAML",
     }
 
     for import_name, pip_name in packages.items():

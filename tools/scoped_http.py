@@ -75,6 +75,21 @@ class ScopedHttpClient:
         self.cookies = cookies or os.environ.get("MOROS_AUTH_COOKIE", "").strip()
         self.scope_validator = scope_validator or ScopeValidator(self.target)
 
+    def get(self, url_or_path: str, headers: Optional[Dict[str, str]] = None,
+            params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Convenience GET wrapper with optional extra headers."""
+        if headers:
+            saved = dict(self.auth_headers)
+            self.auth_headers.update(headers)
+            result = self.request(url_or_path, method="GET", params=params)
+            self.auth_headers = saved
+            return result
+        return self.request(url_or_path, method="GET", params=params)
+
+    def head(self, url_or_path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Convenience HEAD wrapper."""
+        return self.request(url_or_path, method="HEAD", params=params)
+
     def request(self, url_or_path: str, method: str = "GET", params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         method = method.upper()
         if method not in {"GET", "HEAD"}:
@@ -139,6 +154,21 @@ class ScopedHttpClient:
                 "duration_s": round(time.monotonic() - started, 3),
             }
 
+    def get(self, url_or_path: str, headers: Optional[Dict[str, str]] = None,
+            params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Convenience GET wrapper with optional extra headers."""
+        if headers:
+            saved = dict(self.auth_headers)
+            self.auth_headers.update(headers)
+            result = self.request(url_or_path, method="GET", params=params)
+            self.auth_headers = saved
+            return result
+        return self.request(url_or_path, method="GET", params=params)
+
+    def head(self, url_or_path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Convenience HEAD wrapper."""
+        return self.request(url_or_path, method="HEAD", params=params)
+
     def record_external_requests(self, count: int) -> None:
         """Account for requests made by an equally scoped browser worker."""
         count = max(0, int(count))
@@ -154,6 +184,18 @@ class ScopedHttpClient:
             "content-type", "server", "strict-transport-security",
             "content-security-policy", "x-content-type-options",
             "x-frame-options", "referrer-policy",
+            # CORS audit headers
+            "access-control-allow-origin", "access-control-allow-credentials",
+            "access-control-allow-methods", "access-control-allow-headers",
+            "access-control-expose-headers", "access-control-max-age",
+            # Redirect & auth
+            "location", "www-authenticate",
+            # Session & cookies
+            "set-cookie",
+            # Security & fingerprinting
+            "x-powered-by", "x-xss-protection", "permissions-policy",
+            "cross-origin-opener-policy", "cross-origin-embedder-policy",
+            "cross-origin-resource-policy",
         }
         parsed = urllib.parse.urlparse(url)
         safe_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
