@@ -24,22 +24,46 @@ workspace root, so pipelines can do:
 
 from __future__ import annotations
 
+import json
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .analytics.patterns import (
     duplicate_heavy_patterns,
+    estimate_scan_value_and_cost as _estimate_scan_value_and_cost,
     fp_pattern_candidates,
+    get_advisory_patterns as _get_advisory_patterns,
     highest_signal_surfaces,
     per_class_stats,
+    recommend_regression_tests as _recommend_regression_tests,
+    recommend_skills_for_tech as _recommend_skills_for_tech,
+    recommend_validation_strategies as _recommend_validation_strategies,
     signal_heatmap,
     target_summary,
 )
 from .core.config import Config, DEFAULT_RECALL_LIMIT, get_config
 from .core.storage import Database
+from .core.validation import (
+    normalize_finding_id,
+    normalize_target,
+    normalize_tech_name,
+    normalize_vuln_class,
+    validate_confidence,
+    validate_evidence_ids,
+    validate_metadata,
+    validate_severity,
+)
 from .graph.builder import build_graph
 from .ingestion.finding import normalize_finding, persist_finding
-from .ingestion.triage import persist_triage
+from .ingestion.triage import (
+    latest_outcome,
+    list_outcomes,
+    persist_remediation_outcome,
+    persist_retest_outcome,
+    persist_triage,
+    persist_validation_outcome,
+)
 from .retrieval.search import search_findings, search_lessons
 from .scoring.engine import score as _score
 
@@ -116,10 +140,387 @@ class LearningEngine:
         verdict: str,
         reason: str | None = None,
         reviewer: str | None = None,
+        lifecycle_outcome: str | None = None,
+        confidence: float | None = None,
+        run_id: str | None = None,
+        evidence_ids: list[str] | tuple[str, ...] | None = None,
+        metadata: dict | None = None,
     ) -> dict:
         return persist_triage(
-            self._db(), finding_id=finding_id, verdict=verdict,
-            reason=reason, reviewer=reviewer,
+            self._db(),
+            finding_id=finding_id,
+            verdict=verdict,
+            reason=reason,
+            reviewer=reviewer,
+            lifecycle_outcome=lifecycle_outcome,
+            confidence=confidence,
+            run_id=run_id,
+            evidence_ids=evidence_ids,
+            metadata=metadata,
+        )
+
+    # ---- Additive Phase 6 ingestion hooks -----------------------------
+    def record_validation_outcome(
+        self,
+        *,
+        target: str,
+        outcome: str,
+        finding_id: str | None = None,
+        vuln_class: str | None = None,
+        confidence: float = 0.5,
+        strategy: str | None = None,
+        run_id: str | None = None,
+        evidence_ids: list[str] | tuple[str, ...] | None = None,
+        metadata: dict | None = None,
+    ) -> dict:
+        """Record an exploit validation outcome (confirmed, false_positive, inconclusive, unverified)."""
+        return persist_validation_outcome(
+            self._db(),
+            target=target,
+            outcome=outcome,
+            finding_id=finding_id,
+            vuln_class=vuln_class,
+            confidence=confidence,
+            strategy=strategy,
+            run_id=run_id,
+            evidence_ids=evidence_ids,
+            metadata=metadata,
+        )
+
+    def record_remediation_outcome(
+        self,
+        *,
+        target: str,
+        outcome: str,
+        finding_id: str | None = None,
+        vuln_class: str | None = None,
+        confidence: float = 0.5,
+        strategy: str | None = None,
+        run_id: str | None = None,
+        evidence_ids: list[str] | tuple[str, ...] | None = None,
+        metadata: dict | None = None,
+    ) -> dict:
+        """Record a remediation lifecycle outcome (proposed, tested_pass, tested_fail, approved, rejected, applied)."""
+        return persist_remediation_outcome(
+            self._db(),
+            target=target,
+            outcome=outcome,
+            finding_id=finding_id,
+            vuln_class=vuln_class,
+            confidence=confidence,
+            strategy=strategy,
+            run_id=run_id,
+            evidence_ids=evidence_ids,
+            metadata=metadata,
+        )
+
+    def record_retest_outcome(
+        self,
+        *,
+        target: str,
+        outcome: str,
+        finding_id: str | None = None,
+        vuln_class: str | None = None,
+        confidence: float = 0.5,
+        strategy: str | None = None,
+        run_id: str | None = None,
+        evidence_ids: list[str] | tuple[str, ...] | None = None,
+        metadata: dict | None = None,
+    ) -> dict:
+        """Record a retest outcome (fixed, still_vulnerable, regression_detected, inconclusive)."""
+        return persist_retest_outcome(
+            self._db(),
+            target=target,
+            outcome=outcome,
+            finding_id=finding_id,
+            vuln_class=vuln_class,
+            confidence=confidence,
+            strategy=strategy,
+            run_id=run_id,
+            evidence_ids=evidence_ids,
+            metadata=metadata,
+        )
+
+    def record_tech_fingerprint(
+        self,
+        *,
+        target: str,
+        technology: str,
+        version: str = "",
+        category: str = "",
+        confidence: float = 1.0,
+        run_id: str | None = None,
+        evidence_ids: list[str] | tuple[str, ...] | None = None,
+        metadata: dict | None = None,
+    ) -> dict:
+        """Persist a detected technology fingerprint with provenance."""
+        norm_target = normalize_target(target)
+        norm_tech = normalize_tech_name(technology)
+        conf = validate_confidence(confidence)
+        ev_list = validate_evidence_ids(evidence_ids)
+        meta_dict = validate_metadata(metadata)
+        clean_run_id = str(run_id).strip() if run_id else None
+        now = _now()
+        db = self._db()
+        db.execute(
+            """
+            INSERT INTO tech_fingerprints
+                (target, technology, version, category, confidence, run_id, evidence_ids, metadata, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                norm_target,
+                norm_tech,
+                str(version or "").strip(),
+                str(category or "").strip(),
+                conf,
+                clean_run_id,
+                json.dumps(ev_list),
+                json.dumps(meta_dict),
+                now,
+            ),
+        )
+        db.commit()
+        return {
+            "target": norm_target,
+            "technology": norm_tech,
+            "version": str(version or "").strip(),
+            "category": str(category or "").strip(),
+            "confidence": conf,
+            "run_id": clean_run_id,
+            "evidence_ids": ev_list,
+            "metadata": meta_dict,
+            "created_at": now,
+        }
+
+    def record_skill_telemetry(
+        self,
+        *,
+        target: str,
+        skill_id: str,
+        vuln_class: str = "",
+        status: str = "completed",
+        duration_ms: float = 0.0,
+        cost_usd: float = 0.0,
+        tokens_used: int = 0,
+        findings_count: int = 0,
+        confirmed_count: int = 0,
+        tech_stack: list[str] | tuple[str, ...] | None = None,
+        run_id: str | None = None,
+        evidence_ids: list[str] | tuple[str, ...] | None = None,
+        metadata: dict | None = None,
+    ) -> dict:
+        """Persist skill execution duration, cost, yield, and tech context."""
+        norm_target = normalize_target(target)
+        clean_skill = str(skill_id or "").strip()
+        if not clean_skill:
+            raise ValueError("skill_id must be non-empty")
+        vclass = normalize_vuln_class(vuln_class) if vuln_class else ""
+        techs = [normalize_tech_name(t) for t in (tech_stack or []) if str(t or "").strip()]
+        ev_list = validate_evidence_ids(evidence_ids)
+        meta_dict = validate_metadata(metadata)
+        clean_run_id = str(run_id).strip() if run_id else None
+        tid = f"tel-{uuid.uuid4().hex[:12]}"
+        now = _now()
+        db = self._db()
+        db.execute(
+            """
+            INSERT INTO skill_telemetry
+                (telemetry_id, target, skill_id, vuln_class, status, duration_ms, cost_usd,
+                 tokens_used, findings_count, confirmed_count, tech_stack, run_id,
+                 evidence_ids, metadata, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                tid,
+                norm_target,
+                clean_skill,
+                vclass,
+                str(status or "completed").strip().lower(),
+                max(0.0, float(duration_ms or 0.0)),
+                max(0.0, float(cost_usd or 0.0)),
+                max(0, int(tokens_used or 0)),
+                max(0, int(findings_count or 0)),
+                max(0, int(confirmed_count or 0)),
+                json.dumps(techs),
+                clean_run_id,
+                json.dumps(ev_list),
+                json.dumps(meta_dict),
+                now,
+            ),
+        )
+        db.commit()
+        return {
+            "telemetry_id": tid,
+            "target": norm_target,
+            "skill_id": clean_skill,
+            "vuln_class": vclass,
+            "status": str(status or "completed").strip().lower(),
+            "duration_ms": max(0.0, float(duration_ms or 0.0)),
+            "cost_usd": max(0.0, float(cost_usd or 0.0)),
+            "tokens_used": max(0, int(tokens_used or 0)),
+            "findings_count": max(0, int(findings_count or 0)),
+            "confirmed_count": max(0, int(confirmed_count or 0)),
+            "tech_stack": techs,
+            "run_id": clean_run_id,
+            "evidence_ids": ev_list,
+            "metadata": meta_dict,
+            "created_at": now,
+        }
+
+    def record_attack_path(
+        self,
+        *,
+        target: str,
+        title: str,
+        path_id: str | None = None,
+        steps: list[dict] | None = None,
+        finding_ids: list[str] | tuple[str, ...] | None = None,
+        path_severity: str = "medium",
+        path_risk_score: float = 0.0,
+        verified: bool = False,
+        reviewed_by: str | None = None,
+        review_status: str = "reviewed",
+        run_id: str | None = None,
+        evidence_ids: list[str] | tuple[str, ...] | None = None,
+        metadata: dict | None = None,
+    ) -> dict:
+        """Persist a reviewed attack path with provenance."""
+        norm_target = normalize_target(target)
+        sev = validate_severity(path_severity)
+        fids = [normalize_finding_id(f) for f in (finding_ids or []) if str(f or "").strip()]
+        ev_list = validate_evidence_ids(evidence_ids)
+        meta_dict = validate_metadata(metadata)
+        clean_run_id = str(run_id).strip() if run_id else None
+        pid = str(path_id or f"ap-{uuid.uuid4().hex[:12]}").strip()
+        clean_steps = list(steps or [])
+        now = _now()
+        db = self._db()
+        db.execute(
+            """
+            INSERT INTO attack_paths
+                (path_id, target, title, steps, finding_ids, path_severity, path_risk_score,
+                 verified, reviewed_by, review_status, run_id, evidence_ids, metadata, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(path_id) DO UPDATE SET
+                title = excluded.title,
+                steps = excluded.steps,
+                finding_ids = excluded.finding_ids,
+                path_severity = excluded.path_severity,
+                path_risk_score = excluded.path_risk_score,
+                verified = excluded.verified,
+                reviewed_by = excluded.reviewed_by,
+                review_status = excluded.review_status,
+                run_id = excluded.run_id,
+                evidence_ids = excluded.evidence_ids,
+                metadata = excluded.metadata
+            """,
+            (
+                pid,
+                norm_target,
+                str(title).strip() or "attack path",
+                json.dumps(clean_steps),
+                json.dumps(fids),
+                sev,
+                float(path_risk_score or 0.0),
+                1 if verified else 0,
+                str(reviewed_by).strip() if reviewed_by else None,
+                str(review_status or "reviewed").strip().lower(),
+                clean_run_id,
+                json.dumps(ev_list),
+                json.dumps(meta_dict),
+                now,
+            ),
+        )
+        db.commit()
+        return {
+            "path_id": pid,
+            "target": norm_target,
+            "title": str(title).strip() or "attack path",
+            "steps": clean_steps,
+            "finding_ids": fids,
+            "path_severity": sev,
+            "path_risk_score": float(path_risk_score or 0.0),
+            "verified": bool(verified),
+            "reviewed_by": str(reviewed_by).strip() if reviewed_by else None,
+            "review_status": str(review_status or "reviewed").strip().lower(),
+            "run_id": clean_run_id,
+            "evidence_ids": ev_list,
+            "metadata": meta_dict,
+            "created_at": now,
+        }
+
+    def get_outcomes(
+        self,
+        *,
+        target: str | None = None,
+        finding_id: str | None = None,
+        outcome_kind: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """List stored outcome events."""
+        return list_outcomes(
+            self._db(),
+            target=target,
+            finding_id=finding_id,
+            outcome_kind=outcome_kind,
+            limit=limit,
+        )
+
+    def latest_outcome(
+        self, finding_id: str, outcome_kind: str | None = None
+    ) -> dict | None:
+        """Fetch latest outcome event for a finding."""
+        return latest_outcome(self._db(), finding_id, outcome_kind=outcome_kind)
+
+    # ---- Advisory recommendation helpers (strictly advisory=True) ----
+    def recommend_skills_for_tech(
+        self,
+        techs: list[str] | None = None,
+        target: str | None = None,
+        limit: int = 10,
+    ) -> list[dict]:
+        return _recommend_skills_for_tech(self._db(), techs=techs, target=target, limit=limit)
+
+    def recommend_validation_strategies(
+        self,
+        vuln_class: str | None = None,
+        target: str | None = None,
+        limit: int = 10,
+    ) -> list[dict]:
+        return _recommend_validation_strategies(
+            self._db(), vuln_class=vuln_class, target=target, limit=limit
+        )
+
+    def estimate_scan_value_and_cost(
+        self,
+        skills: list[str] | None = None,
+        techs: list[str] | None = None,
+        target: str | None = None,
+    ) -> dict:
+        return _estimate_scan_value_and_cost(
+            self._db(), skills=skills, techs=techs, target=target
+        )
+
+    def recommend_regression_tests(
+        self,
+        target: str | None = None,
+        vuln_class: str | None = None,
+        limit: int = 10,
+    ) -> list[dict]:
+        return _recommend_regression_tests(
+            self._db(), target=target, vuln_class=vuln_class, limit=limit
+        )
+
+    def get_advisory_patterns(
+        self,
+        target: str | None = None,
+        vuln_class: str | None = None,
+        min_support: int = 1,
+        limit: int = 20,
+    ) -> list[dict]:
+        return _get_advisory_patterns(
+            self._db(), target=target, vuln_class=vuln_class, min_support=min_support, limit=limit
         )
 
     # ---- Hook 3: recall ------------------------------------------------
@@ -238,6 +639,7 @@ class LearningEngine:
         "observation": 0.10,
         "lead": 0.25,
         "high_confidence_lead": 0.50,
+        "inconclusive": 0.25,
         "confirmed": 0.70,
         "validated": 0.90,
         "reportable": 0.95,
@@ -248,6 +650,7 @@ class LearningEngine:
         "accepted": "confirmed",
         "duplicate": "unverified",
         "false_positive": "false_positive",
+        "inconclusive": "unverified",
         "informational": "unverified",
         "n/a": "unverified",
     }
@@ -353,20 +756,30 @@ class LearningEngine:
         feedback_type: str,
         notes: str | None = None,
         provenance: str | None = None,
+        confidence: float | None = None,
+        run_id: str | None = None,
+        evidence_ids: list[str] | tuple[str, ...] | None = None,
+        metadata: dict | None = None,
     ) -> dict:
-        """Call after triage feedback (accepted/duplicate/false_positive).
-        Persists a triage verdict.
+        """Call after triage feedback (accepted/duplicate/false_positive/inconclusive).
+        Persists a triage verdict and optional lifecycle provenance.
 
         Shapes: in  finding_id: str, feedback_type: str, notes: str, provenance: str
                 out record_triage doc dict (with "verdict", "finding_id").
         """
         fb = str(feedback_type or "").strip().lower()
         verdict = self.FEEDBACK_VERDICTS.get(fb, "unverified")
+        lifecycle_outcome = "inconclusive" if fb == "inconclusive" else None
         return self.record_triage(
             finding_id=finding_id,
             verdict=verdict,
             reason=notes,
             reviewer=provenance or "session",
+            lifecycle_outcome=lifecycle_outcome,
+            confidence=confidence,
+            run_id=run_id,
+            evidence_ids=evidence_ids,
+            metadata=metadata,
         )
 
     # ---- Convenience ----------------------------------------------------
@@ -377,6 +790,10 @@ class LearningEngine:
             "triage": db.one("SELECT count(*) AS n FROM triage")["n"],
             "lessons": db.one("SELECT count(*) AS n FROM lessons")["n"],
             "patterns": db.one("SELECT count(*) AS n FROM patterns")["n"],
+            "outcome_events": db.one("SELECT count(*) AS n FROM outcome_events")["n"],
+            "tech_fingerprints": db.one("SELECT count(*) AS n FROM tech_fingerprints")["n"],
+            "skill_telemetry": db.one("SELECT count(*) AS n FROM skill_telemetry")["n"],
+            "attack_paths": db.one("SELECT count(*) AS n FROM attack_paths")["n"],
             "schema_version": db.one("SELECT value FROM meta WHERE key = 'schema_version'")["value"],
         }
 
@@ -422,6 +839,21 @@ class LearningEngine:
             highest_signal_surfaces=lambda limit=10: highest_signal_surfaces(self._db(), limit=limit),
             duplicate_heavy_patterns=lambda min_occurrences=2: duplicate_heavy_patterns(self._db(), min_occurrences=min_occurrences),
             target_summary=lambda target: target_summary(self._db(), target),
+            recommend_skills_for_tech=lambda techs=None, target=None, limit=10: _recommend_skills_for_tech(
+                self._db(), techs=techs, target=target, limit=limit
+            ),
+            recommend_validation_strategies=lambda vuln_class=None, target=None, limit=10: _recommend_validation_strategies(
+                self._db(), vuln_class=vuln_class, target=target, limit=limit
+            ),
+            estimate_scan_value_and_cost=lambda skills=None, techs=None, target=None: _estimate_scan_value_and_cost(
+                self._db(), skills=skills, techs=techs, target=target
+            ),
+            recommend_regression_tests=lambda target=None, vuln_class=None, limit=10: _recommend_regression_tests(
+                self._db(), target=target, vuln_class=vuln_class, limit=limit
+            ),
+            get_advisory_patterns=lambda target=None, vuln_class=None, min_support=1, limit=20: _get_advisory_patterns(
+                self._db(), target=target, vuln_class=vuln_class, min_support=min_support, limit=limit
+            ),
         )
 
 
@@ -499,3 +931,66 @@ def after_triage(
 
 def stats() -> dict:
     return _default().stats()
+
+
+def record_validation_outcome(**kwargs) -> dict:
+    return _default().record_validation_outcome(**kwargs)
+
+
+def record_remediation_outcome(**kwargs) -> dict:
+    return _default().record_remediation_outcome(**kwargs)
+
+
+def record_retest_outcome(**kwargs) -> dict:
+    return _default().record_retest_outcome(**kwargs)
+
+
+def record_tech_fingerprint(**kwargs) -> dict:
+    return _default().record_tech_fingerprint(**kwargs)
+
+
+def record_skill_telemetry(**kwargs) -> dict:
+    return _default().record_skill_telemetry(**kwargs)
+
+
+def record_attack_path(**kwargs) -> dict:
+    return _default().record_attack_path(**kwargs)
+
+
+def recommend_skills_for_tech(
+    techs: list[str] | None = None, target: str | None = None, limit: int = 10
+) -> list[dict]:
+    return _default().recommend_skills_for_tech(techs=techs, target=target, limit=limit)
+
+
+def recommend_validation_strategies(
+    vuln_class: str | None = None, target: str | None = None, limit: int = 10
+) -> list[dict]:
+    return _default().recommend_validation_strategies(
+        vuln_class=vuln_class, target=target, limit=limit
+    )
+
+
+def estimate_scan_value_and_cost(
+    skills: list[str] | None = None, techs: list[str] | None = None, target: str | None = None
+) -> dict:
+    return _default().estimate_scan_value_and_cost(skills=skills, techs=techs, target=target)
+
+
+def recommend_regression_tests(
+    target: str | None = None, vuln_class: str | None = None, limit: int = 10
+) -> list[dict]:
+    return _default().recommend_regression_tests(
+        target=target, vuln_class=vuln_class, limit=limit
+    )
+
+
+def get_advisory_patterns(
+    target: str | None = None,
+    vuln_class: str | None = None,
+    min_support: int = 1,
+    limit: int = 20,
+) -> list[dict]:
+    return _default().get_advisory_patterns(
+        target=target, vuln_class=vuln_class, min_support=min_support, limit=limit
+    )

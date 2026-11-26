@@ -12,6 +12,23 @@ DEFAULT_DB_PATH = "learning_engine/memory/learning.db"
 SEVERITIES = ("info", "low", "medium", "high", "critical")
 VERDICTS = ("confirmed", "false_positive", "unverified")
 
+# Extended lifecycle outcomes (additive alongside VERDICTS)
+VALIDATION_OUTCOMES = ("confirmed", "false_positive", "inconclusive", "unverified")
+REMEDIATION_OUTCOMES = ("proposed", "tested_pass", "tested_fail", "approved", "rejected", "applied")
+RETEST_OUTCOMES = ("fixed", "still_vulnerable", "regression_detected", "inconclusive")
+OUTCOME_KINDS = ("validation", "remediation", "retest")
+
+LIFECYCLE_VERDICT_MAP = {
+    "confirmed": "confirmed",
+    "validated": "confirmed",
+    "false_positive": "false_positive",
+    "inconclusive": "unverified",
+    "unverified": "unverified",
+    "fixed": "confirmed",
+    "still_vulnerable": "confirmed",
+    "regression_detected": "confirmed",
+}
+
 # Hard bounds for signal weights (kept in scoring/signals.json)
 MAX_SIGNAL_WEIGHT = 0.50
 MAX_SIGNAL_KEYS = 200

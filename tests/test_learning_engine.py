@@ -488,3 +488,324 @@ def test_hackbot_orchestrator_learning_engine_failure_resilience_and_early_abort
     assert res["status"] == "SUCCESS"
     assert len(close_calls) == 2
     assert orch.learning_engine is None
+
+
+def test_extended_outcome_ingestion_and_triage_metadata(tmp_path):
+    import pytest
+    from learning_engine.core.config import VERDICTS
+
+    assert VERDICTS == ("confirmed", "false_positive", "unverified")
+
+    with LearningEngine(root=tmp_path) as engine:
+        f1 = engine.record_finding(
+            target="https://api.example.com/",
+            vuln_class="xss",
+            title="Reflected XSS on /search",
+            severity="high",
+            confidence=0.75,
+            signals={"reflection": 0.2},
+            finding_id="f-ext-1",
+        )
+        # Extended triage metadata alongside canonical verdict
+        tr = engine.record_triage(
+            finding_id=f1["finding_id"],
+            verdict="unverified",
+            reason="Need browser proof",
+            reviewer="validator:canary",
+            lifecycle_outcome="inconclusive",
+            confidence=0.4,
+            run_id="run-100",
+            evidence_ids=["ev-001", "ev-002"],
+            metadata={"attempt": 1},
+        )
+        assert tr["verdict"] == "unverified"
+        assert tr["lifecycle_outcome"] == "inconclusive"
+        assert tr["evidence_ids"] == ["ev-001", "ev-002"]
+
+        # Validation inconclusive outcome bridges cleanly to unverified in triage
+        val_inc = engine.record_validation_outcome(
+            target="api.example.com",
+            finding_id=f1["finding_id"],
+            vuln_class="xss",
+            outcome="inconclusive",
+            confidence=0.45,
+            strategy="canary_reflection",
+            run_id="run-101",
+            evidence_ids=["ev-003"],
+        )
+        assert val_inc["outcome"] == "inconclusive"
+        assert val_inc["outcome_kind"] == "validation"
+
+        # Validation confirmed outcome
+        val_conf = engine.record_validation_outcome(
+            target="api.example.com",
+            finding_id=f1["finding_id"],
+            vuln_class="xss",
+            outcome="confirmed",
+            confidence=0.95,
+            strategy="headless_dom",
+            run_id="run-102",
+            evidence_ids=["ev-004"],
+        )
+        assert val_conf["outcome"] == "confirmed"
+
+        # Remediation and retest outcomes
+        rem = engine.record_remediation_outcome(
+            target="api.example.com",
+            finding_id=f1["finding_id"],
+            vuln_class="xss",
+            outcome="tested_pass",
+            confidence=0.9,
+            strategy="html_escape_patch",
+            run_id="run-103",
+            evidence_ids=["ev-005"],
+        )
+        assert rem["outcome"] == "tested_pass"
+
+        ret_fixed = engine.record_retest_outcome(
+            target="api.example.com",
+            finding_id=f1["finding_id"],
+            vuln_class="xss",
+            outcome="fixed",
+            confidence=0.95,
+            strategy="headless_dom",
+            run_id="run-104",
+            evidence_ids=["ev-006"],
+        )
+        assert ret_fixed["outcome"] == "fixed"
+
+        ret_reg = engine.record_retest_outcome(
+            target="api.example.com",
+            finding_id=f1["finding_id"],
+            vuln_class="xss",
+            outcome="regression_detected",
+            confidence=0.98,
+            strategy="headless_dom",
+            run_id="run-105",
+            evidence_ids=["ev-007"],
+        )
+        assert ret_reg["outcome"] == "regression_detected"
+
+        latest_ret = engine.latest_outcome(f1["finding_id"], outcome_kind="retest")
+        assert latest_ret is not None
+        assert latest_ret["outcome"] == "regression_detected"
+        assert latest_ret["run_id"] == "run-105"
+        assert latest_ret["evidence_ids"] == ["ev-007"]
+
+        all_events = engine.get_outcomes(target="api.example.com")
+        assert len(all_events) == 5
+
+        stats = engine.stats()
+        assert stats["findings"] == 1
+        assert stats["outcome_events"] == 5
+
+        # Invalid extended outcomes must fail validation
+        with pytest.raises(ValueError):
+            engine.record_validation_outcome(target="api.example.com", outcome="bogus")
+        with pytest.raises(ValueError):
+            engine.record_retest_outcome(target="api.example.com", outcome="unknown_retest")
+        with pytest.raises(ValueError):
+            engine.record_remediation_outcome(target="api.example.com", outcome="invalid_rem")
+
+
+def test_tech_fingerprints_skill_telemetry_and_cost_estimation(tmp_path):
+    with LearningEngine(root=tmp_path) as engine:
+        fp1 = engine.record_tech_fingerprint(
+            target="app.example.com",
+            technology="GraphQL",
+            version="16.x",
+            category="api",
+            confidence=0.95,
+            run_id="run-fp-1",
+            evidence_ids=["ev-fp-1"],
+        )
+        assert fp1["technology"] == "graphql"
+
+        engine.record_tech_fingerprint(
+            target="app.example.com",
+            technology="React",
+            category="frontend",
+            run_id="run-fp-1",
+            evidence_ids=["ev-fp-2"],
+        )
+
+        # High-yield, low-cost GraphQL skill
+        engine.record_skill_telemetry(
+            target="app.example.com",
+            skill_id="graphql-audit",
+            vuln_class="idor",
+            status="completed",
+            duration_ms=1200.0,
+            cost_usd=0.05,
+            tokens_used=1500,
+            findings_count=3,
+            confirmed_count=2,
+            tech_stack=["graphql", "nodejs"],
+            run_id="run-tel-1",
+            evidence_ids=["ev-tel-1"],
+        )
+        # Lower-yield, higher-cost React XSS skill
+        engine.record_skill_telemetry(
+            target="app.example.com",
+            skill_id="xss-dom",
+            vuln_class="xss",
+            status="completed",
+            duration_ms=4800.0,
+            cost_usd=0.40,
+            tokens_used=9000,
+            findings_count=1,
+            confirmed_count=0,
+            tech_stack=["react"],
+            run_id="run-tel-2",
+            evidence_ids=["ev-tel-2"],
+        )
+
+        recs = engine.recommend_skills_for_tech(techs=["graphql", "react"])
+        assert len(recs) == 2
+        assert recs[0]["skill_id"] == "graphql-audit"
+        assert recs[0]["priority_score"] > recs[1]["priority_score"]
+        for rec in recs:
+            assert rec["advisory"] is True
+            prov = rec["provenance"]
+            assert prov["run_ids"]
+            assert prov["evidence_ids"]
+            assert prov["timestamps"]
+
+        estimate = engine.estimate_scan_value_and_cost(
+            skills=["graphql-audit", "xss-dom"],
+            techs=["graphql", "react"],
+        )
+        assert estimate["advisory"] is True
+        assert estimate["estimated_cost_usd"] == 0.45
+        assert estimate["estimated_duration_ms"] == 6000.0
+        assert estimate["expected_findings"] == 4.0
+        assert estimate["expected_confirmed"] == 2.0
+        assert estimate["value_per_dollar"] > 0.0
+        assert set(estimate["provenance"]["run_ids"]) == {"run-tel-1", "run-tel-2"}
+        assert set(estimate["provenance"]["evidence_ids"]) == {"ev-tel-1", "ev-tel-2"}
+        assert len(estimate["provenance"]["timestamps"]) >= 1
+        assert len(estimate["per_skill"]) == 2
+        assert all(item["advisory"] is True for item in estimate["per_skill"])
+
+
+def test_advisory_validation_regression_and_attack_path_patterns(tmp_path):
+    with LearningEngine(root=tmp_path) as engine:
+        # Validation strategy history
+        engine.record_validation_outcome(
+            target="shop.example.com",
+            finding_id="f-ssrf-1",
+            vuln_class="ssrf",
+            outcome="confirmed",
+            confidence=0.95,
+            strategy="oob_callback",
+            run_id="run-v1",
+            evidence_ids=["ev-v1"],
+        )
+        engine.record_validation_outcome(
+            target="shop.example.com",
+            finding_id="f-ssrf-2",
+            vuln_class="ssrf",
+            outcome="confirmed",
+            confidence=0.9,
+            strategy="oob_callback",
+            run_id="run-v2",
+            evidence_ids=["ev-v2"],
+        )
+        engine.record_validation_outcome(
+            target="shop.example.com",
+            finding_id="f-ssrf-3",
+            vuln_class="ssrf",
+            outcome="inconclusive",
+            confidence=0.35,
+            strategy="timing_oracle",
+            run_id="run-v3",
+            evidence_ids=["ev-v3"],
+        )
+
+        val_recs = engine.recommend_validation_strategies(vuln_class="ssrf")
+        assert len(val_recs) == 2
+        assert val_recs[0]["strategy"] == "oob_callback"
+        assert val_recs[0]["confirmation_rate"] == 1.0
+        assert val_recs[1]["strategy"] == "timing_oracle"
+        assert val_recs[1]["inconclusive_rate"] == 1.0
+        for rec in val_recs:
+            assert rec["advisory"] is True
+            assert rec["provenance"]["run_ids"]
+            assert rec["provenance"]["evidence_ids"]
+            assert rec["provenance"]["timestamps"]
+
+        # Retest outcomes -> regression test recommendations
+        engine.record_retest_outcome(
+            target="shop.example.com",
+            finding_id="f-ssrf-1",
+            vuln_class="ssrf",
+            outcome="fixed",
+            strategy="oob_callback",
+            run_id="run-r1",
+            evidence_ids=["ev-r1"],
+        )
+        engine.record_retest_outcome(
+            target="shop.example.com",
+            finding_id="f-idor-1",
+            vuln_class="idor",
+            outcome="still_vulnerable",
+            strategy="auth_diff",
+            run_id="run-r2",
+            evidence_ids=["ev-r2"],
+        )
+        engine.record_retest_outcome(
+            target="shop.example.com",
+            finding_id="f-xss-1",
+            vuln_class="xss",
+            outcome="regression_detected",
+            strategy="canary_reflection",
+            run_id="run-r3",
+            evidence_ids=["ev-r3"],
+        )
+
+        reg_recs = engine.recommend_regression_tests(target="shop.example.com")
+        assert len(reg_recs) == 3
+        assert reg_recs[0]["last_outcome"] == "regression_detected"
+        assert reg_recs[0]["priority"] == "critical"
+        assert reg_recs[1]["last_outcome"] == "still_vulnerable"
+        assert reg_recs[2]["last_outcome"] == "fixed"
+        for rec in reg_recs:
+            assert rec["advisory"] is True
+            assert rec["provenance"]["run_ids"]
+            assert rec["provenance"]["evidence_ids"]
+            assert rec["provenance"]["timestamps"]
+
+        # Reviewed attack path ingestion -> advisory patterns
+        ap = engine.record_attack_path(
+            target="shop.example.com",
+            path_id="ap-chain-1",
+            title="SSRF to Internal Admin IDOR",
+            steps=[
+                {"finding_id": "f-ssrf-1", "relation": "exposes_internal_token"},
+                {"finding_id": "f-idor-1", "relation": "admin_access"},
+            ],
+            finding_ids=["f-ssrf-1", "f-idor-1"],
+            path_severity="critical",
+            path_risk_score=9.4,
+            verified=True,
+            reviewed_by="human:lead",
+            run_id="run-ap-1",
+            evidence_ids=["ev-ap-1"],
+        )
+        assert ap["verified"] is True
+
+        patterns = engine.get_advisory_patterns(target="shop.example.com", min_support=1)
+        assert len(patterns) >= 3
+        assert all(p["advisory"] is True for p in patterns)
+        ap_patterns = [p for p in patterns if p["pattern_type"] == "attack_path"]
+        assert len(ap_patterns) == 1
+        assert ap_patterns[0]["provenance"]["run_ids"] == ["run-ap-1"]
+        assert ap_patterns[0]["provenance"]["evidence_ids"] == ["ev-ap-1"]
+        assert ap_patterns[0]["provenance"]["timestamps"]
+        assert any(p["pattern_type"] == "regression" for p in patterns)
+        assert any(p["pattern_type"] == "validation_gap" for p in patterns)
+
+        # Verify engine.analytics exposes the advisory helpers too
+        assert engine.analytics.get_advisory_patterns(target="shop.example.com")
+        assert engine.analytics.recommend_regression_tests(target="shop.example.com")
+

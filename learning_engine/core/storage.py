@@ -8,6 +8,97 @@ from pathlib import Path
 from .config import get_config
 from .schema import apply_schema
 
+PHASE6_SCHEMA = """
+CREATE TABLE IF NOT EXISTS triage_metadata (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    triage_id         INTEGER NOT NULL,
+    finding_id        TEXT NOT NULL,
+    lifecycle_outcome TEXT,
+    confidence        REAL,
+    run_id            TEXT,
+    evidence_ids      TEXT DEFAULT '[]',
+    metadata          TEXT DEFAULT '{}',
+    created_at        TEXT NOT NULL,
+    FOREIGN KEY (triage_id) REFERENCES triage (id)
+);
+
+CREATE TABLE IF NOT EXISTS outcome_events (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id     TEXT NOT NULL UNIQUE,
+    finding_id   TEXT,
+    target       TEXT NOT NULL,
+    vuln_class   TEXT,
+    outcome_kind TEXT NOT NULL,
+    outcome      TEXT NOT NULL,
+    confidence   REAL NOT NULL DEFAULT 0.5,
+    strategy     TEXT,
+    run_id       TEXT,
+    evidence_ids TEXT NOT NULL DEFAULT '[]',
+    metadata     TEXT NOT NULL DEFAULT '{}',
+    created_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tech_fingerprints (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    target       TEXT NOT NULL,
+    technology   TEXT NOT NULL,
+    version      TEXT NOT NULL DEFAULT '',
+    category     TEXT NOT NULL DEFAULT '',
+    confidence   REAL NOT NULL DEFAULT 1.0,
+    run_id       TEXT,
+    evidence_ids TEXT NOT NULL DEFAULT '[]',
+    metadata     TEXT NOT NULL DEFAULT '{}',
+    created_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS skill_telemetry (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    telemetry_id    TEXT NOT NULL UNIQUE,
+    target          TEXT NOT NULL,
+    skill_id        TEXT NOT NULL,
+    vuln_class      TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'completed',
+    duration_ms     REAL NOT NULL DEFAULT 0.0,
+    cost_usd        REAL NOT NULL DEFAULT 0.0,
+    tokens_used     INTEGER NOT NULL DEFAULT 0,
+    findings_count  INTEGER NOT NULL DEFAULT 0,
+    confirmed_count INTEGER NOT NULL DEFAULT 0,
+    tech_stack      TEXT NOT NULL DEFAULT '[]',
+    run_id          TEXT,
+    evidence_ids    TEXT NOT NULL DEFAULT '[]',
+    metadata        TEXT NOT NULL DEFAULT '{}',
+    created_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS attack_paths (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    path_id         TEXT NOT NULL UNIQUE,
+    target          TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    steps           TEXT NOT NULL DEFAULT '[]',
+    finding_ids     TEXT NOT NULL DEFAULT '[]',
+    path_severity   TEXT NOT NULL DEFAULT 'medium',
+    path_risk_score REAL NOT NULL DEFAULT 0.0,
+    verified        INTEGER NOT NULL DEFAULT 0,
+    reviewed_by     TEXT,
+    review_status   TEXT NOT NULL DEFAULT 'reviewed',
+    run_id          TEXT,
+    evidence_ids    TEXT NOT NULL DEFAULT '[]',
+    metadata        TEXT NOT NULL DEFAULT '{}',
+    created_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_triage_meta_finding ON triage_metadata (finding_id);
+CREATE INDEX IF NOT EXISTS idx_outcome_target      ON outcome_events (target);
+CREATE INDEX IF NOT EXISTS idx_outcome_finding     ON outcome_events (finding_id);
+CREATE INDEX IF NOT EXISTS idx_outcome_kind        ON outcome_events (outcome_kind, outcome);
+CREATE INDEX IF NOT EXISTS idx_tech_target         ON tech_fingerprints (target);
+CREATE INDEX IF NOT EXISTS idx_tech_name           ON tech_fingerprints (technology);
+CREATE INDEX IF NOT EXISTS idx_telemetry_skill     ON skill_telemetry (skill_id);
+CREATE INDEX IF NOT EXISTS idx_telemetry_target    ON skill_telemetry (target);
+CREATE INDEX IF NOT EXISTS idx_attack_paths_target ON attack_paths (target);
+"""
+
 
 class Database:
     """Thin sqlite3 wrapper with WAL mode and dict rows."""
@@ -23,6 +114,8 @@ class Database:
 
     def init_schema(self) -> None:
         apply_schema(self.conn)
+        self.conn.executescript(PHASE6_SCHEMA)
+        self.conn.commit()
 
     def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
         return self.conn.execute(sql, params)
