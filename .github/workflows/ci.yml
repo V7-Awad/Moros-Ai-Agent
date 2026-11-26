@@ -46,4 +46,4 @@ jobs:
           python run.py --list-skills
 
       - name: Run test suite
-        run: python -m pytest tests/ -q
+        run: python -m pytest tests/ -q --tb=short

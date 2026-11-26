@@ -54,11 +54,42 @@ def _response_json(handler):
 
 
 def _generate_self_signed_cert(cert_path: Path, key_path: Path):
-    from cryptography import x509
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
-    from cryptography.x509.oid import NameOID
-    import ipaddress
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+        import ipaddress
+    except ImportError:
+        import shutil
+
+        openssl_bin = shutil.which("openssl")
+        if not openssl_bin:
+            pytest.skip("Neither cryptography nor openssl CLI is installed for TLS cert generation")
+        subprocess.run(
+            [
+                openssl_bin,
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                str(key_path),
+                "-out",
+                str(cert_path),
+                "-days",
+                "1",
+                "-subj",
+                "/CN=127.0.0.1",
+                "-addext",
+                "subjectAltName=DNS:localhost,IP:127.0.0.1",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
