@@ -1,8 +1,14 @@
 """Bounded HTTP client for scope-enforced, HITL-gated assessment checks."""
 
+import base64
 import hashlib
+import http.client
+import http.cookiejar
 import json
+import math
 import os
+import re
+import socket
 import threading
 import time
 import urllib.error
@@ -17,6 +23,9 @@ except ImportError:
 
 SAFE_METHODS = frozenset({"GET", "HEAD"})
 STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_TRANSIENT_STATUS_CODES = frozenset({429, 502, 503, 504})
+_ALLOWED_PROXY_SCHEMES = frozenset({"http", "https", "socks5"})
+_USERINFO_IN_URL_RE = re.compile(r"((?:https?|socks5)://)[^/\s@]+@", re.IGNORECASE)
 _SENSITIVE_HEADER_NAMES = frozenset({
     "authorization",
     "proxy-authorization",
@@ -112,6 +121,104 @@ def is_in_target_scope(host: str, target: str) -> bool:
     return h == t or h_bare == t_bare or h.endswith("." + t_bare)
 
 
+def _redact_proxy_url(proxy_url: str) -> str:
+    """Return proxy URL with any embedded userinfo credentials masked."""
+    return _USERINFO_IN_URL_RE.sub(r"\1[REDACTED]@", str(proxy_url or ""))
+
+
+def _normalize_proxy_url(proxy: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Validate and normalize proxy URL, returning (internal_url, redacted_url)."""
+    raw = (os.environ.get("MOROS_PROXY", "") if proxy is None else str(proxy)).strip()
+    if not raw:
+        return None, None
+    if any(ch.isspace() or ord(ch) < 32 for ch in raw):
+        raise ValueError("Proxy URL contains invalid whitespace or control characters")
+
+    has_scheme = "://" in raw
+    if not has_scheme:
+        if any(ch in raw for ch in ("/", "?", "#")):
+            raise ValueError("Proxy URL must use http://, https://, socks5://, or valid host:port")
+        candidate = f"http://{raw}"
+    else:
+        candidate = raw
+
+    parsed = urllib.parse.urlparse(candidate)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in _ALLOWED_PROXY_SCHEMES:
+        raise ValueError(f"Unsupported proxy URL scheme '{scheme}'; allowed: http, https, socks5")
+
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Proxy URL contains an invalid port") from exc
+
+    host = parsed.hostname
+    if not host:
+        raise ValueError("Proxy URL must include a valid hostname")
+    if port is not None and not (1 <= port <= 65535):
+        raise ValueError("Proxy port must be between 1 and 65535")
+    if not has_scheme and port is None:
+        raise ValueError("Bare proxy host must include :port (e.g. 127.0.0.1:8080)")
+    if parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment:
+        raise ValueError("Proxy URL must not include path, query, or fragment components")
+
+    host_fmt = f"[{host}]" if ":" in host else host
+    host_port = f"{host_fmt}:{port}" if port is not None else host_fmt
+    if parsed.username is not None or parsed.password is not None:
+        normalized = f"{scheme}://{parsed.netloc}"
+        redacted = f"{scheme}://[REDACTED]@{host_port}"
+    else:
+        normalized = f"{scheme}://{host_port}"
+        redacted = normalized
+    return normalized, redacted
+
+
+def _get_header_ci(headers: Any, name: str) -> Optional[str]:
+    """Return a header value by case-insensitive name lookup."""
+    if not headers:
+        return None
+    target = name.lower()
+    if hasattr(headers, "items"):
+        for key, value in headers.items():
+            if str(key).lower() == target:
+                return str(value).strip()
+    return None
+
+
+def _is_transient_network_error(exc: BaseException) -> bool:
+    """Return True for transient timeout/reset socket errors eligible for safe retry."""
+    if isinstance(exc, (TimeoutError, socket.timeout, ConnectionResetError, BrokenPipeError)):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, (TimeoutError, socket.timeout, ConnectionResetError, BrokenPipeError)):
+            return True
+        if reason is not None and "timed out" in str(reason).lower():
+            return True
+    return "timed out" in str(exc).lower()
+
+
+class _ExplicitProxyHandler(urllib.request.ProxyHandler):
+    """ProxyHandler that routes traffic through an explicit proxy even on loopback targets."""
+
+    def proxy_open(self, req, proxy, type):
+        orig_type = req.type
+        parsed = urllib.parse.urlparse(proxy if "://" in proxy else f"{type}://{proxy}")
+        proxy_type = (parsed.scheme or orig_type).lower()
+        if parsed.username is not None:
+            user = urllib.parse.unquote(parsed.username)
+            password = urllib.parse.unquote(parsed.password or "")
+            creds = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
+            req.add_header("Proxy-authorization", "Basic " + creds)
+        host = parsed.hostname or ""
+        host_fmt = f"[{host}]" if ":" in host else host
+        hostport = f"{host_fmt}:{parsed.port}" if parsed.port is not None else host_fmt
+        req.set_proxy(hostport, proxy_type)
+        if orig_type == proxy_type or orig_type == "https":
+            return None
+        return self.parent.open(req, timeout=req.timeout)
+
+
 class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Follow redirects only when they remain on the exact configured host."""
 
@@ -164,7 +271,12 @@ class ScopedHttpClient:
                  cookies: Optional[str] = None,
                  scope_validator: Optional[ScopeValidator] = None,
                  allow_state_changing: bool = False,
-                 approval_callback: Optional[Callable[[str, str, str], bool]] = None):
+                 approval_callback: Optional[Callable[[str, str, str], bool]] = None,
+                 proxy: Optional[str] = None,
+                 max_retries: Optional[int] = None,
+                 retry_backoff_seconds: float = 0.5,
+                 max_retry_wait: float = 5.0,
+                 enable_cookie_jar: Optional[bool] = None):
         parsed = urllib.parse.urlparse(target if "://" in target else f"https://{target}")
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError("Target must be an HTTP(S) URL or hostname without credentials")
@@ -185,9 +297,26 @@ class ScopedHttpClient:
         self.stop_requested = False
         self.allow_state_changing = bool(allow_state_changing)
         self.approval_callback = approval_callback
-        self._opener = urllib.request.build_opener(
-            _SafeRedirectHandler(self.target, self._record_policy_violation)
-        )
+        self._proxy_url, self.proxy = _normalize_proxy_url(proxy)
+
+        if max_retries is None:
+            raw_retries = os.environ.get("MOROS_HTTP_RETRIES", "").strip()
+            if raw_retries:
+                try:
+                    self.max_retries = max(0, int(raw_retries))
+                except ValueError:
+                    self.max_retries = 2
+            else:
+                self.max_retries = 2
+        else:
+            self.max_retries = max(0, int(max_retries))
+        self.retry_backoff_seconds = max(0.0, float(retry_backoff_seconds))
+        self.max_retry_wait = max(0.0, float(max_retry_wait))
+
+        if enable_cookie_jar is None:
+            self.enable_cookie_jar = os.environ.get("MOROS_COOKIE_JAR", "").strip().lower() in {"1", "true", "yes"}
+        else:
+            self.enable_cookie_jar = bool(enable_cookie_jar)
 
         # Authentication & Session support
         self.auth_headers = dict(auth_headers or {})
@@ -208,6 +337,56 @@ class ScopedHttpClient:
             # user's environment; do not silently attach them to target requests.
             self.auth_headers.clear()
             self.cookies = ""
+            self.enable_cookie_jar = False
+
+        self.cookie_jar: Optional[http.cookiejar.CookieJar] = (
+            http.cookiejar.CookieJar() if self.enable_cookie_jar else None
+        )
+        self._opener = self._build_opener()
+
+    def _build_opener(self) -> urllib.request.OpenerDirector:
+        handlers: List[Any] = [_SafeRedirectHandler(self.target, self._record_policy_violation)]
+        if self._proxy_url:
+            handlers.append(_ExplicitProxyHandler({"http": self._proxy_url, "https": self._proxy_url}))
+        if self.cookie_jar is not None:
+            handlers.append(urllib.request.HTTPCookieProcessor(self.cookie_jar))
+        return urllib.request.build_opener(*handlers)
+
+    def _redact_proxy_secrets(self, text: str) -> str:
+        cleaned = _redact_proxy_url(text or "")
+        if self._proxy_url and self.proxy and self._proxy_url != self.proxy:
+            cleaned = cleaned.replace(self._proxy_url, self.proxy)
+        return cleaned
+
+    def _compute_retry_wait(self, attempt: int, retry_after_raw: Optional[str]) -> float:
+        """Compute bounded wait time in seconds before the next retry attempt."""
+        if retry_after_raw is not None:
+            raw = retry_after_raw.strip()
+            if raw:
+                try:
+                    parsed = float(raw)
+                    if math.isfinite(parsed):
+                        return min(max(0.0, parsed), self.max_retry_wait)
+                except ValueError:
+                    pass
+        backoff = self.retry_backoff_seconds * (2 ** attempt)
+        return min(max(0.0, backoff), self.max_retry_wait)
+
+    def _build_attempt_outcome(
+        self,
+        method: str,
+        status_code: int,
+        response_url: str,
+        headers: Any,
+        body: bytes,
+        started: float,
+        attempt: int,
+    ) -> tuple[Dict[str, Any], Optional[str], bool]:
+        result = self._response_result(status_code, response_url, headers, body, started)
+        result["retries"] = attempt
+        retry_after_raw = _get_header_ci(headers, "Retry-After")
+        should_retry = method in SAFE_METHODS and status_code in _TRANSIENT_STATUS_CODES
+        return result, retry_after_raw, should_retry
 
     def get(self, url_or_path: str, headers: Optional[Dict[str, str]] = None,
             params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -226,6 +405,7 @@ class ScopedHttpClient:
         headers: Dict[str, Any],
         body_bytes: Optional[bytes],
         result: Dict[str, Any],
+        attempt: int = 0,
     ) -> None:
         parsed = urllib.parse.urlparse(url)
         safe_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
@@ -237,6 +417,12 @@ class ScopedHttpClient:
             "body_bytes": len(body_bytes) if body_bytes is not None else 0,
             "status": result.get("status"),
         }
+        if self.proxy:
+            entry["proxy"] = self.proxy
+        if attempt > 0:
+            entry["retry_attempt"] = attempt
+        if result.get("headers"):
+            entry["response_headers"] = redact_headers(result["headers"])
         if "status_code" in result:
             entry["status_code"] = result["status_code"]
         if "duration_s" in result:
@@ -396,41 +582,77 @@ class ScopedHttpClient:
         if inferred_content_type and not any(k.lower() == "content-type" for k in headers):
             headers["Content-Type"] = inferred_content_type
 
-        request = urllib.request.Request(url, data=body_bytes, headers=headers, method=method)
-        with self._network_lock:
-            if self.stop_requested:
-                return {"status": "blocked_scope", "reason": "The run stopped after a scope-policy violation."}
+        allowed_retries = self.max_retries if method in SAFE_METHODS else 0
+        result: Dict[str, Any] = {}
+        for attempt in range(allowed_retries + 1):
+            should_retry = False
+            retry_after_raw: Optional[str] = None
+            with self._network_lock:
+                if self.stop_requested:
+                    return {"status": "blocked_scope", "reason": "The run stopped after a scope-policy violation."}
+                with self._lock:
+                    if self.request_count >= self.max_requests:
+                        if attempt == 0:
+                            return {"status": "budget_exhausted", "reason": f"Request budget ({self.max_requests}) exhausted."}
+                        return result
+                    wait_for = self.delay_seconds - (time.monotonic() - self._last_request_at)
+                    if wait_for > 0:
+                        time.sleep(wait_for)
+                    self.request_count += 1
+                    self._last_request_at = time.monotonic()
+
+                request = urllib.request.Request(url, data=body_bytes, headers=headers, method=method)
+                started = time.monotonic()
+                try:
+                    with self._opener.open(request, timeout=self.timeout_seconds) as response:
+                        body = b"" if method == "HEAD" else response.read(self.max_body_bytes + 1)
+                        result, retry_after_raw, should_retry = self._build_attempt_outcome(
+                            method, response.status, response.geturl(), response.headers, body, started, attempt
+                        )
+                except urllib.error.HTTPError as response:
+                    try:
+                        body = b"" if method == "HEAD" else response.read(self.max_body_bytes + 1)
+                    except Exception:
+                        body = b""
+                    try:
+                        result, retry_after_raw, should_retry = self._build_attempt_outcome(
+                            method, response.code, response.geturl(), response.headers, body, started, attempt
+                        )
+                    finally:
+                        try:
+                            response.close()
+                        except Exception:
+                            pass
+                except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+                    err_text = self._redact_proxy_secrets(str(getattr(exc, "reason", exc)))[:300]
+                    result = {
+                        "status": "network_error",
+                        "url": url,
+                        "method": method,
+                        "error": err_text,
+                        "duration_s": round(time.monotonic() - started, 3),
+                        "retries": attempt,
+                    }
+                    should_retry = method in SAFE_METHODS and _is_transient_network_error(exc)
+
+                logged_headers = dict(headers)
+                existing_lower = {k.lower() for k in logged_headers}
+                for hdr_name, hdr_val in request.header_items():
+                    if hdr_name.lower() not in existing_lower:
+                        logged_headers[hdr_name] = hdr_val
+                        existing_lower.add(hdr_name.lower())
+                self._record_request_log(method, url, logged_headers, body_bytes, result, attempt=attempt)
+
+            if not should_retry or attempt >= allowed_retries or self.stop_requested:
+                return result
             with self._lock:
                 if self.request_count >= self.max_requests:
-                    return {"status": "budget_exhausted", "reason": f"Request budget ({self.max_requests}) exhausted."}
-                wait_for = self.delay_seconds - (time.monotonic() - self._last_request_at)
-                if wait_for > 0:
-                    time.sleep(wait_for)
-                self.request_count += 1
-                self._last_request_at = time.monotonic()
-            started = time.monotonic()
-            try:
-                with self._opener.open(request, timeout=self.timeout_seconds) as response:
-                    body = b"" if method == "HEAD" else response.read(self.max_body_bytes + 1)
-                    result = self._response_result(response.status, response.geturl(), response.headers, body, started)
-                    self._record_request_log(method, url, headers, body_bytes, result)
                     return result
-            except urllib.error.HTTPError as response:
-                try:
-                    body = b"" if method == "HEAD" else response.read(self.max_body_bytes + 1)
-                except Exception:
-                    body = b""
-                result = self._response_result(response.code, response.geturl(), response.headers, body, started)
-                self._record_request_log(method, url, headers, body_bytes, result)
-                return result
-            except (urllib.error.URLError, TimeoutError, OSError) as exc:
-                result = {
-                    "status": "network_error", "url": url, "method": method,
-                    "error": str(getattr(exc, "reason", exc))[:300],
-                    "duration_s": round(time.monotonic() - started, 3),
-                }
-                self._record_request_log(method, url, headers, body_bytes, result)
-                return result
+            retry_wait = self._compute_retry_wait(attempt, retry_after_raw)
+            if retry_wait > 0:
+                time.sleep(retry_wait)
+
+        return result
 
     def record_external_requests(self, count: int) -> None:
         """Account for requests made by an equally scoped browser worker."""
