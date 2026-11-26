@@ -65,7 +65,7 @@ _COPY: Dict[str, Dict[str, Dict[str, str]]] = {
             "exec_summary_heading": "Executive Summary",
             "exec_summary_body": (
                 "This report summarizes {total} triage item(s) identified during the security assessment "
-                "of `{target}` ({validated} validated, {candidates} unverified candidate(s)). "
+                "of `{target}` ({confirmed} machine-confirmed, {validated} human-validated, {candidates} unverified candidate(s){extra_summary}). "
                 "All AI-proposed severity ratings remain provisional and require human verification before final sign-off."
             ),
             "severity_table_heading": "Severity Breakdown",
@@ -102,8 +102,14 @@ _COPY: Dict[str, Dict[str, Dict[str, str]]] = {
                 "- AI-proposed severities are provisional until confirmed by a security engineer.\n"
                 "- Automated checks may not cover multi-step business logic flows without manual review."
             ),
-            "status_validated": "Validated",
+            "status_confirmed": "Confirmed (Machine-Verified)",
+            "status_validated": "Validated (Human-Reviewed)",
+            "status_validating": "Validating",
             "status_unverified": "Unverified Candidate",
+            "status_inconclusive": "Inconclusive",
+            "status_false_positive": "False Positive",
+            "status_fixed": "Fixed",
+            "status_accepted_risk": "Accepted Risk",
         },
         "egyptian": {
             "title": "Penetration Test Report",
@@ -114,7 +120,7 @@ _COPY: Dict[str, Dict[str, Dict[str, str]]] = {
             "exec_summary_heading": "Executive Summary",
             "exec_summary_body": (
                 "This report summarizes {total} triage item(s) identified during the security assessment "
-                "of `{target}` ({validated} validated, {candidates} unverified candidate(s)). "
+                "of `{target}` ({confirmed} machine-confirmed, {validated} human-validated, {candidates} unverified candidate(s){extra_summary}). "
                 "All AI-proposed severity ratings remain provisional and require human verification before final sign-off."
             ),
             "severity_table_heading": "Severity Breakdown",
@@ -151,8 +157,14 @@ _COPY: Dict[str, Dict[str, Dict[str, str]]] = {
                 "- AI-proposed severities are provisional until confirmed by a security engineer.\n"
                 "- Automated checks may not cover multi-step business logic flows without manual review."
             ),
-            "status_validated": "Validated",
+            "status_confirmed": "Confirmed (Machine-Verified)",
+            "status_validated": "Validated (Human-Reviewed)",
+            "status_validating": "Validating",
             "status_unverified": "Unverified Candidate",
+            "status_inconclusive": "Inconclusive",
+            "status_false_positive": "False Positive",
+            "status_fixed": "Fixed",
+            "status_accepted_risk": "Accepted Risk",
         },
     },
     "ar": {
@@ -165,7 +177,7 @@ _COPY: Dict[str, Dict[str, Dict[str, str]]] = {
             "exec_summary_heading": "الملخص التنفيذي (Executive Summary)",
             "exec_summary_body": (
                 "يستعرض هذا التقرير نتائج التقييم الأمني للنطاق `{target}`، حيث تم رصد إجمالي **{total}** عنصر فرز "
-                "(**{validated}** نتيجة مُتحقق منها، و**{candidates}** مرشح بانتظار المراجعة). "
+                "(**{confirmed}** مؤكد آلياً، **{validated}** مُتحقق منه بشرياً، و**{candidates}** مرشح بانتظار المراجعة{extra_summary}). "
                 "تبقى جميع تقييمات الخطورة المقترحة آلياً مبدئية وتخضع للمراجعة والاعتماد البشري."
             ),
             "severity_table_heading": "توزيع مستويات الخطورة (Severity Breakdown)",
@@ -202,8 +214,14 @@ _COPY: Dict[str, Dict[str, Dict[str, str]]] = {
                 "- جميع مستويات الخطورة المقترحة من الذكاء الاصطناعي مبدئية لحين تأكيدها من مهندس الأمن.\n"
                 "- قد لا تغطي الفحوصات الآلية بعض تدفقات منطق الأعمال المعقدة دون مراجعة يدوية."
             ),
-            "status_validated": "مُتحقق منه (Validated)",
-            "status_unverified": "مرشح غير مؤكد (Unverified)",
+            "status_confirmed": "مؤكد آلياً (Confirmed)",
+            "status_validated": "مُتحقق منه بشرياً (Validated)",
+            "status_validating": "قيد التحقق (Validating)",
+            "status_unverified": "مرشح غير مؤكد (Candidate)",
+            "status_inconclusive": "غير حاسم (Inconclusive)",
+            "status_false_positive": "إنذار كاذب (False Positive)",
+            "status_fixed": "تم الإصلاح (Fixed)",
+            "status_accepted_risk": "مخاطرة مقبولة (Accepted Risk)",
         },
         "egyptian": {
             "title": "تقرير فحص الأمان واختبار الاختراق (Penetration Test Report)",
@@ -214,7 +232,7 @@ _COPY: Dict[str, Dict[str, Dict[str, str]]] = {
             "exec_summary_heading": "الملخص التنفيذي (Executive Summary)",
             "exec_summary_body": (
                 "التقرير ده بيوضح نتائج الفحص الأمني على `{target}` — اترصد إجمالي **{total}** ملاحظة "
-                "(منهم **{validated}** متأكدين بالأدلة، و**{candidates}** لسه محتاجين مراجعة). "
+                "(منهم **{confirmed}** متأكدين آلياً بالأدلة، و**{validated}** متأكدين بمراجعة بشرية، و**{candidates}** لسه محتاجين مراجعة{extra_summary}). "
                 "كل تقييمات الخطورة اللي الذكاء الاصطناعي اقترحها مبدئية ولازم تتراجع من مهندس أمان قبل الاعتماد النهائي."
             ),
             "severity_table_heading": "ملخص مستويات الخطورة (Severity Breakdown)",
@@ -251,8 +269,14 @@ _COPY: Dict[str, Dict[str, Dict[str, str]]] = {
                 "- درجات الخطورة المقترحة من الأداة مبدئية لحد ما المهندس يراجعها ويأكدها.\n"
                 "- الفحص الآلي ممكن ميغطيش كل سيناريوهات منطق الشغل من غير مراجعة يدوية."
             ),
-            "status_validated": "مُؤكد (Validated)",
-            "status_unverified": "محتاج مراجعة (Unverified)",
+            "status_confirmed": "متأكد آلياً بالأدلة (Confirmed)",
+            "status_validated": "مُؤكد بمراجعة بشرية (Validated)",
+            "status_validating": "جاري التحقق (Validating)",
+            "status_unverified": "محتاج مراجعة (Candidate)",
+            "status_inconclusive": "النتيجة مش حاسمة (Inconclusive)",
+            "status_false_positive": "إنذار غلط (False Positive)",
+            "status_fixed": "اتصلّح (Fixed)",
+            "status_accepted_risk": "مخاطرة مقبولة (Accepted Risk)",
         },
     },
 }
@@ -305,16 +329,53 @@ def localize_severity_label(
     return localized
 
 
-def _is_validated(finding: Dict[str, Any]) -> bool:
-    status = str(finding.get("validation_status", "")).strip().lower()
-    if status == "validated":
-        return True
+_STATUS_COPY_KEY = {
+    "confirmed": "status_confirmed",
+    "validated": "status_validated",
+    "validating": "status_validating",
+    "candidate": "status_unverified",
+    "inconclusive": "status_inconclusive",
+    "false_positive": "status_false_positive",
+    "fixed": "status_fixed",
+    "accepted_risk": "status_accepted_risk",
+}
+
+
+def _get_lifecycle_state(finding: Dict[str, Any]) -> str:
+    vr = finding.get("validation_result")
     record = finding.get("validation_record")
-    return (
-        isinstance(record, dict)
-        and str(record.get("verified_by", "")).startswith("human:")
-        and record.get("outcome") == "reproduced"
-    )
+    if isinstance(record, dict) and str(record.get("verified_by", "")).strip().startswith("human:"):
+        outcome = str(record.get("outcome", "")).strip().lower()
+        if outcome == "accepted_risk" or str(finding.get("status", "")).strip().lower() == "accepted_risk":
+            return "accepted_risk"
+        if outcome == "fixed":
+            return "fixed"
+        if outcome in ("false_positive", "not_reproduced"):
+            return "false_positive"
+        if outcome == "inconclusive":
+            return "inconclusive"
+        if outcome == "reproduced":
+            return "validated"
+    if isinstance(vr, dict) and vr.get("deterministic") is not False and not vr.get("llm_only"):
+        vr_status = str(vr.get("status", "")).strip().lower()
+        if vr_status == "confirmed" and vr.get("evidence_ids") and vr.get("proof_artifact"):
+            return "confirmed"
+        if vr_status in ("validating", "inconclusive", "false_positive", "fixed"):
+            return vr_status
+    for key in ("status", "validation_status"):
+        val = str(finding.get(key, "")).strip().lower()
+        if val in _STATUS_COPY_KEY:
+            return val
+    return "candidate"
+
+
+def _is_validated(finding: Dict[str, Any]) -> bool:
+    return _get_lifecycle_state(finding) in ("validated", "confirmed")
+
+
+def _localize_lifecycle_label(finding: Dict[str, Any], copy: Dict[str, str]) -> str:
+    state = _get_lifecycle_state(finding)
+    return copy.get(_STATUS_COPY_KEY.get(state, "status_unverified"), copy["status_unverified"])
 
 
 def format_report_markdown(
@@ -341,13 +402,22 @@ def format_report_markdown(
     lang_desc = f"{norm_lang.upper()} ({norm_dialect})"
 
     counts: Dict[str, int] = {lvl: 0 for lvl in _SEVERITY_ORDER}
-    validated_count = 0
+    lifecycle_counts: Dict[str, int] = {k: 0 for k in _STATUS_COPY_KEY}
     for f in items:
         sev_key = _normalize_severity_key(f.get("severity_level") or f.get("severity"))
         counts[sev_key] += 1
-        if _is_validated(f):
-            validated_count += 1
-    candidates_count = len(items) - validated_count
+        state = _get_lifecycle_state(f)
+        lifecycle_counts[state] = lifecycle_counts.get(state, 0) + 1
+
+    confirmed_count = lifecycle_counts["confirmed"]
+    validated_count = lifecycle_counts["validated"]
+    candidates_count = lifecycle_counts["candidate"]
+    other_parts = []
+    for extra_state in ("validating", "inconclusive", "false_positive", "fixed", "accepted_risk"):
+        cnt = lifecycle_counts.get(extra_state, 0)
+        if cnt:
+            other_parts.append(f"{cnt} {copy[_STATUS_COPY_KEY[extra_state]]}")
+    extra_summary = (", " + ", ".join(other_parts)) if other_parts else ""
 
     lines: List[str] = []
     if norm_lang == "ar":
@@ -369,8 +439,10 @@ def format_report_markdown(
         copy["exec_summary_body"].format(
             target=target,
             total=len(items),
+            confirmed=confirmed_count,
             validated=validated_count,
             candidates=candidates_count,
+            extra_summary=extra_summary,
         )
     )
     lines.append("")
@@ -411,7 +483,7 @@ def format_report_markdown(
                 bilingual=(norm_lang == "ar"),
             )
             endpoint = str(f.get("endpoint") or f.get("url") or f.get("source_file") or "-").replace("|", "\\|")
-            val_label = copy["status_validated"] if _is_validated(f) else copy["status_unverified"]
+            val_label = _localize_lifecycle_label(f, copy)
             lines.append(f"| {idx} | {title} | {sev_label} | `{endpoint}` | {val_label} |")
         lines.append("")
 
@@ -434,7 +506,7 @@ def format_report_markdown(
             curl_cmd = str(f.get("curl_command") or f.get("curl") or "").strip()
             evidence_ids = f.get("evidence_ids") or []
             remediation = str(f.get("remediation") or copy["default_remediation"]).strip()
-            val_label = copy["status_validated"] if _is_validated(f) else copy["status_unverified"]
+            val_label = _localize_lifecycle_label(f, copy)
 
             lines.append(f"### {idx}. {title}")
             lines.append("")

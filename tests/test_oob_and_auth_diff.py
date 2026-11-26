@@ -493,3 +493,21 @@ def test_auth_diff_batch_endpoints_and_budget_stop():
     assert summary["total_checked"] == 3
     assert summary["vulnerable_count"] == 2
     assert summary["results"][-1]["finding_type"] == "budget_exhausted"
+
+
+def test_oob_server_log_dir_alias_and_list_callbacks(tmp_path):
+    log_dir = tmp_path / "logs"
+    with OOBServer(host="127.0.0.1", port=0, log_dir=log_dir) as server:
+        assert server.persistence_path == log_dir / "oob-state.json"
+        tok = server.register_token("ssrf-identify", "example.com", "https://example.com/proxy")
+        status, _, _ = _http_call(tok.callback_url)
+        assert status == 200
+
+        all_hits = server.list_callbacks()
+        assert len(all_hits) == 1
+        assert all_hits[0]["token"] == tok.token
+
+        tok_hits = server.list_callbacks(tok.token)
+        assert len(tok_hits) == 1
+        assert (log_dir / "oob-state.json").is_file()
+

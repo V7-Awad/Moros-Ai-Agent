@@ -78,6 +78,30 @@ class RunManager:
         with open(run_path / "events.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
+    def get_event_stream(self, run_id: str) -> List[Dict[str, Any]]:
+        """Read and parse the event timeline stream from events.jsonl cleanly."""
+        if not run_id:
+            return []
+        events_file = self._run_dir(str(run_id)) / "events.jsonl"
+        if not events_file.is_file():
+            return []
+        events: List[Dict[str, Any]] = []
+        try:
+            with open(events_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    raw = line.strip()
+                    if not raw:
+                        continue
+                    try:
+                        parsed = json.loads(raw)
+                        if isinstance(parsed, dict):
+                            events.append(parsed)
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            return []
+        return events
+
     def update_skill_progress(self, run_id: str, skill: str, status: str = "completed",
                               summary: str = "", findings_count: int = 0):
         """Update skill execution status in run.json."""

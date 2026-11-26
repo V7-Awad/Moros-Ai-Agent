@@ -149,8 +149,11 @@ def _build_rule(rule_id: str, finding: Dict[str, Any]) -> Dict[str, Any]:
     desc = finding.get("notes") or finding.get("description") or title
 
     try:
-        from cvss_calculator import score_finding
-        cvss_data = score_finding(finding)
+        try:
+            from cvss_calculator import score_finding
+        except ImportError:
+            from tools.cvss_calculator import score_finding
+        cvss_data = finding.get("cvss") if isinstance(finding.get("cvss"), dict) else score_finding(finding)
         cvss_score_val = float(cvss_data.get("cvss_score", score))
         sec_severity_val = max(cvss_score_val, float(score)) if severity_norm in ("critical", "high") else cvss_score_val
     except Exception:
@@ -233,6 +236,48 @@ def _build_locations(finding: Dict[str, Any], target: str) -> List[Dict[str, Any
     return locations
 
 
+_LIFECYCLE_LABELS = {
+    "confirmed": "[CONFIRMED]",
+    "validated": "[VALIDATED]",
+    "validating": "[VALIDATING]",
+    "candidate": "[CANDIDATE]",
+    "inconclusive": "[INCONCLUSIVE]",
+    "false_positive": "[FALSE POSITIVE]",
+    "fixed": "[FIXED]",
+    "accepted_risk": "[ACCEPTED RISK]",
+}
+
+
+def _resolve_sarif_lifecycle(finding: Dict[str, Any]) -> Tuple[str, str]:
+    """Resolve lifecycle state and verification source for SARIF reporting."""
+    try:
+        try:
+            from finding_dedupe import LIFECYCLE_STATES, resolve_finding_lifecycle
+        except ImportError:
+            from tools.finding_dedupe import LIFECYCLE_STATES, resolve_finding_lifecycle
+    except Exception:
+        LIFECYCLE_STATES = frozenset(_LIFECYCLE_LABELS.keys())
+        resolve_finding_lifecycle = None
+
+    has_proof_record = isinstance(finding.get("validation_result"), dict) or isinstance(finding.get("validation_record"), dict)
+    if has_proof_record and resolve_finding_lifecycle is not None:
+        state, _ = resolve_finding_lifecycle(finding)
+        if state == "confirmed":
+            return "confirmed", "machine"
+        if state in ("validated", "accepted_risk"):
+            return state, "human"
+        if state == "fixed":
+            return "fixed", "retest"
+        return state, "none"
+
+    for key in ("status", "validation_status"):
+        raw = str(finding.get(key, "")).strip().lower()
+        if raw in LIFECYCLE_STATES:
+            src = "machine" if raw == "confirmed" else ("human" if raw in ("validated", "accepted_risk") else "none")
+            return raw, src
+    return "candidate", "none"
+
+
 def build_sarif_report(
     findings: List[Dict[str, Any]],
     target: str = "target",
@@ -242,6 +287,26 @@ def build_sarif_report(
     """Convert Moros AI findings into standard SARIF 2.1.0 document."""
     rules_by_id: Dict[str, Dict[str, Any]] = {}
     results: List[Dict[str, Any]] = []
+    lifecycle_counts: Dict[str, int] = {k: 0 for k in _LIFECYCLE_LABELS}
+
+    fp_filter = None
+    try:
+        try:
+            from fp_filter import FalsePositiveFilter
+        except ImportError:
+            from tools.fp_filter import FalsePositiveFilter
+        fp_filter = FalsePositiveFilter()
+    except Exception:
+        fp_filter = None
+
+    score_fn = None
+    try:
+        try:
+            from cvss_calculator import score_finding as score_fn
+        except ImportError:
+            from tools.cvss_calculator import score_finding as score_fn
+    except Exception:
+        score_fn = None
 
     for idx, f in enumerate(findings):
         cwe_id = _extract_cwe(f)
@@ -251,15 +316,59 @@ def build_sarif_report(
         if rule_id not in rules_by_id:
             rules_by_id[rule_id] = _build_rule(rule_id, f)
 
-        rule = rules_by_id[rule_id]
         severity_norm = _normalize_severity(f.get("severity", "medium"))
         level = _SEVERITY_TO_LEVEL.get(severity_norm, "warning")
 
-        message_text = f.get("notes") or f.get("title") or "Security finding identified by Moros AI."
-        if f.get("validation_status") == "validated":
-            message_text = f"[VALIDATED] {message_text}"
-        elif f.get("status") == "candidate":
-            message_text = f"[CANDIDATE] {message_text}"
+        lifecycle_state, verification_source = _resolve_sarif_lifecycle(f)
+        lifecycle_counts[lifecycle_state] = lifecycle_counts.get(lifecycle_state, 0) + 1
+        tag_prefix = _LIFECYCLE_LABELS.get(lifecycle_state, "[CANDIDATE]")
+
+        raw_message = f.get("notes") or f.get("title") or "Security finding identified by Moros AI."
+        message_text = f"{tag_prefix} {raw_message}"
+
+        val_status_out = f.get("validation_status") or (
+            "unverified" if lifecycle_state == "candidate" else lifecycle_state
+        )
+
+        moros_props: Dict[str, Any] = {
+            "status": lifecycle_state,
+            "validation_status": val_status_out,
+            "verification_source": verification_source,
+            "confidence": f.get("confidence", "medium"),
+            "skill": f.get("skill", "security-assessment"),
+            "target": target,
+        }
+
+        if isinstance(f.get("cvss"), dict):
+            moros_props["cvss"] = f["cvss"]
+        elif score_fn is not None:
+            try:
+                moros_props["cvss"] = score_fn(f)
+            except Exception:
+                pass
+
+        if isinstance(f.get("fp_analysis"), dict):
+            moros_props["fp_matched"] = bool(f["fp_analysis"].get("is_known_fp"))
+            if f["fp_analysis"].get("is_known_fp"):
+                moros_props["fp_reason"] = f["fp_analysis"].get("reason", "")
+        elif fp_filter is not None:
+            try:
+                fp_res = fp_filter.check_finding(f)
+                moros_props["fp_matched"] = bool(fp_res.get("is_known_fp"))
+                if fp_res.get("is_known_fp"):
+                    moros_props["fp_reason"] = fp_res.get("reason", "")
+            except Exception:
+                pass
+
+        vr = f.get("validation_result")
+        if isinstance(vr, dict):
+            if vr.get("proof_artifact"):
+                moros_props["proof_artifact"] = vr.get("proof_artifact")
+            if vr.get("evidence_ids"):
+                moros_props["evidence_ids"] = list(vr.get("evidence_ids") or [])
+        vrec = f.get("validation_record")
+        if isinstance(vrec, dict) and vrec.get("verified_by"):
+            moros_props["verified_by"] = vrec.get("verified_by")
 
         res_item: Dict[str, Any] = {
             "ruleId": rule_id,
@@ -270,15 +379,16 @@ def build_sarif_report(
             },
             "locations": _build_locations(f, target),
             "properties": {
-                "moros": {
-                    "status": f.get("status", "candidate"),
-                    "validation_status": f.get("validation_status", "unverified"),
-                    "confidence": f.get("confidence", "medium"),
-                    "skill": f.get("skill", "security-assessment"),
-                    "target": target,
-                }
+                "moros": moros_props,
             }
         }
+
+        if lifecycle_state == "false_positive":
+            res_item["suppressions"] = [{"kind": "external", "justification": "Marked as false positive"}]
+        elif lifecycle_state == "accepted_risk":
+            res_item["suppressions"] = [{"kind": "external", "justification": "Accepted risk by human reviewer"}]
+        elif lifecycle_state == "fixed":
+            res_item["baselineState"] = "absent"
 
         if f.get("curl"):
             res_item["properties"]["moros"]["reproduction_curl"] = f.get("curl")
@@ -310,8 +420,15 @@ def build_sarif_report(
         "properties": {
             "target": target,
             "totalFindings": len(results),
-            "validatedFindings": sum(1 for f in findings if f.get("validation_status") == "validated"),
-            "candidateFindings": sum(1 for f in findings if f.get("validation_status") != "validated"),
+            "confirmedFindings": lifecycle_counts.get("confirmed", 0),
+            "validatedFindings": lifecycle_counts.get("validated", 0),
+            "candidateFindings": lifecycle_counts.get("candidate", 0),
+            "validatingFindings": lifecycle_counts.get("validating", 0),
+            "inconclusiveFindings": lifecycle_counts.get("inconclusive", 0),
+            "falsePositiveFindings": lifecycle_counts.get("false_positive", 0),
+            "fixedFindings": lifecycle_counts.get("fixed", 0),
+            "acceptedRiskFindings": lifecycle_counts.get("accepted_risk", 0),
+            "lifecycleCounts": lifecycle_counts,
         }
     }
 

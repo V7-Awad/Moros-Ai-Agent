@@ -7,6 +7,94 @@ from typing import Any, Dict, Iterable, List, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
 
+LIFECYCLE_STATES = frozenset({
+    "candidate",
+    "validating",
+    "confirmed",
+    "validated",
+    "inconclusive",
+    "false_positive",
+    "fixed",
+    "accepted_risk",
+})
+
+_LIFECYCLE_PRECEDENCE: Dict[str, int] = {
+    "accepted_risk": 7,
+    "fixed": 6,
+    "false_positive": 5,
+    "validated": 4,
+    "confirmed": 3,
+    "validating": 2,
+    "inconclusive": 1,
+    "candidate": 0,
+}
+
+
+def _resolve_human_record(item: Dict[str, Any]) -> Tuple[bool, str, str]:
+    record = item.get("validation_record")
+    if not isinstance(record, dict):
+        return False, "candidate", "unverified"
+    if not str(record.get("verified_by", "")).strip().startswith("human:"):
+        return False, "candidate", "unverified"
+    outcome = str(record.get("outcome", "")).strip().lower()
+    req_status = str(item.get("status", "")).strip().lower()
+    if outcome == "accepted_risk" or req_status == "accepted_risk":
+        return True, "accepted_risk", "accepted_risk"
+    if outcome == "fixed":
+        return True, "fixed", "fixed"
+    if outcome in ("false_positive", "not_reproduced"):
+        return True, "false_positive", "false_positive"
+    if outcome == "inconclusive":
+        return True, "inconclusive", "inconclusive"
+    if outcome == "reproduced" and bool(record.get("method")) and bool(record.get("evidence_ids")):
+        return True, "validated", "validated"
+    return False, "candidate", "unverified"
+
+
+def _resolve_machine_result(item: Dict[str, Any]) -> Tuple[bool, str, str]:
+    vr = item.get("validation_result")
+    if not isinstance(vr, dict):
+        return False, "candidate", "unverified"
+    if (
+        vr.get("deterministic") is False
+        or vr.get("llm_only") is True
+        or str(vr.get("method", "")).strip().lower() == "llm_only"
+    ):
+        return False, "candidate", "unverified"
+    vr_status = str(vr.get("status", "")).strip().lower()
+    if vr_status == "confirmed":
+        has_evidence = bool(vr.get("evidence_ids"))
+        has_proof = bool(str(vr.get("proof_artifact", "")).strip())
+        if has_evidence and has_proof:
+            return True, "confirmed", "confirmed"
+        return False, "candidate", "unverified"
+    if vr_status in ("validating", "inconclusive", "false_positive", "fixed"):
+        return True, vr_status, vr_status
+    return False, "candidate", "unverified"
+
+
+def resolve_finding_lifecycle(item: Dict[str, Any]) -> Tuple[str, str]:
+    """
+    Resolve (status, validation_status) from validated proof records.
+
+    Preserves additive lifecycle states only when backed by a valid
+    machine-verified validation_result or human validation_record; forces
+    unverified findings without proof to ("candidate", "unverified").
+    """
+    if not isinstance(item, dict):
+        return "candidate", "unverified"
+    human_ok, human_status, human_val = _resolve_human_record(item)
+    machine_ok, machine_status, machine_val = _resolve_machine_result(item)
+
+    if human_ok:
+        if human_status == "validated" and machine_ok and machine_status == "fixed":
+            return "fixed", "fixed"
+        return human_status, human_val
+    if machine_ok:
+        return machine_status, machine_val
+    return "candidate", "unverified"
+
+
 def _sink(item: Dict[str, Any]) -> str:
     value = str(item.get("sink", "")).strip()
     if not value:
@@ -60,6 +148,9 @@ def deduplicate_findings(findings: Iterable[Dict[str, Any]]) -> List[Dict[str, A
         if existing is None:
             item["raw_record_count"] = raw_count
             item.setdefault("occurrences", [])
+            status, val_status = resolve_finding_lifecycle(item)
+            item["status"] = status
+            item["validation_status"] = val_status
             merged[identity] = item
             ordered.append(item)
             continue
@@ -83,10 +174,28 @@ def deduplicate_findings(findings: Iterable[Dict[str, Any]]) -> List[Dict[str, A
                 sources = existing.setdefault("source_artifacts", [])
                 if source not in sources:
                     sources.append(source)
-        # Preserve richer details and the more conservative validation state.
+        # Preserve richer details and higher-precedence verified lifecycle evidence.
         if not existing.get("notes") and item.get("notes"):
             existing["notes"] = item["notes"]
-        if item.get("validation_status") != "validated":
-            existing["validation_status"] = "unverified"
-            existing["status"] = "candidate"
+        if not existing.get("proof_artifact") and item.get("proof_artifact"):
+            existing["proof_artifact"] = item["proof_artifact"]
+        if not existing.get("cvss") and isinstance(item.get("cvss"), dict):
+            existing["cvss"] = dict(item["cvss"])
+
+        cur_status, _ = resolve_finding_lifecycle(existing)
+        inc_status, _ = resolve_finding_lifecycle(item)
+        if _LIFECYCLE_PRECEDENCE.get(inc_status, 0) > _LIFECYCLE_PRECEDENCE.get(cur_status, 0):
+            if isinstance(item.get("validation_record"), dict):
+                existing["validation_record"] = dict(item["validation_record"])
+            if isinstance(item.get("validation_result"), dict):
+                existing["validation_result"] = dict(item["validation_result"])
+        else:
+            if not isinstance(existing.get("validation_record"), dict) and isinstance(item.get("validation_record"), dict):
+                existing["validation_record"] = dict(item["validation_record"])
+            if not isinstance(existing.get("validation_result"), dict) and isinstance(item.get("validation_result"), dict):
+                existing["validation_result"] = dict(item["validation_result"])
+
+        status, val_status = resolve_finding_lifecycle(existing)
+        existing["status"] = status
+        existing["validation_status"] = val_status
     return ordered

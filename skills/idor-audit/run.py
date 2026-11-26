@@ -358,7 +358,8 @@ def main():
                     delay_seconds=0.2,
                 )
                 diff_targets = (candidate_eps or endpoints)[:4]
-                diff_results = diff_checker.check_batch(diff_targets)
+                diff_summary = diff_checker.check_endpoints(diff_targets)
+                diff_results = diff_summary.get("results", []) if isinstance(diff_summary, dict) else (diff_summary or [])
                 seen_urls = {f.get("url") for f in findings}
                 for dr in diff_results:
                     if not dr.get("vulnerable"):

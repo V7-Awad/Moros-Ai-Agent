@@ -404,3 +404,165 @@ def test_scoped_http_approved_post_sends_json_and_redacts_logs():
     assert log_entry["headers"]["X-Api-Key"] == "[REDACTED]"
     assert log_entry["headers"]["Cookie"] == "[REDACTED]"
     assert log_entry["headers"]["Accept"] == "application/json"
+
+
+def test_poc_generator_supports_post_put_params_body_redaction_and_lifecycle(tmp_path):
+    gen = PoCGenerator("target.com", tmp_path)
+
+    # 1. POST with JSON body, params, and secret redaction
+    post_finding = {
+        "title": "Confirmed POST IDOR",
+        "method": "POST",
+        "url": "https://target.com/api/orders?token=secret-url-token&view=full",
+        "params": {"format": "json"},
+        "json_body": {"order_id": 42, "api_key": "raw-api-key-value"},
+        "headers": {
+            "Authorization": "Bearer live-jwt-secret-123",
+            "Cookie": "session=live-cookie-xyz; theme=dark",
+            "X-Custom": "safe-value",
+        },
+        "severity": "HIGH",
+        "cwe": "CWE-639",
+        "validation_result": {
+            "status": "confirmed",
+            "evidence_ids": ["ev-1"],
+            "proof_artifact": "output/evidence/validation/val-1.json",
+            "deterministic": True,
+        },
+    }
+    pocs = gen.generate_poc(post_finding, custom_headers={"X-Api-Key": "another-secret"})
+    sh_text = Path(pocs["poc_sh_abs"]).read_text(encoding="utf-8")
+    py_text = Path(pocs["poc_py_abs"]).read_text(encoding="utf-8")
+
+    assert "-X POST" in sh_text
+    assert "--data-raw" in sh_text
+    assert "format=json" in sh_text
+    assert "view=full" in sh_text
+    assert "X-Custom: safe-value" in sh_text
+    assert "live-jwt-secret-123" not in sh_text
+    assert "live-cookie-xyz" not in sh_text
+    assert "secret-url-token" not in sh_text
+    assert "raw-api-key-value" not in sh_text
+    assert "another-secret" not in sh_text
+    assert "<REDACTED_TOKEN>" in sh_text
+    assert "<REDACTED_COOKIE>" in sh_text
+    assert "<REDACTED_SECRET>" in sh_text
+
+    # Generated python script must be syntactically valid and have POST + redacted values
+    compile(py_text, pocs["poc_py_abs"], "exec")
+    assert 'METHOD = "POST"' in py_text
+    assert "live-jwt-secret-123" not in py_text
+    assert "raw-api-key-value" not in py_text
+
+    # 2. PUT with form body and eligibility filtering (confirmed + validated only)
+    put_finding = {
+        "title": "Human Validated PUT Profile Update",
+        "method": "PUT",
+        "url": "https://target.com/api/profile",
+        "body": {"role": "admin", "password": "plain-password"},
+        "validation_record": {
+            "verified_by": "human:alice",
+            "method": "curl",
+            "evidence_ids": ["ev-2"],
+            "outcome": "reproduced",
+        },
+    }
+    candidate_finding = {
+        "title": "Unverified Candidate",
+        "url": "https://target.com/unverified",
+        "status": "candidate",
+    }
+
+    assert PoCGenerator.is_poc_eligible(post_finding) is True
+    assert PoCGenerator.is_poc_eligible(put_finding) is True
+    assert PoCGenerator.is_poc_eligible(candidate_finding) is False
+
+    generated = gen.generate_for_findings([post_finding, put_finding, candidate_finding])
+    assert len(generated) == 2
+    assert "poc_sh" in put_finding
+    assert "poc_sh" not in candidate_finding
+    put_sh = Path(generated[1]["poc_sh_abs"]).read_text(encoding="utf-8")
+    assert "-X PUT" in put_sh
+    assert "plain-password" not in put_sh
+
+
+def test_run_manager_get_event_stream_reads_events_cleanly(tmp_path):
+    from tools.run_manager import RunManager
+
+    rm = RunManager(tmp_path)
+    run = rm.create_run("example.com", ["recon-subdomain"])
+    run_id = run["run_id"]
+    rm.log_event(run_id, "SKILL_STARTED", {"skill": "recon-subdomain"})
+    rm.log_event(run_id, "SKILL_COMPLETED", {"skill": "recon-subdomain", "findings_count": 2})
+
+    # Append a blank and malformed line to ensure resilient parsing
+    events_path = rm._run_dir(run_id) / "events.jsonl"
+    with open(events_path, "a", encoding="utf-8") as f:
+        f.write("\n{corrupt json line\n")
+
+    stream = rm.get_event_stream(run_id)
+    assert [ev["event"] for ev in stream] == ["RUN_CREATED", "SKILL_STARTED", "SKILL_COMPLETED"]
+    assert rm.get_event_stream("nonexistent-run") == []
+
+
+def test_idor_audit_uses_auth_diff_check_endpoints(tmp_path, monkeypatch):
+    import importlib.util
+    import sys
+
+    script_path = Path(__file__).resolve().parent.parent / "skills" / "idor-audit" / "run.py"
+    spec = importlib.util.spec_from_file_location("idor_audit_run", script_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    target_dir = tmp_path / "app.example.com"
+    out_dir = target_dir / "output"
+    (out_dir / "js").mkdir(parents=True)
+    (target_dir / "scope-of-work.md").write_text("Target: https://app.example.com\n", encoding="utf-8")
+    (out_dir / "js" / "endpoints.json").write_text(
+        json.dumps({"endpoints": ["https://app.example.com/api/orders/101"]}),
+        encoding="utf-8",
+    )
+
+    called_with = []
+
+    class FakeDiffChecker:
+        def __init__(self, **kwargs):
+            pass
+
+        def check_endpoints(self, endpoints):
+            called_with.append(list(endpoints))
+            return {
+                "results": [{
+                    "url": endpoints[0],
+                    "vulnerable": True,
+                    "finding_type": "bola_idor",
+                    "severity": "HIGH",
+                    "cwe": "CWE-639",
+                    "title": "Dual-Session BOLA on /api/orders/101",
+                    "evidence": {"similarity": 1.0},
+                }]
+            }
+
+    monkeypatch.setattr(mod, "AuthDiffChecker", FakeDiffChecker)
+    monkeypatch.setenv("MOROS_AUTH_HEADER_B", "Authorization: Bearer user-b")
+    monkeypatch.setenv("MOROS_HTTP_REQUESTS_REMAINING", "0")
+    # Force req_budget > 0 without hitting network for GET loop
+    monkeypatch.setenv("MOROS_HTTP_REQUESTS_REMAINING", "5")
+    monkeypatch.setattr(
+        mod.ScopedHttpClient,
+        "get",
+        lambda self, url, **kw: {"status": "error", "status_code": 0, "body": ""},
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run.py", "--target", "app.example.com", "--target-dir", str(target_dir), "--output-dir", str(out_dir)],
+    )
+
+    mod.main()
+
+    assert called_with == [["https://app.example.com/api/orders/101"]]
+    saved = json.loads((out_dir / "findings" / "candidates-idor-audit.json").read_text(encoding="utf-8"))
+    assert saved["count"] == 1
+    assert saved["findings"][0]["title"] == "Dual-Session BOLA on /api/orders/101"
+

@@ -16,6 +16,21 @@ try:
 except ImportError:
     from tools.scope_validator import ScopeValidator
 
+try:
+    from finding_dedupe import LIFECYCLE_STATES, resolve_finding_lifecycle
+except ImportError:
+    from tools.finding_dedupe import LIFECYCLE_STATES, resolve_finding_lifecycle
+
+try:
+    from cvss_calculator import score_finding
+except ImportError:
+    from tools.cvss_calculator import score_finding
+
+try:
+    from fp_filter import FalsePositiveFilter
+except ImportError:
+    from tools.fp_filter import FalsePositiveFilter
+
 
 def _artifact_path(target_dir: Path, value: str) -> Path:
     candidate = Path(str(value or ""))
@@ -60,6 +75,8 @@ def review_candidates(target: str, target_dir: Path, findings: List[Dict[str, An
         audit_data.get("deviation_detected", bool(out_of_host_requests))
         or out_of_host_requests
     )
+    fp_filter = FalsePositiveFilter()
+    lifecycle_counts: Dict[str, int] = {state: 0 for state in sorted(LIFECYCLE_STATES)}
     reviewed = []
     for index, item in enumerate(findings, 1):
         finding = dict(item)
@@ -82,6 +99,11 @@ def review_candidates(target: str, target_dir: Path, findings: List[Dict[str, An
                 exists = False
         hash_matches = bool(expected_hash and actual_hash and expected_hash == actual_hash)
 
+        vr = finding.get("validation_result")
+        proof_ref = vr.get("proof_artifact") if isinstance(vr, dict) else finding.get("proof_artifact")
+        proof_path = _artifact_path(target_dir, str(proof_ref)) if proof_ref else None
+        proof_exists = bool(proof_path and proof_path.is_file())
+
         kind = str(finding.get("type", finding.get("category", ""))).casefold()
         title = str(finding.get("title", "Candidate finding"))
         if "xss" in kind or "xss" in title.casefold():
@@ -100,22 +122,57 @@ def review_candidates(target: str, target_dir: Path, findings: List[Dict[str, An
                 "and program-safe verification evidence are still required."
             )
 
-        finding["validation_status"] = "unverified"
-        finding["status"] = "candidate"
-        finding["scope_attribution"] = (
-            "unreliable_due_to_scope_deviation" if scope_deviation else "not_independently_verified"
-        )
+        status, validation_status = resolve_finding_lifecycle(finding)
+        lifecycle_counts[status] = lifecycle_counts.get(status, 0) + 1
+
+        if status == "confirmed":
+            scope_attr = "unreliable_due_to_scope_deviation" if scope_deviation else "machine_verified"
+            disposition = "machine_confirmed"
+            review_objection = "Deterministically verified via ProofRecorder evidence; human sign-off recommended before remediation."
+            next_step = "remediation or human triage sign-off"
+        elif status == "validated":
+            scope_attr = "unreliable_due_to_scope_deviation" if scope_deviation else "human_verified"
+            disposition = "human_validated"
+            review_objection = "Reproduced and validated by a human reviewer."
+            next_step = "remediation"
+        elif status in ("validating", "inconclusive", "false_positive", "fixed", "accepted_risk"):
+            scope_attr = "unreliable_due_to_scope_deviation" if scope_deviation else status
+            disposition = status
+            review_objection = objection if status in ("validating", "inconclusive") else f"Finding lifecycle state recorded as '{status}'."
+            next_step = {
+                "validating": "await validation completion",
+                "inconclusive": "manual or targeted follow-up verification",
+                "false_positive": "none (suppressed as false positive)",
+                "fixed": "closed (verified fixed on retest)",
+                "accepted_risk": "tracked under human-accepted risk",
+            }[status]
+        else:
+            scope_attr = "unreliable_due_to_scope_deviation" if scope_deviation else "not_independently_verified"
+            disposition = "not_proven"
+            review_objection = objection
+            next_step = "authorized reproducible verification" if active_checks_allowed else "blocked by saved scope policy"
+
+        cvss_data = finding.get("cvss") if isinstance(finding.get("cvss"), dict) else score_finding(finding)
+        fp_analysis = fp_filter.check_finding(finding)
+
+        finding["validation_status"] = validation_status
+        finding["status"] = status
+        finding["scope_attribution"] = scope_attr
+        finding["cvss"] = cvss_data
+        finding["fp_analysis"] = fp_analysis
         finding["evidence_review"] = {
             "source_artifact": str(source) if source else None,
             "source_exists": exists,
             "expected_sha256_present": bool(expected_hash),
             "sha256_matches": hash_matches if expected_hash else None,
+            "proof_artifact": str(proof_ref) if proof_ref else None,
+            "proof_exists": proof_exists if proof_ref else None,
             "result": "integrity_pass" if exists and (not expected_hash or hash_matches) else "integrity_incomplete",
         }
         finding["skeptical_review"] = {
-            "disposition": "not_proven",
-            "objection": objection,
-            "required_next_step": "authorized reproducible verification" if active_checks_allowed else "blocked by saved scope policy",
+            "disposition": disposition,
+            "objection": review_objection,
+            "required_next_step": next_step,
         }
         item.update({
             "validation_status": finding["validation_status"],
@@ -123,22 +180,34 @@ def review_candidates(target: str, target_dir: Path, findings: List[Dict[str, An
             "scope_attribution": finding["scope_attribution"],
             "evidence_review": finding["evidence_review"],
             "skeptical_review": finding["skeptical_review"],
+            "cvss": finding["cvss"],
+            "fp_analysis": finding["fp_analysis"],
         })
         reviewed.append({
             "finding_index": index,
             "title": title,
             "type": finding.get("type", finding.get("category", "unknown")),
-            "validation_status": "unverified",
+            "status": finding["status"],
+            "validation_status": finding["validation_status"],
             "evidence_review": finding["evidence_review"],
             "skeptical_review": finding["skeptical_review"],
+            "cvss": finding["cvss"],
+            "fp_analysis": finding["fp_analysis"],
         })
+
+    confirmed_count = lifecycle_counts.get("confirmed", 0)
+    human_validated_count = lifecycle_counts.get("validated", 0)
+    candidate_count = lifecycle_counts.get("candidate", 0)
 
     return {
         "target": target,
         "review_type": "saved_artifact_integrity_and_adversarial_triage",
         "network_requests": 0,
-        "validated_findings": 0,
-        "unverified_candidates": len(reviewed),
+        "validated_findings": confirmed_count + human_validated_count,
+        "confirmed_findings": confirmed_count,
+        "human_validated_findings": human_validated_count,
+        "unverified_candidates": candidate_count,
+        "lifecycle_counts": lifecycle_counts,
         "scope_blocks_reproduction": not active_checks_allowed,
         "scope_execution_audit": {
             "deviation_detected": scope_deviation,

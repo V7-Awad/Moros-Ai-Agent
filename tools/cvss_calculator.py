@@ -110,8 +110,27 @@ DEFAULT_CVSS_MAP: Dict[str, Dict[str, str]] = {
     "crlf": {"av": "N", "ac": "L", "pr": "N", "ui": "R", "s": "U", "c": "L", "i": "L", "a": "N"},       # 5.4 Medium
     "host-header": {"av": "N", "ac": "L", "pr": "N", "ui": "R", "s": "U", "c": "L", "i": "L", "a": "N"}, # 5.4 Medium
     "rate-limit": {"av": "N", "ac": "L", "pr": "N", "ui": "N", "s": "U", "c": "N", "i": "L", "a": "N"},  # 5.3 Medium
+    "open-redirect": {"av": "N", "ac": "L", "pr": "N", "ui": "R", "s": "C", "c": "L", "i": "L", "a": "N"}, # 6.1 Medium
     "secret": {"av": "N", "ac": "L", "pr": "N", "ui": "N", "s": "U", "c": "H", "i": "N", "a": "N"},      # 7.5 High
     "default": {"av": "N", "ac": "L", "pr": "N", "ui": "N", "s": "U", "c": "L", "i": "N", "a": "N"},     # 5.3 Medium
+}
+
+_CWE_KEY_MAP: Dict[str, str] = {
+    "89": "sqli",
+    "78": "rce",
+    "94": "ssti",
+    "1336": "ssti",
+    "918": "ssrf",
+    "639": "idor",
+    "287": "auth-bypass",
+    "306": "auth-bypass",
+    "22": "path-traversal",
+    "79": "xss",
+    "942": "cors",
+    "113": "crlf",
+    "770": "rate-limit",
+    "601": "open-redirect",
+    "798": "secret",
 }
 
 
@@ -119,13 +138,20 @@ def score_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
     """Score any finding with full CVSS v3.1 parameters."""
     title = str(finding.get("title", "")).lower()
     skill = str(finding.get("skill", "")).lower()
-    cwe = str(finding.get("cwe", "")).lower()
+    ftype = str(finding.get("type", finding.get("category", ""))).lower()
+    cwe = str(finding.get("cwe", finding.get("cwe_id", ""))).lower()
+    combined = f"{title} {skill} {ftype} {cwe}"
 
     key = "default"
     for candidate_key in DEFAULT_CVSS_MAP:
-        if candidate_key in title or candidate_key in skill or candidate_key in cwe:
+        if candidate_key != "default" and candidate_key in combined:
             key = candidate_key
             break
+
+    if key == "default" and cwe:
+        digits = "".join(ch for ch in cwe if ch.isdigit())
+        if digits in _CWE_KEY_MAP:
+            key = _CWE_KEY_MAP[digits]
 
     params = DEFAULT_CVSS_MAP.get(key, DEFAULT_CVSS_MAP["default"])
     score, sev, vector = calculate_cvss_31(**params)

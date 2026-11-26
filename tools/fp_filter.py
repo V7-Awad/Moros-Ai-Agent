@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -83,3 +83,48 @@ class FalsePositiveFilter:
             return True, "Empty response body without valid SQL syntax indicators"
 
         return False, f"Signature hash '{sig_hash}' verified as unique lead"
+
+    def check_finding(self, finding: Dict[str, Any]) -> Dict[str, Any]:
+        """Safely evaluate a finding dict against known false-positive signatures without mutating status."""
+        if not isinstance(finding, dict):
+            return {"is_known_fp": False, "reason": "invalid_finding", "signature_hash": None}
+
+        status_code: Optional[int] = None
+        body: str = ""
+
+        candidates = [finding]
+        if isinstance(finding.get("response"), dict):
+            candidates.append(finding["response"])
+        if isinstance(finding.get("validation_result"), dict):
+            vr = finding["validation_result"]
+            candidates.append(vr)
+            if isinstance(vr.get("response"), dict):
+                candidates.append(vr["response"])
+        for ev in finding.get("evidence", []) if isinstance(finding.get("evidence"), list) else []:
+            if isinstance(ev, dict):
+                candidates.append(ev)
+
+        for src in candidates:
+            if status_code is None and src.get("status_code") is not None:
+                try:
+                    status_code = int(src["status_code"])
+                except (TypeError, ValueError):
+                    pass
+            if not body:
+                raw_body = src.get("response_body") or src.get("body")
+                if isinstance(raw_body, str) and raw_body:
+                    body = raw_body
+
+        if status_code is None or not body:
+            return {"is_known_fp": False, "reason": "no_response_signature", "signature_hash": None}
+
+        vuln_class = str(
+            finding.get("skill") or finding.get("type") or finding.get("category") or ""
+        ).strip().lower()
+        sig_hash = compute_signature_hash(status_code, body)
+        is_fp, reason = self.is_known_false_positive(status_code, body, vuln_class=vuln_class)
+        return {
+            "is_known_fp": is_fp,
+            "reason": reason,
+            "signature_hash": sig_hash,
+        }

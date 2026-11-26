@@ -98,3 +98,105 @@ def test_write_sarif_report_atomic():
         content = json.loads(saved.read_text(encoding="utf-8"))
         assert content["version"] == "2.1.0"
         assert len(content["runs"][0]["results"]) == 1
+
+
+def test_sarif_and_report_i18n_distinguish_all_lifecycle_states():
+    from tools.report_i18n import format_report_markdown
+
+    findings = [
+        {
+            "title": "Machine Confirmed SQLi",
+            "severity": "CRITICAL",
+            "url": "https://example.com/items?id=1",
+            "status": "confirmed",
+            "validation_result": {
+                "status": "confirmed",
+                "evidence_ids": ["ev-101"],
+                "proof_artifact": "output/evidence/validation/val-101.json",
+                "deterministic": True,
+            },
+        },
+        {
+            "title": "Human Validated XSS",
+            "severity": "HIGH",
+            "url": "https://example.com/search?q=x",
+            "validation_record": {
+                "verified_by": "human:bob",
+                "method": "browser",
+                "evidence_ids": ["ev-102"],
+                "outcome": "reproduced",
+            },
+        },
+        {
+            "title": "Candidate SSRF",
+            "severity": "MEDIUM",
+            "url": "https://example.com/fetch",
+            "status": "candidate",
+        },
+        {
+            "title": "Inconclusive Auth",
+            "severity": "MEDIUM",
+            "url": "https://example.com/auth",
+            "status": "inconclusive",
+        },
+        {
+            "title": "False Positive Alert",
+            "severity": "LOW",
+            "url": "https://example.com/fp",
+            "status": "false_positive",
+        },
+        {
+            "title": "Fixed Redirect",
+            "severity": "MEDIUM",
+            "url": "https://example.com/redir",
+            "status": "fixed",
+        },
+        {
+            "title": "Accepted Risk Header",
+            "severity": "INFO",
+            "url": "https://example.com/",
+            "status": "accepted_risk",
+            "validation_record": {"verified_by": "human:ciso", "outcome": "accepted_risk"},
+        },
+    ]
+
+    sarif = build_sarif_report(findings, target="example.com")
+    run = sarif["runs"][0]
+    props = run["properties"]
+    assert props["confirmedFindings"] == 1
+    assert props["validatedFindings"] == 1
+    assert props["candidateFindings"] == 1
+    assert props["inconclusiveFindings"] == 1
+    assert props["falsePositiveFindings"] == 1
+    assert props["fixedFindings"] == 1
+    assert props["acceptedRiskFindings"] == 1
+
+    res = run["results"]
+    assert res[0]["message"]["text"].startswith("[CONFIRMED]")
+    assert res[0]["properties"]["moros"]["verification_source"] == "machine"
+    assert res[0]["properties"]["moros"]["cvss"]["cvss_score"] >= 9.0
+    assert res[1]["message"]["text"].startswith("[VALIDATED]")
+    assert res[1]["properties"]["moros"]["verification_source"] == "human"
+    assert res[2]["message"]["text"].startswith("[CANDIDATE]")
+    assert res[3]["message"]["text"].startswith("[INCONCLUSIVE]")
+    assert res[4]["message"]["text"].startswith("[FALSE POSITIVE]")
+    assert res[4]["suppressions"][0]["kind"] == "external"
+    assert res[5]["message"]["text"].startswith("[FIXED]")
+    assert res[5]["baselineState"] == "absent"
+    assert res[6]["message"]["text"].startswith("[ACCEPTED RISK]")
+    assert res[6]["suppressions"][0]["kind"] == "external"
+
+    en_md = format_report_markdown("example.com", findings, lang="en")
+    assert "Confirmed (Machine-Verified)" in en_md
+    assert "Validated (Human-Reviewed)" in en_md
+    assert "Unverified Candidate" in en_md
+    assert "Inconclusive" in en_md
+    assert "False Positive" in en_md
+    assert "Fixed" in en_md
+    assert "Accepted Risk" in en_md
+
+    ar_md = format_report_markdown("example.com", findings, lang="ar", dialect="msa")
+    assert "مؤكد آلياً (Confirmed)" in ar_md
+    assert "مُتحقق منه بشرياً (Validated)" in ar_md
+    assert "تم الإصلاح (Fixed)" in ar_md
+

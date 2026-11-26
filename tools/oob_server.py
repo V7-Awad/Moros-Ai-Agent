@@ -68,12 +68,23 @@ class OOBServer:
         callback_domain: str = "oob.local",
         persistence_path: Optional[Union[str, Path]] = None,
         max_body_bytes: int = 65536,
+        log_dir: Optional[Union[str, Path]] = None,
     ):
         self.host = str(host or "127.0.0.1")
         self._requested_port = int(port)
         self.port = int(port)
         self.callback_domain = (callback_domain or "oob.local").strip().lower().rstrip(".")
-        self.persistence_path = Path(persistence_path) if persistence_path else None
+        resolved_persistence: Optional[Path] = Path(persistence_path) if persistence_path else None
+        if resolved_persistence is None and log_dir is not None:
+            log_path = Path(log_dir)
+            if log_path.suffix.lower() == ".json" and not log_path.is_dir():
+                resolved_persistence = log_path
+            else:
+                resolved_persistence = log_path / "oob-state.json"
+        self.log_dir: Optional[Path] = Path(log_dir) if log_dir is not None else (
+            resolved_persistence.parent if resolved_persistence else None
+        )
+        self.persistence_path = resolved_persistence
         self.max_body_bytes = max(1024, int(max_body_bytes))
 
         self._lock = threading.RLock()
@@ -279,6 +290,25 @@ class OOBServer:
                 self._callbacks[token_str] = []
                 self._save_state_locked()
             return [dict(item) for item in events]
+
+    def list_callbacks(
+        self,
+        token: Optional[Union[str, OOBToken]] = None,
+        consume: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Alias for poll_callbacks(); when token is omitted, returns all recorded callbacks."""
+        if token is not None:
+            return self.poll_callbacks(token, consume=consume)
+        with self._lock:
+            all_events: List[Dict[str, Any]] = []
+            for tok_str, events in self._callbacks.items():
+                for item in events:
+                    all_events.append(dict(item))
+                if consume:
+                    self._callbacks[tok_str] = []
+            if consume:
+                self._save_state_locked()
+            return all_events
 
     def has_callbacks(self, token: Union[str, OOBToken]) -> bool:
         token_str = token.token if isinstance(token, OOBToken) else str(token)
