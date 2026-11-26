@@ -123,6 +123,7 @@ def test_orchestrator_resume_skips_completed_and_falls_back_when_missing(tmp_pat
         proxy="http://127.0.0.1:8888",
         enable_tracing=False,
     )
+    monkeypatch.setattr(orch, "_model_preflight", lambda: None)
     assert os.environ.get("MOROS_PROXY") == "http://127.0.0.1:8888"
 
     monkeypatch.setattr(orch.runner.http, "request", lambda *a, **kw: {"status": "error"})
@@ -174,6 +175,7 @@ def test_orchestrator_resume_skips_completed_and_falls_back_when_missing(tmp_pat
         resume_run_id="latest",
         enable_tracing=False,
     )
+    monkeypatch.setattr(fresh_orch, "_model_preflight", lambda: None)
     monkeypatch.setattr(fresh_orch.runner.http, "request", lambda *a, **kw: {"status": "error"})
     monkeypatch.setattr(
         fresh_orch.runner,

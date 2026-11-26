@@ -27,7 +27,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "tools"))
 
 from hackbot_orchestrator import HackbotOrchestrator
 from skill_registry import SkillRegistry
-from llm_client import LLMClient, load_dotenv_if_present, KNOWN_PROVIDERS, redact_secrets
+from llm_client import LLMClient, load_dotenv_if_present, KNOWN_PROVIDERS
 from model_router import ModelRouter
 
 
@@ -446,17 +446,11 @@ Examples:
         print(f"   Total review runs planned: {total_runs} (one per skill run)")
         sys.exit(0)
 
-    # Active execution is model-backed by policy. Fail closed before any target
-    # requests or agent tooling if the configured provider cannot answer.
+    # Fail fast when there is no configured provider. The orchestrator performs
+    # a live connection probe before it makes any request to the target.
     llm_client = LLMClient(provider="auto")
     if not llm_client.is_available():
         print("\n❌ Scan blocked: no LLM provider is configured. Configure a provider and API key, then test the connection.", file=sys.stderr)
-        sys.exit(2)
-    print(f"   Verifying model connection: {llm_client.provider}/{llm_client.model} ...")
-    model_probe = llm_client.complete("Reply with exactly: READY", max_tokens=8, timeout=15)
-    if not model_probe:
-        detail = redact_secrets(llm_client.last_error or "the provider returned no response")
-        print(f"\n❌ Scan blocked: model connection failed ({detail}). No target requests were made.", file=sys.stderr)
         sys.exit(2)
 
     # Run orchestrator

@@ -262,7 +262,7 @@ class TestDeepReconAndEvals:
 
 
 class TestOrchestratorAndDashboardIntegration:
-    def test_orchestrator_runs_deep_recon_with_cost_and_trace(self, tmp_path):
+    def test_orchestrator_runs_deep_recon_with_cost_and_trace(self, tmp_path, monkeypatch):
         from hackbot_orchestrator import HackbotOrchestrator
 
         target_dir = tmp_path / "example.com"
@@ -287,6 +287,7 @@ class TestOrchestratorAndDashboardIntegration:
             enable_tracing=True,
             smart_routing=False,
         )
+        monkeypatch.setattr(orch, "_model_preflight", lambda: None)
         res = orch.run()
         assert res["status"] == "SUCCESS"
         assert res["trace_id"] is not None

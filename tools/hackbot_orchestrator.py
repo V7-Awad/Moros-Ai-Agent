@@ -32,7 +32,7 @@ if str(tools_dir) not in sys.path:
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from llm_client import LLMClient
+from llm_client import LLMClient, load_dotenv_if_present, redact_secrets
 from skill_runner import SkillRunner
 from conversation_store import ConversationStore
 from run_manager import RunManager
@@ -54,6 +54,8 @@ logging.basicConfig(
     datefmt="%Y-%m-%dT%H:%M:%S"
 )
 logger = logging.getLogger("hackbot-orchestrator")
+
+load_dotenv_if_present()
 
 from skill_registry import SkillRegistry
 
@@ -391,6 +393,11 @@ class HackbotOrchestrator:
 
     def run(self):
         """Execute the full orchestration pipeline."""
+        model_error = self._model_preflight()
+        if model_error:
+            logger.error("Scan blocked before contacting target: %s", model_error)
+            return {"status": "FAILED", "error": model_error, "target_requests_made": 0}
+
         logger.info("=" * 60)
         logger.info(f"HACKBOT ORCHESTRATOR — Target: {self.target}")
         logger.info(f"Skills: {', '.join(self.skills)}")
@@ -665,6 +672,25 @@ class HackbotOrchestrator:
                 except Exception as exc:
                     logger.debug("LearningEngine close error (non-fatal): %s", exc)
                 self.learning_engine = None
+
+    def _model_preflight(self) -> Optional[str]:
+        """Require a responding LLM before the orchestrator can touch a target."""
+        if not self.llm.is_available():
+            return "No LLM provider is configured; connect a model before starting a scan."
+        try:
+            logger.info("Verifying model connection: %s/%s", self.llm.provider, self.llm.model)
+            response = self.llm.complete(
+                "Reply with exactly: READY",
+                max_tokens=8,
+                timeout=15,
+            )
+        except Exception as exc:
+            detail = redact_secrets(str(exc))
+            return f"Model connection check failed: {detail}"
+        if not response:
+            detail = redact_secrets(getattr(self.llm, "last_error", None) or "the provider returned no response")
+            return f"Model connection check failed: {detail}"
+        return None
 
     def _execute_skill_with_tracking(self, skill_name: str, run_id: str):
         """Execute a skill across configured models and track progress."""

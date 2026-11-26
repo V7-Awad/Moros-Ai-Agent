@@ -55,3 +55,58 @@ def test_scheduled_prerequisites_are_not_blocked(tmp_path):
 
     blocked = orchestrator.validate_dependencies()
     assert "js-analyze" not in blocked
+
+
+def test_orchestrator_blocks_before_target_requests_when_model_is_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setenv("MOROS_LLM_PROVIDER", "none")
+    (tmp_path / "scope-of-work.md").write_text(
+        "Authorized testing for target.com. In scope of work.", encoding="utf-8"
+    )
+    orchestrator = HackbotOrchestrator(
+        target="target.com",
+        target_dir=str(tmp_path),
+        skills=["recon-subdomain"],
+        enable_tracing=False,
+    )
+    http_request = []
+    monkeypatch.setattr(orchestrator.runner.http, "request", lambda *a, **kw: http_request.append(a))
+
+    result = orchestrator.run()
+
+    assert result["status"] == "FAILED"
+    assert result["target_requests_made"] == 0
+    assert "No LLM provider is configured" in result["error"]
+    assert http_request == []
+    assert orchestrator.current_run is None
+
+
+def test_orchestrator_blocks_when_model_is_configured_but_unreachable(tmp_path, monkeypatch):
+    class UnreachableModel:
+        provider = "gemini"
+        model = "test-model"
+        last_error = "connection refused"
+
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def complete(*args, **kwargs):
+            return None
+
+    orchestrator = HackbotOrchestrator(
+        target="target.com",
+        target_dir=str(tmp_path),
+        skills=["recon-subdomain"],
+        enable_tracing=False,
+    )
+    orchestrator.llm = UnreachableModel()
+    http_request = []
+    monkeypatch.setattr(orchestrator.runner.http, "request", lambda *a, **kw: http_request.append(a))
+
+    result = orchestrator.run()
+
+    assert result["status"] == "FAILED"
+    assert result["target_requests_made"] == 0
+    assert "connection refused" in result["error"]
+    assert http_request == []

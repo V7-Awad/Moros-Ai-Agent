@@ -136,9 +136,11 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
-### Configuration (Optional)
+### Model Configuration
 
-Moros is fully functional out of the box with deterministic offline fallbacks. To enable optional LLM-assisted ReAct reasoning, copy `.env.example` to `.env`:
+An available LLM provider is required for active scans and agent actions. The CLI and orchestrator verify that the configured model responds before making requests to a target. Dashboard scans also require a successful connection test in Settings. If the model is unavailable during an agent action, the action stops; deterministic offline fallback execution is disabled.
+
+Copy `.env.example` to `.env` and configure a provider:
 
 ```bash
 cp .env.example .env

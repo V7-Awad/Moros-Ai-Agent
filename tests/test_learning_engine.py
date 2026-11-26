@@ -319,6 +319,7 @@ def test_hackbot_orchestrator_max_subagents_and_parallel_workers(tmp_path, monke
     )
     assert orch.max_subagents == 2
 
+    monkeypatch.setattr(orch, "_model_preflight", lambda: None)
     monkeypatch.setattr(orch.runner.http, "request", lambda *a, **kw: {"status": "error"})
     monkeypatch.setattr(
         orch.runner,
@@ -362,6 +363,7 @@ def test_hackbot_orchestrator_learning_engine_hooks_and_persistence(tmp_path, mo
         skills=["xss-reflected"],
         enable_tracing=False,
     )
+    monkeypatch.setattr(orch, "_model_preflight", lambda: None)
 
     monkeypatch.setattr(orch.runner.http, "request", lambda *a, **kw: {"status": "error"})
     monkeypatch.setattr(
@@ -443,6 +445,7 @@ def test_hackbot_orchestrator_learning_engine_failure_resilience_and_early_abort
         skills=["xss-reflected"],
         enable_tracing=False,
     )
+    monkeypatch.setattr(abort_orch, "_model_preflight", lambda: None)
     abort_res = abort_orch.run()
     assert abort_res["status"] == "FAILED"
     assert len(close_calls) == 1
@@ -464,6 +467,7 @@ def test_hackbot_orchestrator_learning_engine_failure_resilience_and_early_abort
         skills=["xss-reflected"],
         enable_tracing=False,
     )
+    monkeypatch.setattr(orch, "_model_preflight", lambda: None)
     monkeypatch.setattr(orch.runner.http, "request", lambda *a, **kw: {"status": "error"})
     monkeypatch.setattr(
         orch.runner,

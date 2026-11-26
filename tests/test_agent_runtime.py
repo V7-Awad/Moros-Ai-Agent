@@ -92,9 +92,11 @@ class UnavailableLLM:
         return False
 
 
-def test_agent_runner_llm_unavailable_fallback(tmp_path):
+def test_agent_runner_llm_unavailable_blocks_fallback(tmp_path):
     registry = ToolRegistry()
     runner = AgentRunner(llm_client=UnavailableLLM())
+    tool_calls = []
+    registry.register("should_not_run", lambda: tool_calls.append(True), "Must not run without an LLM")
 
     ctx = AgentContext(
         target="test.local",
@@ -103,24 +105,17 @@ def test_agent_runner_llm_unavailable_fallback(tmp_path):
         run_id="run-fallback"
     )
 
-    def fallback(c):
-        return AgentResult(
-            status="completed",
-            summary="Fallback executed deterministic logic",
-            findings=[{"id": "F1"}]
-        )
-
     result = runner.run(
         context=ctx,
         tools=registry,
         system_prompt="System",
         user_goal="Goal",
-        fallback_fn=fallback
     )
 
-    assert result.status == "llm_unavailable"
-    assert "Fallback executed" in result.summary
-    assert len(result.findings) == 1
+    assert result.status == "failed"
+    assert "connect an LLM provider" in result.summary
+    assert len(result.findings) == 0
+    assert tool_calls == []
 
 
 def test_agent_runner_plain_text_conversational_reply(tmp_path):

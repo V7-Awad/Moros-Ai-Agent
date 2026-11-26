@@ -31,7 +31,7 @@ tools_dir = Path(__file__).parent.resolve()
 if str(tools_dir) not in sys.path:
     sys.path.insert(0, str(tools_dir))
 
-from agent_runtime import AgentRunner, AgentContext, AgentResult, ToolRegistry
+from agent_runtime import AgentRunner, AgentContext, ToolRegistry
 import sandbox_manager
 from scoped_http import ScopedHttpClient
 from finding_review import review_candidates
@@ -764,30 +764,6 @@ class SkillRunner:
         registry.register("extract_dom_gadgets", tool_extract_dom_gadgets, "Search JavaScript files for hazardous DOM sinks (eval, innerHTML, document.write).")
         registry.register("fingerprint_tech_stack", tool_fingerprint_tech, "Detect frontend frameworks and client libraries from script markers.")
 
-        def fallback_fn(ctx: AgentContext) -> AgentResult:
-            """Deterministic fallback when LLM is unavailable or unconfigured."""
-            res_ep = tool_extract_endpoints()
-            res_sec = tool_scan_secrets()
-            res_gad = tool_extract_dom_gadgets()
-            res_tech = tool_fingerprint_tech()
-
-            summary = (
-                f"# JavaScript Analysis Summary — {self.target}\n\n"
-                f"- Extracted {res_ep.get('endpoints_count', 0)} API endpoints.\n"
-                f"- Scanned {len(res_sec.get('findings', []))} secret candidates.\n"
-                f"- Found {res_gad.get('gadgets_count', 0)} DOM sinks.\n"
-                f"- Detected frameworks: {', '.join(res_tech.get('frameworks', [])) or 'None'}.\n"
-            )
-            (js_dir / "analysis-summary.md").write_text(summary, encoding="utf-8")
-            self.log_step(skill, "step-12-summary.log", "Deterministic fallback analysis completed.")
-            return AgentResult(
-                status="completed",
-                summary=f"Deterministic JS analysis completed for {self.target}",
-                findings=res_sec.get("findings", []),
-                artifacts=[res_ep.get("artifact", ""), res_sec.get("artifact", ""), res_gad.get("artifact", ""), res_tech.get("artifact", "")],
-                next_actions=["content-discovery", "xss-reflected", "ssrf-identify"]
-            )
-
         context = AgentContext(
             target=self.target,
             target_dir=self.target_dir,
@@ -804,7 +780,6 @@ class SkillRunner:
                 "Use the available tools to extract endpoints, scan for leaked credentials, identify DOM sinks, and fingerprint the frontend stack."
             ),
             user_goal=f"Analyze all JavaScript assets of {self.target}. Discover endpoints, parameters, secrets, gadgets, and tech stack.",
-            fallback_fn=fallback_fn
         )
 
         summary_md = js_dir / "analysis-summary.md"
@@ -814,7 +789,7 @@ class SkillRunner:
             self.log_step(skill, "step-12-summary.log", "Agent analysis summary generated.")
 
         return {
-            "status": "SUCCESS" if agent_result.status in ["completed", "llm_unavailable"] else "FAILED",
+            "status": "SUCCESS" if agent_result.status == "completed" else "FAILED",
             "agent_status": agent_result.status,
             "summary": agent_result.summary,
             "findings_count": len(agent_result.findings),
@@ -883,16 +858,6 @@ class SkillRunner:
             parameters={"path": {"type": "string", "enum": combined}},
         )
 
-        def deterministic_fallback(_context: AgentContext) -> AgentResult:
-            for path in combined:
-                probe_safe_path(path)
-            return AgentResult(
-                status="completed",
-                summary=f"Checked {len(probe_results)} low-impact public routes with same-host GET requests.",
-                artifacts=[str(cd_dir / "discovered-paths.json")],
-                usage={"requests_used": self.http.request_count},
-            )
-
         agent_result = AgentRunner(llm_client=self.llm).run(
             context=AgentContext(
                 target=self.target,
@@ -912,8 +877,12 @@ class SkillRunner:
             ),
             user_goal=("Choose and inspect relevant paths from the safe route list. Prefer robots.txt, sitemap.xml, "
                        "public API documentation, health/status, and the root page. Do not invent paths."),
-            fallback_fn=deterministic_fallback,
         )
+
+        if agent_result.status != "completed":
+            self.log_step(skill, "step-06-scan.log", f"Stopped before tool execution: agent status={agent_result.status}.")
+            return {"status": "FAILED", "agent_status": agent_result.status,
+                    "paths_checked": 0, "findings_count": 0, "requests_used": self.http.request_count}
 
         discovered = list(probe_results.values())
         interesting = [

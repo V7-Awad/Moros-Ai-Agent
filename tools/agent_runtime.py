@@ -7,7 +7,7 @@ Provides:
 - Bounded tool registry with execution timeouts
 - Multi-step ReAct (Reasoning + Action) execution loop
 - Conversation persistence (system, user, assistant, tool, observation)
-- Explicit LLM_UNAVAILABLE state detection & offline fallback
+- Fail-closed model availability checks for agent actions
 """
 
 import inspect
@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 # Ensure sibling modules are importable when run from any working directory.
 _tools_dir = Path(__file__).parent.resolve()
@@ -115,7 +115,7 @@ class AgentContext:
 
 @dataclass
 class AgentResult:
-    status: str  # "completed", "failed", "blocked", "llm_unavailable"
+    status: str  # "completed", "failed", "blocked"
     summary: str
     findings: List[Dict[str, Any]] = field(default_factory=list)
     artifacts: List[str] = field(default_factory=list)
@@ -250,7 +250,6 @@ class AgentRunner:
         self.per_step_routing = per_step_routing
 
     def run(self, context: AgentContext, tools: ToolRegistry, system_prompt: str, user_goal: str,
-            fallback_fn: Optional[Callable[[AgentContext], AgentResult]] = None,
             persist_conversation: bool = True) -> AgentResult:
         """Execute the agent loop for a skill."""
         store = ConversationStore(context.target_dir)
@@ -267,7 +266,7 @@ class AgentRunner:
 
         def _finish(result: AgentResult) -> AgentResult:
             if skill_span and self.tracer:
-                st = "ok" if result.status in ("completed", "llm_unavailable") else "error"
+                st = "ok" if result.status == "completed" else "error"
                 self.tracer.end_span(skill_span, status=st, error="" if st == "ok" else result.summary)
             return result
 
@@ -277,28 +276,20 @@ class AgentRunner:
 
         # 2. Check if LLM Backend is Available
         if not self.llm.is_available():
-            logger.info(f"[{agent_id}] No LLM provider configured. Operating in LLM_UNAVAILABLE mode.")
+            logger.error(f"[{agent_id}] Agent action blocked because no LLM provider is configured.")
+            summary = "Agent halted: connect an LLM provider before running agent actions."
             record(
                 agent_id,
                 "assistant",
-                f"[{agent_id.upper()}] No external LLM provider configured (OPENAI_API_KEY / ANTHROPIC_API_KEY / Ollama). "
-                "Executing deterministic tool pipeline with full audit recording.",
-                status="llm_unavailable",
+                summary,
+                status="failed",
                 run_id=context.run_id
             )
-
-            if fallback_fn:
-                result = fallback_fn(context)
-                result.status = "llm_unavailable"
-                result.reasoning_steps.append("Executed deterministic tool pipeline (LLM_UNAVAILABLE).")
-                record(agent_id, "assistant", f"Pipeline completed: {result.summary}", run_id=context.run_id)
-                return _finish(result)
-            else:
-                return _finish(AgentResult(
-                    status="llm_unavailable",
-                    summary="Skill halted: LLM provider is unavailable and no deterministic fallback was specified.",
-                    usage={"steps": 0, "tokens": 0}
-                ))
+            return _finish(AgentResult(
+                status="failed",
+                summary=summary,
+                usage={"steps": 0, "tokens": 0}
+            ))
 
         # 3. LLM is Available: Execute ReAct Tool Loop
         max_steps = context.budget.get("max_steps", 25)
@@ -618,16 +609,9 @@ class AgentRunner:
             history.append({"role": "user", "content": f"Observation: {safe_obs}"})
             current_prompt = f"Observation: {safe_obs}\nWhat is your next Thought and Action?"
 
-        # If model call failed, activate deterministic fallback if available
+        # A failed model call stops the agent. Never run tools through a fallback.
         if llm_failure:
-            if fallback_fn:
-                logger.info(f"[{agent_id}] Activating deterministic tool pipeline fallback after LLM failure: {llm_failure}")
-                result = fallback_fn(context)
-                result.status = "completed"
-                result.reasoning_steps.append(f"Fallback triggered due to LLM error ({llm_failure}); deterministic pipeline completed.")
-                record(agent_id, "assistant", f"Fallback completed: {result.summary}", run_id=context.run_id)
-                return _finish(result)
-            status = "llm_error"
+            status = "failed"
             summary = f"{agent_id} stopped because {self.llm.provider}/{self.llm.model} failed: {llm_failure}"
         elif step >= max_steps:
             status = "incomplete"

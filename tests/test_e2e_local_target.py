@@ -134,6 +134,46 @@ def _load_open_redirect_main():
 
 
 def test_e2e_local_mock_target_pipeline_and_dashboard_collectors(tmp_path, monkeypatch):
+    class ScriptedTestLLM:
+        """Test-only connected model that drives the approved tool calls."""
+        provider = "test"
+        model = "scripted-test-model"
+        last_error = None
+        last_usage = {"input_tokens": 1, "output_tokens": 1}
+
+        def __init__(self):
+            self.calls = {"javascript": 0, "content": 0}
+
+        @staticmethod
+        def is_available():
+            return True
+
+        def complete(self, prompt, system_prompt="", **kwargs):
+            system = system_prompt.lower()
+            if "javascript & api hunter" in system:
+                key = "javascript"
+                actions = [
+                    "extract_endpoints()",
+                    "scan_secrets()",
+                    "extract_dom_gadgets()",
+                    "fingerprint_tech_stack()",
+                ]
+            elif "content discovery agent" in system:
+                key = "content"
+                actions = [
+                    'probe_safe_path(path="/robots.txt")',
+                    'probe_safe_path(path="/graphql")',
+                    'probe_safe_path(path="/search")',
+                ]
+            else:
+                return "Final Answer: No additional test action required."
+
+            call_index = self.calls[key]
+            self.calls[key] += 1
+            if call_index < len(actions):
+                return f"Thought: Run the next approved test tool.\nAction: {actions[call_index]}"
+            return "Final Answer: Completed the scripted local test workflow."
+
     recorded_requests = []
     httpd = _EphemeralHTTPServer(("127.0.0.1", 0), _make_mock_vuln_handler(recorded_requests))
     port = httpd.server_address[1]
@@ -198,6 +238,7 @@ def test_e2e_local_mock_target_pipeline_and_dashboard_collectors(tmp_path, monke
         )
         runner.target = target_name
         runner.scope_authorized = True
+        runner.llm = ScriptedTestLLM()
         runner.http.scope_validator.policy["same_host_only"] = True
         runner.http.scope_validator.policy["allow_cross_host_sources"] = False
 
