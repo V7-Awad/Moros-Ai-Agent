@@ -236,41 +236,45 @@ def test_cli_parses_proxy_resume_and_no_failover(tmp_path, monkeypatch):
     monkeypatch.delenv("MOROS_LLM_FAILOVER", raising=False)
     monkeypatch.setattr(moros_run, "HackbotOrchestrator", DummyOrchestrator)
 
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "run.py",
-            "--target", "example.com",
-            "--target-dir", str(target_dir),
-            "--proxy", "http://127.0.0.1:8080",
-            "--resume",
-            "--no-failover",
-        ],
-    )
-    moros_run.main()
+    try:
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "run.py",
+                "--target", "example.com",
+                "--target-dir", str(target_dir),
+                "--proxy", "http://127.0.0.1:8080",
+                "--resume",
+                "--no-failover",
+            ],
+        )
+        moros_run.main()
 
-    assert os.environ.get("MOROS_PROXY") == "http://127.0.0.1:8080"
-    assert os.environ.get("MOROS_LLM_FAILOVER") == "0"
-    assert captured["kwargs"]["proxy"] == "http://127.0.0.1:8080"
-    assert captured["kwargs"]["resume_run_id"] == "latest"
-    assert captured["kwargs"]["skills"] == ["recon-subdomain", "js-discover"]
+        assert os.environ.get("MOROS_PROXY") == "http://127.0.0.1:8080"
+        assert os.environ.get("MOROS_LLM_FAILOVER") == "0"
+        assert captured["kwargs"]["proxy"] == "http://127.0.0.1:8080"
+        assert captured["kwargs"]["resume_run_id"] == "latest"
+        assert captured["kwargs"]["skills"] == ["recon-subdomain", "js-discover"]
 
-    # Explicit run ID with `--resume <run_id>`
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "run.py",
-            "--target", "example.com",
-            "--target-dir", str(target_dir),
-            "--skills", "recon-subdomain",
-            "--resume", prior["run_id"],
-        ],
-    )
-    moros_run.main()
-    assert captured["kwargs"]["resume_run_id"] == prior["run_id"]
-    assert captured["kwargs"]["skills"] == ["recon-subdomain"]
+        # Explicit run ID with `--resume <run_id>`
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "run.py",
+                "--target", "example.com",
+                "--target-dir", str(target_dir),
+                "--skills", "recon-subdomain",
+                "--resume", prior["run_id"],
+            ],
+        )
+        moros_run.main()
+        assert captured["kwargs"]["resume_run_id"] == prior["run_id"]
+        assert captured["kwargs"]["skills"] == ["recon-subdomain"]
+    finally:
+        os.environ.pop("MOROS_PROXY", None)
+        os.environ.pop("MOROS_LLM_FAILOVER", None)
 
 
 def test_business_logic_skill_direct_offline_execution(tmp_path):

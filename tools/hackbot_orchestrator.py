@@ -112,7 +112,7 @@ class HackbotOrchestrator:
                  budget_usd: float = 10.0, mcp_servers: list = None,
                  enable_tracing: bool = True, smart_routing: bool = False,
                  max_subagents: int = 5, resume_run_id: Optional[str] = None,
-                 proxy: Optional[str] = None):
+                 proxy: Optional[str] = None, validate_candidates: bool = False):
         self.target = target
         self.target_dir = Path(target_dir)
         self.skills = list(skills or [])
@@ -129,8 +129,13 @@ class HackbotOrchestrator:
         self.max_subagents = max(1, int(max_subagents))
         self.resume_run_id = str(resume_run_id).strip() if resume_run_id else None
         self.proxy = proxy.strip() if isinstance(proxy, str) and proxy.strip() else None
+        self._has_prev_moros_proxy = False
+        self._prev_moros_proxy = None
         if self.proxy:
+            self._has_prev_moros_proxy = True
+            self._prev_moros_proxy = os.environ.get("MOROS_PROXY")
             os.environ["MOROS_PROXY"] = self.proxy
+        self.validate_candidates = bool(validate_candidates)
         self._resumed_completed_skills: set = set()
         self.budget_usd = float(budget_usd)
         self.smart_routing = bool(smart_routing)
@@ -142,6 +147,10 @@ class HackbotOrchestrator:
         self.learning_context: dict = {}
         self.learning_summary: dict = {}
         self._candidate_findings: list = []
+        self.validation_results: list = []
+        self.validation_summary: dict = {}
+        self.advisory_prioritization: dict = {}
+        self.detected_technologies: list = []
 
         self.execution_log: list = []
         self.skill_results: dict = {}  # skill -> [run results]
@@ -300,6 +309,397 @@ class HackbotOrchestrator:
         except Exception as exc:
             logger.debug("LearningEngine initialization error (non-fatal): %s", exc)
             return None
+
+    @staticmethod
+    def _preserve_dependency_order(skills_list: list[str]) -> list[str]:
+        """Ensure any skill whose prerequisite also appears in skills_list runs after it."""
+        ordered = list(skills_list)
+        changed = True
+        for _ in range(len(ordered) * 2):
+            if not changed:
+                break
+            changed = False
+            for idx, skill in enumerate(list(ordered)):
+                for dep in SKILL_DEPENDENCIES.get(skill, []):
+                    if dep in ordered:
+                        dep_idx = ordered.index(dep)
+                        if dep_idx > idx:
+                            ordered.pop(idx)
+                            ordered.insert(dep_idx, skill)
+                            changed = True
+                            break
+                if changed:
+                    break
+        return ordered
+
+    def apply_advisory_prioritization(self, techs: Optional[List[str]] = None) -> dict:
+        """
+        Compute and apply non-binding LearningEngine skill ordering hints.
+
+        Uses `recommend_skills_for_tech` and `estimate_scan_value_and_cost` strictly as
+        advisory ordering hints; never alters scope, permissions, budgets, or skill membership.
+        """
+        original_skills = list(getattr(self, "skills", []) or [])
+        raw_techs = techs if techs is not None else getattr(self, "detected_technologies", [])
+        tech_list = [str(t).strip().lower() for t in (raw_techs or []) if str(t).strip()]
+
+        if not original_skills:
+            result = {
+                "advisory": True,
+                "applied": False,
+                "techs": tech_list,
+                "original_skills": [],
+                "ordered_skills": [],
+                "recommendations": [],
+                "value_estimate": {},
+            }
+            self.advisory_prioritization = result
+            return result
+
+        prereq_order = {
+            "recon-subdomain": 0,
+            "deep-recon": 1,
+            "api-spec-discovery": 2,
+            "js-discover": 3,
+            "js-analyze": 4,
+            "content-discovery": 5,
+        }
+        finalizer_order = {"review-skill": 0, "report-conglomeration": 1}
+
+        recs: list = []
+        estimate: dict = {}
+        engine = getattr(self, "learning_engine", None)
+        owns_engine = False
+        if engine is None:
+            engine = self._init_learning_engine()
+            owns_engine = engine is not None
+
+        try:
+            if engine is not None:
+                try:
+                    recs = engine.recommend_skills_for_tech(
+                        techs=tech_list or None,
+                        target=self.target,
+                        limit=max(10, len(original_skills)),
+                    ) or []
+                except Exception as exc:
+                    logger.debug("LearningEngine recommend_skills_for_tech error (non-fatal): %s", exc)
+                try:
+                    estimate = engine.estimate_scan_value_and_cost(
+                        skills=original_skills,
+                        techs=tech_list or None,
+                        target=self.target,
+                    ) or {}
+                except Exception as exc:
+                    logger.debug("LearningEngine estimate_scan_value_and_cost error (non-fatal): %s", exc)
+        finally:
+            if owns_engine and engine is not None:
+                try:
+                    engine.close()
+                except Exception:
+                    pass
+
+        score_by_skill: dict[str, float] = {}
+        for rec in recs:
+            if isinstance(rec, dict) and rec.get("skill_id") and rec.get("advisory", True):
+                try:
+                    score_by_skill[str(rec["skill_id"])] = float(rec.get("priority_score", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    continue
+
+        prereqs = sorted([s for s in original_skills if s in prereq_order], key=lambda s: prereq_order[s])
+        finalizers = sorted([s for s in original_skills if s in finalizer_order], key=lambda s: finalizer_order[s])
+        middle = [s for s in original_skills if s not in prereq_order and s not in finalizer_order]
+
+        if score_by_skill and middle:
+            indexed_middle = list(enumerate(middle))
+            indexed_middle.sort(key=lambda pair: (-score_by_skill.get(pair[1], -1.0), pair[0]))
+            middle = self._preserve_dependency_order([s for _, s in indexed_middle])
+
+        ordered = prereqs + middle + finalizers
+        if sorted(ordered) == sorted(original_skills):
+            self.skills = ordered
+        else:
+            ordered = original_skills
+
+        result = {
+            "advisory": True,
+            "applied": ordered != original_skills,
+            "techs": tech_list,
+            "original_skills": original_skills,
+            "ordered_skills": ordered,
+            "recommendations": recs,
+            "value_estimate": estimate,
+        }
+        self.advisory_prioritization = result
+        return result
+
+    def _collect_candidate_artifacts(self) -> tuple[list[dict], list[tuple[Path, object, list[dict]]]]:
+        """Collect candidate finding records from output/findings/ generated for this run."""
+        findings_dir = self.target_dir / "output" / "findings"
+        if not findings_dir.is_dir():
+            return [], []
+
+        run_started = getattr(getattr(self, "runner", None), "run_started_at", None)
+        started_ts = run_started.timestamp() if run_started is not None else None
+
+        collected: list[dict] = []
+        loaded_files: list[tuple[Path, object, list[dict]]] = []
+
+        for path in sorted(findings_dir.rglob("*.json")):
+            if not path.name.startswith(("candidates-", "confirmed-")):
+                continue
+            if started_ts is not None:
+                try:
+                    if path.stat().st_mtime < started_ts:
+                        continue
+                except OSError:
+                    continue
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+
+            if isinstance(raw, list):
+                items = [row for row in raw if isinstance(row, dict)]
+                container: object = raw
+            elif isinstance(raw, dict):
+                raw_items = raw.get("findings")
+                if isinstance(raw_items, list):
+                    items = [row for row in raw_items if isinstance(row, dict)]
+                elif "title" in raw:
+                    items = [raw]
+                else:
+                    items = []
+                container = raw
+            else:
+                continue
+
+            if items:
+                loaded_files.append((path, container, items))
+                collected.extend(items)
+
+        return collected, loaded_files
+
+    def _record_validation_outcomes_in_learning(
+        self,
+        results: list,
+        validated_findings: list[dict],
+    ) -> None:
+        """Persist Phase 1 validation outcomes in LearningEngine as advisory signals."""
+        if not results:
+            return
+        engine = getattr(self, "learning_engine", None)
+        owns_engine = False
+        if engine is None:
+            engine = self._init_learning_engine()
+            owns_engine = engine is not None
+        if engine is None:
+            return
+
+        by_fid = {
+            str(f.get("finding_id") or f.get("id") or ""): f
+            for f in validated_findings
+            if isinstance(f, dict)
+        }
+        run_id = (getattr(self, "current_run", None) or {}).get("run_id")
+
+        try:
+            for vr in results:
+                status = str(getattr(vr, "status", "inconclusive") or "inconclusive").lower()
+                outcome = status if status in {"confirmed", "false_positive", "inconclusive", "unverified"} else "unverified"
+                finding_meta = by_fid.get(vr.finding_id, {})
+                vuln_class = str(
+                    finding_meta.get("vuln_class")
+                    or finding_meta.get("type")
+                    or vr.strategy
+                    or "finding"
+                )
+                try:
+                    engine.record_validation_outcome(
+                        target=self.target,
+                        finding_id=vr.finding_id,
+                        vuln_class=vuln_class,
+                        outcome=outcome,
+                        confidence=float(vr.confidence),
+                        strategy=vr.strategy,
+                        run_id=run_id or vr.validation_run_id,
+                        evidence_ids=list(vr.evidence_ids or []),
+                        metadata={
+                            "endpoint": vr.endpoint,
+                            "validation_run_id": vr.validation_run_id,
+                            "proof_artifact": vr.proof_artifact,
+                        },
+                    )
+                except Exception as exc:
+                    logger.debug("LearningEngine record_validation_outcome error (non-fatal): %s", exc)
+        finally:
+            if owns_engine:
+                try:
+                    engine.close()
+                except Exception:
+                    pass
+
+    def run_validation_stage(self) -> dict:
+        """
+        Run deterministic Phase 1 ExploitValidator across deduplicated candidates.
+
+        Respects ScopeValidator, ScopedHttpClient, remaining request/budget limits,
+        and CheckpointManager HITL checkpoints, updating candidate artifacts on disk
+        before report-conglomeration / AttackGraphBuilder.
+        """
+        from checkpoint_manager import CheckpointManager
+        from exploit_validator import ExploitValidator
+        from finding_dedupe import deduplicate_findings, finding_identity
+        from scoped_http import ScopedHttpClient
+
+        http_client = getattr(getattr(self, "runner", None), "http", None)
+        if getattr(http_client, "stop_requested", False):
+            summary = {"status": "BLOCKED_SCOPE", "total_candidates": 0, "validated": 0, "confirmed": 0, "results": []}
+            self.validation_summary = summary
+            return summary
+
+        policy = getattr(getattr(self, "scope_validator", None), "policy", {})
+        if not getattr(self, "scope_authorized", False):
+            self.scope_authorized = self.verify_scope()
+        if not self.scope_authorized or policy.get("allow_active_vulnerability_checks", True) is False:
+            summary = {"status": "SKIPPED_SCOPE", "total_candidates": 0, "validated": 0, "confirmed": 0, "results": []}
+            self.validation_summary = summary
+            return summary
+
+        raw_candidates, loaded_files = self._collect_candidate_artifacts()
+        if not raw_candidates:
+            summary = {"status": "COMPLETED", "total_candidates": 0, "validated": 0, "confirmed": 0, "results": []}
+            self.validation_summary = summary
+            return summary
+
+        deduped = deduplicate_findings(raw_candidates)
+        to_validate = [
+            item for item in deduped
+            if item.get("status") not in {"confirmed", "validated", "fixed", "false_positive", "accepted_risk"}
+        ]
+        if not to_validate:
+            summary = {
+                "status": "COMPLETED",
+                "total_candidates": len(deduped),
+                "validated": 0,
+                "confirmed": sum(1 for item in deduped if item.get("status") == "confirmed"),
+                "results": [],
+            }
+            self.validation_summary = summary
+            return summary
+
+        used_reqs = int(getattr(http_client, "request_count", 0) or 0)
+        max_reqs = int(getattr(http_client, "max_requests", self.max_http_requests) or self.max_http_requests)
+        remaining_budget = max(0, max_reqs - used_reqs)
+
+        validator_target = getattr(http_client, "base_url", None) or self.target
+        if "://" not in str(validator_target):
+            if any(str(f.get("url") or f.get("endpoint") or "").startswith("http://") for f in to_validate):
+                validator_target = f"http://{self.target}"
+
+        # Only share runner.http directly if it was replaced/mocked by a test double;
+        # otherwise let ExploitValidator construct per-finding ScopedHttpClient instances
+        # so an intentional blocked_redirect (e.g. open-redirect proof) or gated POST
+        # check does not halt unrelated findings or the outer orchestrator run.
+        use_mocked_client = (
+            http_client is not None
+            and (
+                type(http_client) is not ScopedHttpClient
+                or getattr(getattr(http_client, "request", None), "__func__", None) is not ScopedHttpClient.request
+            )
+        )
+        shared_client = http_client if use_mocked_client else None
+
+        checkpoint_mgr = CheckpointManager(self.target, self.target_dir)
+        validator = ExploitValidator(
+            target=validator_target,
+            target_dir=self.target_dir,
+            scope_validator=self.scope_validator,
+            http_client=shared_client,
+            checkpoint_manager=checkpoint_mgr,
+            max_requests=max(1, remaining_budget) if remaining_budget > 0 else 1,
+            delay_seconds=self.request_delay,
+        )
+        if remaining_budget <= 0:
+            validator.max_requests = 0
+
+        results = validator.validate_findings(to_validate, mutate_findings=True)
+        if shared_client is None and http_client is not None:
+            if hasattr(http_client, "request_count"):
+                http_client.request_count = int(getattr(http_client, "request_count", 0) or 0) + validator._total_requests_used
+            if hasattr(http_client, "request_logs") and isinstance(http_client.request_logs, list):
+                for r in results:
+                    for step in (r.reproduction_steps or []):
+                        if isinstance(step, dict) and step.get("url"):
+                            http_client.request_logs.append({
+                                "method": step.get("method", r.method),
+                                "url": step.get("url"),
+                                "status": "response",
+                            })
+
+        validated_by_identity = {finding_identity(item): item for item in to_validate}
+        fields_to_sync = (
+            "finding_id",
+            "validation_run_id",
+            "validation_result",
+            "proof_artifact",
+            "status",
+            "validation_status",
+            "confidence",
+            "confidence_score",
+        )
+        for path, container, items in loaded_files:
+            modified = False
+            for item in items:
+                matched = validated_by_identity.get(finding_identity(item))
+                if not matched:
+                    continue
+                for key in fields_to_sync:
+                    if key in matched:
+                        item[key] = matched[key]
+                existing_ids = list(item.get("evidence_ids") or [])
+                for eid in (matched.get("evidence_ids") or []):
+                    if eid not in existing_ids:
+                        existing_ids.append(eid)
+                item["evidence_ids"] = existing_ids
+                modified = True
+            if modified:
+                try:
+                    if isinstance(container, dict) and isinstance(container.get("findings"), list):
+                        container["findings"] = items
+                        payload = container
+                    elif isinstance(container, list):
+                        payload = items
+                    else:
+                        payload = items[0] if len(items) == 1 else items
+                    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+                except OSError as exc:
+                    logger.warning("Failed to update validated candidate artifact %s: %s", path, exc)
+
+        self.validation_results = [r.to_dict() for r in results]
+        self._record_validation_outcomes_in_learning(results, to_validate)
+
+        confirmed_count = sum(1 for r in results if r.status == "confirmed")
+        summary = {
+            "status": "COMPLETED",
+            "total_candidates": len(deduped),
+            "validated": len(results),
+            "confirmed": confirmed_count,
+            "false_positive": sum(1 for r in results if r.status == "false_positive"),
+            "inconclusive": sum(1 for r in results if r.status == "inconclusive"),
+            "requests_used": sum(r.requests_used for r in results),
+            "results": list(self.validation_results),
+        }
+        self.validation_summary = summary
+        if hasattr(self, "conversations"):
+            self._log_event(
+                "exploit-validator",
+                "COMPLETED",
+                f"Validated {len(results)} candidate(s): {confirmed_count} confirmed, "
+                f"{summary['false_positive']} false_positive, {summary['inconclusive']} inconclusive",
+            )
+        return summary
 
     def _extract_candidate_findings(self, skill_name: str, result: dict, skill_res: dict | None) -> list[dict]:
         """Collect candidate finding dicts produced by a skill run."""
@@ -506,8 +906,19 @@ class HackbotOrchestrator:
                         probe_resp.get("body", "")
                     )
                     if tech_info.get("technologies"):
+                        self.detected_technologies = list(tech_info["technologies"])
                         logger.info(f"🧩 Target Technologies: {', '.join(tech_info['technologies'])}")
                         self.memory_manager.store_fact("technologies", ", ".join(tech_info["technologies"]), category="infrastructure", source="tech_profiler")
+                        if self.learning_engine is not None:
+                            for tech_name in self.detected_technologies:
+                                try:
+                                    self.learning_engine.record_tech_fingerprint(
+                                        target=self.target,
+                                        technology=tech_name,
+                                        run_id=run_id,
+                                    )
+                                except Exception as exc:
+                                    logger.debug("LearningEngine record_tech_fingerprint error (non-fatal): %s", exc)
                         boosted = tech_info.get("prioritized_skills", [])
                         if boosted:
                             elevated = [s for s in self.skills if s in boosted]
@@ -553,12 +964,25 @@ class HackbotOrchestrator:
             if self.learning_engine is not None:
                 try:
                     with self._lock:
-                        self.learning_context = self.learning_engine.before_recon(self.target) or {}
+                        self.learning_context = self.learning_engine.before_recon(
+                            self.target, techs=self.detected_technologies or None
+                        ) or {}
                     recalled = self.learning_context.get("relevant_lessons", [])
                     if recalled:
                         logger.info("🧠 Recalled %d prior lesson(s) for %s", len(recalled), self.target)
                 except Exception as exc:
                     logger.debug("LearningEngine before_recon error (non-fatal): %s", exc)
+                try:
+                    self.apply_advisory_prioritization(techs=self.detected_technologies)
+                    advisory_order = self.advisory_prioritization.get("ordered_skills") or []
+                    if advisory_order and ordered_skills:
+                        order_idx = {s: idx for idx, s in enumerate(advisory_order)}
+                        ordered_skills = self._preserve_dependency_order(
+                            sorted(ordered_skills, key=lambda s: order_idx.get(s, len(advisory_order)))
+                        )
+                        logger.info(f"Advisory prioritized order: {' → '.join(ordered_skills)}")
+                except Exception as exc:
+                    logger.debug("Advisory prioritization error (non-fatal): %s", exc)
 
             # Step 5: Execute each scheduled skill (serial or parallel)
             serial_prereqs = {"recon-subdomain", "api-spec-discovery", "js-discover", "js-analyze", "content-discovery"}
@@ -590,12 +1014,22 @@ class HackbotOrchestrator:
                             except Exception as exc:
                                 logger.error(f"Parallel skill '{skill_name}' raised: {exc}")
 
+                # Phase B.5: Deterministic Phase 1 validation before finalizers/report-conglomeration
+                if self.validate_candidates:
+                    self.run_validation_stage()
+
                 # Phase C: Run finalizers serially
                 for skill_name in finalizer_skills:
                     self._execute_skill_with_tracking(skill_name, run_id)
             else:
+                validated_before_report = False
                 for skill_name in ordered_skills:
+                    if self.validate_candidates and not validated_before_report and skill_name == "report-conglomeration":
+                        self.run_validation_stage()
+                        validated_before_report = True
                     self._execute_skill_with_tracking(skill_name, run_id)
+                if self.validate_candidates and not validated_before_report:
+                    self.run_validation_stage()
 
             # Step 6: Write orchestration log & finalize durable run
             self._write_scope_audit()
@@ -630,8 +1064,34 @@ class HackbotOrchestrator:
             try:
                 from attack_graph import AttackGraphBuilder
                 builder = AttackGraphBuilder(self.target, Path(self.target_dir))
-                builder.build_graph()
+                graph_data = builder.build_graph()
                 logger.info("🗺️  Attack Graph generated at output/report/attack-graph.json")
+                if self.learning_engine is not None and isinstance(graph_data, dict):
+                    for chain in (graph_data.get("attack_chains") or []):
+                        if not isinstance(chain, dict):
+                            continue
+                        try:
+                            steps = chain.get("steps") or []
+                            fids = [str(s.get("finding_id") or "") for s in steps if s.get("finding_id")]
+                            self.learning_engine.record_attack_path(
+                                target=self.target,
+                                path_id=chain.get("chain_id"),
+                                title=chain.get("name") or "attack chain",
+                                steps=steps,
+                                finding_ids=fids,
+                                path_severity=str(chain.get("path_severity") or "medium").lower(),
+                                path_risk_score=float(chain.get("path_risk_score") or 0.0),
+                                verified=bool(chain.get("verified")),
+                                review_status="verified" if chain.get("verified") else "inferred",
+                                run_id=run_id,
+                                evidence_ids=list(chain.get("evidence_ids") or []),
+                                metadata={
+                                    "step_count": chain.get("step_count", len(steps)),
+                                    "missing_prerequisites": chain.get("missing_prerequisites", []),
+                                },
+                            )
+                        except Exception as exc:
+                            logger.debug("LearningEngine record_attack_path error (non-fatal): %s", exc)
             except Exception as e:
                 logger.debug(f"Attack graph build non-fatal error: {e}")
 
@@ -666,6 +1126,12 @@ class HackbotOrchestrator:
                     "failed_skills": self.failed_skills,
                     "scope_violations": getattr(self.runner.http, "policy_violations", [])}
         finally:
+            if getattr(self, "_has_prev_moros_proxy", False):
+                if self._prev_moros_proxy is None:
+                    os.environ.pop("MOROS_PROXY", None)
+                else:
+                    os.environ["MOROS_PROXY"] = self._prev_moros_proxy
+                self._has_prev_moros_proxy = False
             if self.learning_engine is not None:
                 try:
                     self.learning_engine.close()
@@ -891,7 +1357,23 @@ class HackbotOrchestrator:
 
         self._record_learning_findings(skill_name, result, skill_res)
 
-        result["end_time"] = datetime.now(timezone.utc).isoformat()
+        end_dt = datetime.now(timezone.utc)
+        result["end_time"] = end_dt.isoformat()
+        if self.learning_engine is not None and skill_name not in {"review-skill", "report-conglomeration"}:
+            try:
+                duration_ms = max(0.0, (end_dt - start_time).total_seconds() * 1000.0)
+                with self._lock:
+                    self.learning_engine.record_skill_telemetry(
+                        target=self.target,
+                        skill_id=skill_name,
+                        status=str(result.get("status", "completed")).lower(),
+                        duration_ms=duration_ms,
+                        findings_count=int(result.get("findings_count", 0) or 0),
+                        tech_stack=list(getattr(self, "detected_technologies", []) or []),
+                        run_id=(self.current_run or {}).get("run_id"),
+                    )
+            except Exception as exc:
+                logger.debug("LearningEngine record_skill_telemetry error (non-fatal): %s", exc)
         self._log_event(skill_name, result["status"], result.get("notes", ""))
 
         if self.current_run:
@@ -1143,6 +1625,8 @@ def main():
                         help="Execute independent skills in parallel using ThreadPoolExecutor")
     parser.add_argument("--max-subagents", type=int, default=5,
                         help="Maximum parallel workers/subagents (default: 5)")
+    parser.add_argument("--validate", action="store_true",
+                        help="Enable deterministic Phase 1 candidate validation before report assembly")
 
     args = parser.parse_args()
 
@@ -1165,6 +1649,7 @@ def main():
         review_model=args.review_model,
         parallel=args.parallel,
         max_subagents=args.max_subagents,
+        validate_candidates=args.validate,
     )
 
     orchestrator.run()

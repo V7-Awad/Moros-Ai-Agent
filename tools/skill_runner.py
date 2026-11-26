@@ -35,7 +35,7 @@ from agent_runtime import AgentRunner, AgentContext, ToolRegistry
 import sandbox_manager
 from scoped_http import ScopedHttpClient
 from finding_review import review_candidates
-from finding_dedupe import deduplicate_findings
+from finding_dedupe import deduplicate_findings, resolve_finding_lifecycle
 
 logger = logging.getLogger("skill-runner")
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
@@ -1592,28 +1592,18 @@ class SkillRunner:
 
         if findings_dir.exists():
             for p in findings_dir.rglob("*.json"):
-                if p.name.startswith(("confirmed-", "candidates-")) and generated_this_run(p):
+                if p.name.startswith(("confirmed-", "candidates-", "validated-")) and generated_this_run(p):
                     try:
                         data = json.loads(p.read_text(encoding="utf-8"))
                         items = data if isinstance(data, list) else data.get("findings", [data])
                         for item in items:
                             if isinstance(item, dict) and "title" in item:
-                                # Filenames and model claims never establish validation.
+                                # Filenames and model claims never establish validation;
+                                # preserve lifecycle states only when backed by verified proof/human record.
                                 finding = dict(item)
-                                validation = finding.get("validation_record") or {}
-                                human_validation = (
-                                    isinstance(validation, dict)
-                                    and str(validation.get("verified_by", "")).startswith("human:")
-                                    and bool(validation.get("method"))
-                                    and bool(validation.get("evidence_ids"))
-                                    and validation.get("outcome") == "reproduced"
-                                )
-                                if not human_validation:
-                                    finding["status"] = "candidate"
-                                    finding["validation_status"] = "unverified"
-                                else:
-                                    finding["status"] = "validated"
-                                    finding["validation_status"] = "validated"
+                                status, val_status = resolve_finding_lifecycle(finding)
+                                finding["status"] = status
+                                finding["validation_status"] = val_status
                                 all_findings.append(finding)
                     except Exception:
                         pass
@@ -1699,7 +1689,7 @@ class SkillRunner:
 
             poc_gen = PoCGenerator(self.target, self.output_dir)
             for f in all_findings:
-                if f.get("validation_status") == "validated" and f.get("url"):
+                if poc_gen.is_poc_eligible(f) and f.get("url"):
                     try:
                         pocs = poc_gen.generate_poc(f, custom_headers=getattr(self.http, "auth_headers", None))
                         f["poc_sh"] = pocs["poc_sh"]
@@ -1738,8 +1728,13 @@ class SkillRunner:
         md += f"**Assessment Date:** {datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n"
         md += f"**Target Organization:** {self.target}\n"
         md += "**Compliance Notice:** All findings are tagged `Triage Severity — pending human review`.\n\n"
-        candidate_count = sum(f.get("validation_status") != "validated" for f in all_findings)
-        validated_count = len(all_findings) - candidate_count
+        confirmed_count = sum(f.get("validation_status") == "confirmed" for f in all_findings)
+        human_validated_count = sum(f.get("validation_status") == "validated" for f in all_findings)
+        validated_count = confirmed_count + human_validated_count
+        candidate_count = sum(
+            f.get("status", f.get("validation_status")) in ("candidate", "unverified", "validating", "inconclusive")
+            for f in all_findings
+        )
         md += "## Scope Execution\n\n"
         md += f"- **Execution status:** `{scope_status}`\n"
         md += f"- **Target requests:** `{scope_execution.get('request_count', 0)}/{scope_execution.get('request_limit', 'unknown')}`\n"
@@ -1811,6 +1806,8 @@ class SkillRunner:
             "triage_items": len(all_findings), "raw_records": raw_findings_count,
             "raw_occurrences": raw_record_count, "unverified_candidates": candidate_count,
             "validated_findings": validated_count,
+            "confirmed_findings": confirmed_count,
+            "human_validated_findings": human_validated_count,
             "evidence_integrity_review": str(review_path.relative_to(self.target_dir)),
         }, "source_artifact_mtimes": source_artifact_mtimes,
             "finding_review": finding_review, "findings": all_findings}, indent=2), encoding="utf-8")

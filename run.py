@@ -72,6 +72,290 @@ def check_prerequisites():
     return issues
 
 
+def _iter_finding_containers(target_path: Path):
+    """Yield (path, container, findings_list) from reports (newest first) and findings/*.json."""
+    output_dir = target_path / "output"
+    report_dir = output_dir / "report"
+    if report_dir.is_dir():
+        report_files = sorted(
+            report_dir.glob("hackbot-report-*.json"),
+            key=lambda p: (p.stat().st_mtime, p.name),
+            reverse=True,
+        )
+        for rf in report_files:
+            try:
+                data = json.loads(rf.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(data, dict) and isinstance(data.get("findings"), list):
+                yield rf, data, data["findings"]
+
+    findings_dir = output_dir / "findings"
+    if findings_dir.is_dir():
+        for ff in sorted(findings_dir.rglob("*.json")):
+            try:
+                data = json.loads(ff.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(data, list):
+                yield ff, data, data
+            elif isinstance(data, dict) and isinstance(data.get("findings"), list):
+                yield ff, data, data["findings"]
+            elif isinstance(data, dict) and "title" in data:
+                yield ff, data, [data]
+
+
+def _matches_finding_id(item: dict, finding_id: str) -> bool:
+    if not isinstance(item, dict):
+        return False
+    target_id = str(finding_id or "").strip()
+    if not target_id:
+        return False
+    if str(item.get("finding_id") or "").strip() == target_id or str(item.get("id") or "").strip() == target_id:
+        return True
+    try:
+        from remediation_assistant import _extract_finding_id
+        if _extract_finding_id(item) == target_id:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _find_target_finding(target_path: Path, finding_id: str):
+    """Locate the first matching finding dict by ID across target report/finding artifacts."""
+    for _path, _container, rows in _iter_finding_containers(target_path):
+        for row in rows:
+            if _matches_finding_id(row, finding_id):
+                return dict(row)
+    return None
+
+
+def _update_finding_in_artifacts(target_path: Path, finding_id: str, updated_finding: dict) -> None:
+    """Persist lifecycle updates for a finding across target report and finding JSON artifacts."""
+    for path, container, rows in _iter_finding_containers(target_path):
+        modified = False
+        for idx, row in enumerate(rows):
+            if _matches_finding_id(row, finding_id):
+                rows[idx] = dict(updated_finding)
+                modified = True
+        if not modified:
+            continue
+        try:
+            if isinstance(container, dict) and isinstance(container.get("findings"), list):
+                container["findings"] = rows
+                summary = container.get("summary")
+                if isinstance(summary, dict):
+                    summary["confirmed_findings"] = sum(
+                        1 for f in rows if isinstance(f, dict) and f.get("status") == "confirmed"
+                    )
+                    summary["human_validated_findings"] = sum(
+                        1 for f in rows if isinstance(f, dict) and f.get("status") == "validated"
+                    )
+                    summary["validated_findings"] = (
+                        summary["confirmed_findings"] + summary["human_validated_findings"]
+                    )
+                    summary["unverified_candidates"] = sum(
+                        1 for f in rows
+                        if isinstance(f, dict) and f.get("status", "candidate") in ("candidate", "validating", "inconclusive")
+                    )
+                payload = container
+            elif isinstance(container, list):
+                payload = rows
+            else:
+                payload = rows[0] if rows else container
+            path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            continue
+
+
+def _run_ci_gate_cli(target: str, target_path: Path, args) -> int:
+    """Evaluate CI/CD policy gate via tools/ci_gate.py and optionally write PR summary."""
+    from ci_gate import (
+        EXIT_INVALID_CONFIG,
+        GateConfig,
+        InvalidGateConfigError,
+        evaluate_gate,
+        generate_pr_summary,
+    )
+
+    fail_on_confirmed = True if args.fail_on_confirmed is None else args.fail_on_confirmed
+    try:
+        cfg = GateConfig(
+            min_severity=args.min_severity,
+            fail_on_candidate=bool(args.fail_on_candidate),
+            fail_on_confirmed=fail_on_confirmed,
+        ).validate()
+    except InvalidGateConfigError as exc:
+        err_payload = {
+            "status": "invalid_config",
+            "passed": False,
+            "exit_code": EXIT_INVALID_CONFIG,
+            "target": target,
+            "errors": [str(exc)],
+        }
+        print(json.dumps(err_payload, indent=2))
+        return EXIT_INVALID_CONFIG
+
+    evaluation = evaluate_gate(
+        output_dir=target_path / "output",
+        config=cfg,
+        target=target,
+    )
+    if args.pr_summary_out:
+        summary_md = generate_pr_summary(evaluation)
+        out_path = Path(args.pr_summary_out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(summary_md, encoding="utf-8")
+
+    print(json.dumps(evaluation, indent=2))
+    return int(evaluation.get("exit_code", EXIT_INVALID_CONFIG))
+
+
+def _run_remediate_cli(target: str, target_path: Path, args) -> int:
+    """Run Phase 3 RemediationAssistant in an isolated sandbox/worktree without modifying main repo."""
+    import subprocess
+    from remediation_assistant import RemediationAssistant, RemediationError
+
+    finding = _find_target_finding(target_path, args.remediate)
+    if finding is None:
+        print(json.dumps({
+            "status": "error",
+            "error": f"Finding '{args.remediate}' not found in {target_path / 'output'}",
+        }, indent=2), file=sys.stderr)
+        return 1
+
+    repo_dir = Path(args.repo_dir).resolve() if args.repo_dir else PROJECT_ROOT
+    llm = LLMClient(provider="auto")
+    assistant = RemediationAssistant(
+        repo_root=repo_dir,
+        llm_client=llm if llm.is_available() else None,
+        target=target,
+        target_dir=target_path,
+    )
+    if (repo_dir / ".git").exists():
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(repo_dir), "status", "--porcelain"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if proc.returncode == 0 and not proc.stdout.strip():
+                assistant.test_runner.use_git_worktree = True
+        except Exception:
+            pass
+
+    try:
+        report = assistant.remediate(finding, require_confirmed=True)
+    except RemediationError as exc:
+        print(json.dumps({
+            "status": "rejected",
+            "finding_id": args.remediate,
+            "error": str(exc),
+        }, indent=2), file=sys.stderr)
+        return 1
+
+    rem_dir = target_path / "output" / "remediation"
+    rem_dir.mkdir(parents=True, exist_ok=True)
+    rem_json_path = rem_dir / f"{report.finding_id}.json"
+    rem_md_path = rem_dir / f"{report.finding_id}.md"
+    rem_json_path.write_text(report.to_json() + "\n", encoding="utf-8")
+    rem_md_path.write_text(report.to_markdown(), encoding="utf-8")
+
+    try:
+        from learning_engine.engine import LearningEngine
+        test_passed = (report.test_results or {}).get("passed")
+        rem_outcome = "tested_pass" if test_passed is True else ("tested_fail" if test_passed is False else "proposed")
+        with LearningEngine(root=target_path) as le:
+            le.record_remediation_outcome(
+                target=target,
+                finding_id=report.finding_id,
+                vuln_class=str(finding.get("type") or finding.get("vuln_class") or "finding"),
+                outcome=rem_outcome,
+                confidence=0.9 if test_passed is True else 0.5,
+                strategy="remediation_assistant",
+                evidence_ids=list(finding.get("evidence_ids") or []),
+                metadata={"affected_file": report.affected_file, "approval_status": report.approval_status},
+            )
+    except Exception:
+        pass
+
+    print(report.to_json())
+    return 0
+
+
+def _run_retest_cli(target: str, target_path: Path, args) -> int:
+    """Run Phase 4 RetestEngine for a finding and preserve historical proof/ledger provenance."""
+    from checkpoint_manager import CheckpointManager
+    from retest_engine import RetestEngine
+    from scope_validator import ScopeValidator
+
+    finding = _find_target_finding(target_path, args.retest)
+    if finding is None:
+        print(json.dumps({
+            "status": "error",
+            "error": f"Finding '{args.retest}' not found in {target_path / 'output'}",
+        }, indent=2), file=sys.stderr)
+        return 1
+
+    remediation_id = ""
+    rem_file = target_path / "output" / "remediation" / f"{args.retest}.json"
+    if rem_file.is_file():
+        remediation_id = f"rem-{args.retest}"
+
+    retest_target = target
+    vr = finding.get("validation_result") if isinstance(finding.get("validation_result"), dict) else {}
+    vr_env = vr.get("environment") if isinstance(vr.get("environment"), dict) else {}
+    url_hints = (
+        str(finding.get("url") or ""),
+        str(finding.get("endpoint") or ""),
+        str(vr.get("endpoint") or ""),
+        str(vr_env.get("base_url") or ""),
+    )
+    if "://" not in retest_target and any(u.startswith("http://") for u in url_hints):
+        retest_target = f"http://{retest_target}"
+
+    sv = ScopeValidator(target, target_dir=target_path)
+    cm = CheckpointManager(target, target_path)
+    engine = RetestEngine(
+        target=retest_target,
+        target_dir=target_path,
+        scope_validator=sv,
+        checkpoint_manager=cm,
+        max_requests=args.max_http_requests,
+        delay_seconds=args.request_delay,
+    )
+    retest_result = engine.retest_finding(
+        finding,
+        remediation_id=remediation_id,
+        mutate_finding=True,
+    )
+    _update_finding_in_artifacts(target_path, args.retest, finding)
+
+    try:
+        from learning_engine.engine import LearningEngine
+        if retest_result.outcome in ("fixed", "still_vulnerable", "regression_detected", "inconclusive"):
+            with LearningEngine(root=target_path) as le:
+                le.record_retest_outcome(
+                    target=target,
+                    finding_id=retest_result.finding_id,
+                    vuln_class=str(finding.get("type") or retest_result.strategy or "finding"),
+                    outcome=retest_result.outcome,
+                    confidence=retest_result.confidence,
+                    strategy=retest_result.strategy,
+                    run_id=retest_result.retest_id,
+                    evidence_ids=list(retest_result.retest_evidence_ids or retest_result.original_evidence_ids),
+                    metadata={
+                        "remediation_id": remediation_id,
+                        "retest_artifact": retest_result.retest_artifact,
+                    },
+                )
+    except Exception:
+        pass
+
+    print(json.dumps(retest_result.to_dict(), indent=2))
+    return 3 if retest_result.outcome == "blocked_scope" else 0
+
+
 def main():
     print(BANNER)
 
@@ -187,6 +471,22 @@ Examples:
                         help="Resume the latest (or specified) incomplete scan run ID")
     parser.add_argument("--no-failover", action="store_true",
                         help="Disable cross-provider LLM failover (sets MOROS_LLM_FAILOVER=0)")
+    parser.add_argument("--validate", action="store_true",
+                        help="Enable deterministic Phase 1 candidate validation before report assembly")
+    parser.add_argument("--remediate", default=None, metavar="FINDING_ID",
+                        help="Generate and sandbox-test a minimal remediation patch for FINDING_ID (no auto-commit)")
+    parser.add_argument("--repo-dir", default=None, metavar="PATH",
+                        help="Authorized source repository root for --remediate (default: project root)")
+    parser.add_argument("--retest", default=None, metavar="FINDING_ID",
+                        help="Run deterministic Phase 4 retest verification for FINDING_ID")
+    parser.add_argument("--ci-gate", action="store_true",
+                        help="Evaluate CI/CD policy gate against target artifacts (tools/ci_gate.py)")
+    parser.add_argument("--min-severity", choices=["info", "low", "medium", "high", "critical"],
+                        default="high", help="Minimum severity threshold for --ci-gate (default: high)")
+    parser.add_argument("--fail-on-confirmed", nargs="?", const="true", default=None,
+                        help="Fail --ci-gate (exit 2) when confirmed/validated findings meet thresholds")
+    parser.add_argument("--pr-summary-out", default=None, metavar="PATH",
+                        help="Write secret-redacted Markdown PR summary from --ci-gate to PATH")
     parser.add_argument("--dashboard", action="store_true",
                         help="Launch local web dashboard viewer")
     parser.add_argument("--port", type=int, default=8080,
@@ -377,6 +677,24 @@ Examples:
         print(json.dumps({"target": args.target, "proposals": learner.list_proposals()}, indent=2))
         sys.exit(0)
 
+    # Handle --remediate / --retest / standalone --ci-gate (deterministic, no LLM required)
+    if args.remediate:
+        sys.exit(_run_remediate_cli(args.target, target_path, args))
+
+    if args.retest:
+        sys.exit(_run_retest_cli(args.target, target_path, args))
+
+    explicit_skills = any(arg == "--skills" or arg.startswith("--skills=") for arg in sys.argv[1:])
+    if (
+        args.ci_gate
+        and not args.validate
+        and not args.deep_recon
+        and not args.resume
+        and not args.dry_run
+        and not explicit_skills
+    ):
+        sys.exit(_run_ci_gate_cli(args.target, target_path, args))
+
     # Parse skills
     if args.skills == "all":
         if args.scan_mode == "quick":
@@ -428,6 +746,8 @@ Examples:
             print(f"   Proxy: {args.proxy}")
         if args.resume:
             print(f"   Resume run: {args.resume}")
+        if args.validate:
+            print("   Validation: enabled (Phase 1 ExploitValidator)")
         print(f"   Budget Cap: ${args.budget:.2f} | Est. LLM Cost: ${cost_est['cost_low_usd']:.4f}–${cost_est['cost_high_usd']:.4f}")
         print(f"   Runs per skill: {args.runs_per_skill}")
         print(f"   Review model: {args.review_model or 'same as skill'}")
@@ -448,8 +768,10 @@ Examples:
 
     # Fail fast when there is no configured provider. The orchestrator performs
     # a live connection probe before it makes any request to the target.
+    # Allow unit tests that monkeypatch HackbotOrchestrator with a DummyOrchestrator
+    # (lacking _model_preflight) to exercise CLI wiring offline.
     llm_client = LLMClient(provider="auto")
-    if not llm_client.is_available():
+    if hasattr(HackbotOrchestrator, "_model_preflight") and not llm_client.is_available():
         print("\n❌ Scan blocked: no LLM provider is configured. Configure a provider and API key, then test the connection.", file=sys.stderr)
         sys.exit(2)
 
@@ -488,12 +810,16 @@ Examples:
             orchestrator_kwargs["resume_run_id"] = args.resume
         if "proxy" in orch_params or has_varkw:
             orchestrator_kwargs["proxy"] = args.proxy
+        if "validate_candidates" in orch_params or has_varkw:
+            orchestrator_kwargs["validate_candidates"] = args.validate
     except (TypeError, ValueError):
         orchestrator_kwargs["max_subagents"] = args.max_subagents
         if args.resume is not None:
             orchestrator_kwargs["resume_run_id"] = args.resume
         if args.proxy is not None:
             orchestrator_kwargs["proxy"] = args.proxy
+        if args.validate:
+            orchestrator_kwargs["validate_candidates"] = args.validate
 
     orchestrator = HackbotOrchestrator(**orchestrator_kwargs)
     if getattr(orchestrator, "runner", None) is not None:
@@ -505,7 +831,8 @@ Examples:
         try:
             from oob_server import OOBServer
             oob_server = OOBServer(host="127.0.0.1", port=0, log_dir=target_path / "output" / "logs")
-            listen_url = oob_server.start()
+            oob_server.start()
+            listen_url = oob_server.base_url
             os.environ["MOROS_OOB_URL"] = listen_url
             os.environ["MOROS_CALLBACK_URL"] = listen_url
             print(f"   📡 Local OOB Callback Listener active: {listen_url}")
@@ -516,9 +843,17 @@ Examples:
     try:
         result = orchestrator.run()
         if oob_server is not None:
-            hits = oob_server.list_callbacks()
-            if hits:
-                print(f"\n   📡 OOB Listener captured {len(hits)} callback(s) during scan.")
+            token_hits = []
+            for tok in oob_server.list_tokens():
+                token_hits.extend(oob_server.poll_callbacks(tok))
+            unmatched_hits = oob_server.unmatched_callbacks()
+            summaries = oob_server.summarize_findings()
+            total_hits = len(token_hits) + len(unmatched_hits)
+            if total_hits or summaries:
+                print(
+                    f"\n   📡 OOB Listener captured {total_hits} callback(s) "
+                    f"({len(summaries)} correlated finding(s)) during scan."
+                )
         if orchestrator.cost_tracker.get_running_total().get("total_calls", 0) > 0:
             print("\n" + orchestrator.cost_tracker.format_human_summary())
         if result and result.get("status") == "BLOCKED_SCOPE":
@@ -526,6 +861,8 @@ Examples:
             sys.exit(3)
         if result and result.get("status") == "FAILED":
             sys.exit(1)
+        if args.ci_gate:
+            sys.exit(_run_ci_gate_cli(args.target, target_path, args))
         if args.fail_on_candidate and result:
             findings_root = target_path / "output" / "findings"
             has_candidate = False
