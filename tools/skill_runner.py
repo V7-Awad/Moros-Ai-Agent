@@ -1755,12 +1755,39 @@ class SkillRunner:
         }
 
         # Generate Full Markdown Report
+        scope_audit_file = self.output_dir / "logs" / "scope-audit-latest.json"
+        try:
+            scope_execution = json.loads(scope_audit_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            scope_execution = {}
+        scope_status = (
+            "BLOCKED_SCOPE"
+            if scope_execution.get("stopped_by_policy") or scope_execution.get("deviation_detected")
+            else "COMPLETED"
+        )
         md = f"# Penetration Testing Assessment Report — {self.target}\n\n"
         md += f"**Assessment Date:** {datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n"
         md += f"**Target Organization:** {self.target}\n"
         md += "**Compliance Notice:** All findings are tagged `Triage Severity — pending human review`.\n\n"
         candidate_count = sum(f.get("validation_status") != "validated" for f in all_findings)
         validated_count = len(all_findings) - candidate_count
+        md += "## Scope Execution\n\n"
+        md += f"- **Execution status:** `{scope_status}`\n"
+        md += f"- **Target requests:** `{scope_execution.get('request_count', 0)}/{scope_execution.get('request_limit', 'unknown')}`\n"
+        md += f"- **Minimum request delay:** `{scope_execution.get('minimum_delay_seconds', 'unknown')}s`\n"
+        md += f"- **Observed hosts:** `{json.dumps(scope_execution.get('hosts_observed', {}), sort_keys=True)}`\n"
+        md += f"- **Observed methods:** `{json.dumps(scope_execution.get('methods_observed', {}), sort_keys=True)}`\n"
+        md += f"- **Out-of-scope requests observed:** `{json.dumps(scope_execution.get('out_of_scope_hosts', {}), sort_keys=True)}`\n"
+        blocked_redirects = [
+            item for item in scope_execution.get("policy_violations", [])
+            if item.get("kind") == "blocked_redirect"
+        ]
+        if blocked_redirects:
+            destinations = sorted({str(item.get("to", "unknown")) for item in blocked_redirects})
+            md += f"- **Redirects blocked before following:** `{', '.join(destinations)}`\n"
+        if scope_execution.get("deviation_detected"):
+            md += "- **Scope warning:** at least one out-of-policy request was observed; finding attribution requires operator review.\n"
+        md += "\n"
         md += "## Executive Summary\n\n"
         raw_record_count = sum(int(f.get("raw_record_count", 1)) for f in all_findings)
         md += f"Moros AI processed artifacts for `{self.target}` and recorded **{len(all_findings)} unique triage items** from **{raw_findings_count} generated records** ({raw_record_count} raw occurrences): **{candidate_count} unverified candidates** and **{validated_count} validated findings**. An empty result means insufficient observed evidence, not proof of absence.\n\n"
@@ -1810,7 +1837,8 @@ class SkillRunner:
                 (report_dir / f"hackbot-report-{self.target}-{date_str}-ar.md").write_text(ar_md, encoding="utf-8")
             except Exception as exc:
                 self.log_step(skill, "step-08-i18n-error.log", f"Arabic report generation notice: {exc}")
-        report_json_file.write_text(json.dumps({"target": self.target, "summary": {
+        report_json_file.write_text(json.dumps({"target": self.target, "scope_execution": scope_execution,
+            "summary": {
             "triage_items": len(all_findings), "raw_records": raw_findings_count,
             "raw_occurrences": raw_record_count, "unverified_candidates": candidate_count,
             "validated_findings": validated_count,

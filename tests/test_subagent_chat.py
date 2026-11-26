@@ -30,6 +30,21 @@ def test_roster_active_status():
             assert {"evidence-integrity-review", "skeptical-false-positive-review"}.issubset({a["id"] for a in specialists})
 
 
+def test_roster_shows_persisted_scope_block_after_dashboard_restart():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        target_path = Path(tmp_dir) / "lastpass.com"
+        (target_path / "output" / "runs" / "run-test").mkdir(parents=True)
+        (target_path / "output" / "runs" / "run-test" / "run.json").write_text(
+            '{"run_id":"run-test","status":"blocked"}', encoding="utf-8"
+        )
+        with patch("dashboard.server.TARGETS_DIR", Path(tmp_dir)), \
+             patch("tools.llm_client.LLMClient.is_available", return_value=False):
+            roster = DashboardHandler.__new__(DashboardHandler).get_subagent_roster("lastpass.com")
+
+        coordinator = next(agent for agent in roster if agent["id"] == "coordinator")
+        assert coordinator["status"] == "BLOCKED_SCOPE"
+
+
 def test_agent_greetings():
     handler = DashboardHandler.__new__(DashboardHandler)
     recon_greeting = handler.get_agent_greeting("test.com", "recon-agent")

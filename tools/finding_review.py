@@ -54,11 +54,12 @@ def review_candidates(target: str, target_dir: Path, findings: List[Dict[str, An
                     out_of_host_requests[host] = out_of_host_requests.get(host, 0) + 1
         except (OSError, json.JSONDecodeError):
             pass
-    for item in audit_data.get("policy_violations", []):
-        if item.get("kind") == "blocked_redirect":
-            blocked_host = str(item.get("to", "unknown-host"))
-            out_of_host_requests[blocked_host] = out_of_host_requests.get(blocked_host, 0) + 1
-    scope_deviation = bool(out_of_host_requests or audit_data.get("policy_violations"))
+    # A rejected redirect records an attempted destination, not a request sent
+    # there. Only an observed out-of-scope request should taint attribution.
+    scope_deviation = bool(
+        audit_data.get("deviation_detected", bool(out_of_host_requests))
+        or out_of_host_requests
+    )
     reviewed = []
     for index, item in enumerate(findings, 1):
         finding = dict(item)
@@ -141,6 +142,7 @@ def review_candidates(target: str, target_dir: Path, findings: List[Dict[str, An
         "scope_blocks_reproduction": not active_checks_allowed,
         "scope_execution_audit": {
             "deviation_detected": scope_deviation,
+            "stopped_by_policy": bool(audit_data.get("stopped_by_policy")),
             "out_of_host_request_counts": out_of_host_requests,
             "finding_attribution": "unreliable_due_to_scope_deviation" if scope_deviation else "not_independently_verified",
         },

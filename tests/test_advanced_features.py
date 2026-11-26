@@ -94,6 +94,28 @@ def test_finding_review_never_promotes_static_candidates(tmp_path):
     assert result["findings"][0]["skeptical_review"]["disposition"] == "not_proven"
 
 
+def test_blocked_redirect_does_not_mark_findings_as_out_of_scope(tmp_path):
+    output_logs = tmp_path / "output" / "logs"
+    output_logs.mkdir(parents=True)
+    (output_logs / "scope-audit-latest.json").write_text(json.dumps({
+        "deviation_detected": False,
+        "stopped_by_policy": True,
+        "out_of_scope_hosts": {},
+        "policy_violations": [{
+            "kind": "blocked_redirect",
+            "from": "lastpass.com",
+            "to": "www.lastpass.com",
+            "status_code": 302,
+        }],
+    }), encoding="utf-8")
+
+    result = review_candidates("lastpass.com", tmp_path, [{"title": "Candidate", "type": "XSS"}], active_checks_allowed=False)
+
+    assert result["scope_execution_audit"]["deviation_detected"] is False
+    assert result["scope_execution_audit"]["stopped_by_policy"] is True
+    assert result["scope_execution_audit"]["out_of_host_request_counts"] == {}
+
+
 def test_agent_http_tool_reuses_scope_limited_client(tmp_path):
     target_dir = tmp_path / "lastpass.com"
     target_dir.mkdir()

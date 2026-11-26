@@ -592,10 +592,10 @@ class HackbotOrchestrator:
 
             # Step 6: Write orchestration log & finalize durable run
             self._write_scope_audit()
-            self._write_orchestration_log()
             policy_stop = bool(getattr(self.runner.http, "stop_requested", False))
-            if self.scope_audit.get("deviation_detected"):
+            if self.scope_audit.get("stopped_by_policy") or self.scope_audit.get("deviation_detected"):
                 policy_stop = True
+            self._write_orchestration_log()
             final_status = "blocked" if policy_stop else ("failed" if self.failed_skills else "completed")
             if policy_stop:
                 self._log_event("scope-check", "RUN_STOPPED", "A request or redirect violated the active scope policy; all later target requests were blocked.")
@@ -1001,7 +1001,11 @@ class HackbotOrchestrator:
             "skills_requested": self.skills,
             "models_used": self.models,
             "runs_per_skill": self.runs_per_skill,
-            "status": "FAILED" if self.failed_skills else "SUCCESS",
+            "status": (
+                "BLOCKED_SCOPE"
+                if self.scope_audit.get("stopped_by_policy") or self.scope_audit.get("deviation_detected")
+                else ("FAILED" if self.failed_skills else "SUCCESS")
+            ),
             "failed_skills": self.failed_skills,
             "scope_blocked_skills": self.scope_blocked_skills,
             "scope_violations": getattr(self.runner.http, "policy_violations", []),
@@ -1018,6 +1022,7 @@ class HackbotOrchestrator:
         policy = getattr(self.scope_validator, "policy", {})
         host_counts = {}
         method_counts = {}
+        request_observations = []
         traffic_path = self.target_dir / "output" / "js" / "traffic-log.json"
         started_at = (self.current_run or {}).get("started_at")
         try:
@@ -1027,20 +1032,35 @@ class HackbotOrchestrator:
         if traffic_path.is_file() and traffic_path.stat().st_mtime >= run_started_epoch:
             try:
                 traffic = json.loads(traffic_path.read_text(encoding="utf-8"))
-                for row in traffic if isinstance(traffic, list) else []:
-                    parsed = urllib.parse.urlparse(str(row.get("url", "")))
-                    host = (parsed.hostname or "").lower().rstrip(".")
-                    method = str(row.get("method", "UNKNOWN")).upper()
-                    if host:
-                        host_counts[host] = host_counts.get(host, 0) + 1
-                    method_counts[method] = method_counts.get(method, 0) + 1
+                request_observations.extend(row for row in traffic if isinstance(row, dict))
             except (OSError, json.JSONDecodeError):
                 pass
+        # The browser traffic log covers only browser-captured requests. Include
+        # requests from the shared scoped client so GET/HEAD probes and blocked
+        # before-navigation redirects are represented in the same audit.
+        request_observations.extend(
+            dict(row) for row in getattr(self.runner.http, "request_logs", [])
+            if isinstance(row, dict)
+        )
+        for row in request_observations:
+            parsed = urllib.parse.urlparse(str(row.get("url", "")))
+            host = (parsed.hostname or "").lower().rstrip(".")
+            method = str(row.get("method", "UNKNOWN")).upper()
+            if host:
+                host_counts[host] = host_counts.get(host, 0) + 1
+            method_counts[method] = method_counts.get(method, 0) + 1
         out_of_scope_hosts = {
             host: count for host, count in host_counts.items()
             if not self.scope_validator.is_allowed(host)[0]
         }
         violations = list(getattr(self.runner.http, "policy_violations", []))
+        out_of_policy_requests = [
+            row for row in request_observations
+            if (str(row.get("method", "")).upper() not in {"GET", "HEAD"}
+                or not self.scope_validator.is_allowed(
+                    urllib.parse.urlparse(str(row.get("url", ""))).hostname or ""
+                )[0])
+        ]
         audit = {
             "run_id": (self.current_run or {}).get("run_id"),
             "target": self.target,
@@ -1052,8 +1072,14 @@ class HackbotOrchestrator:
             "methods_observed": method_counts,
             "hosts_observed": host_counts,
             "out_of_scope_hosts": out_of_scope_hosts,
+            "out_of_policy_requests": out_of_policy_requests,
+            "request_observations": request_observations,
             "policy_violations": violations,
-            "deviation_detected": bool(out_of_scope_hosts or violations),
+            # A redirect rejected before following is a safe block, not an
+            # out-of-scope request. Keep the stop signal separate from a real
+            # request that escaped host/method policy.
+            "stopped_by_policy": bool(violations),
+            "deviation_detected": bool(out_of_scope_hosts or out_of_policy_requests),
         }
         self.scope_audit = audit
         audit_path = self.target_dir / "output" / "logs" / "scope-audit-latest.json"

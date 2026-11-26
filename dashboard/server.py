@@ -1762,6 +1762,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         llm_available = LLMClient(provider="auto").is_available()
         run_manager = RunManager(target_path)
         latest_run = run_manager.get_latest_or_active_run()
+        if scan_state in {"idle", "failed", "error"} and str((latest_run or {}).get("status", "")).lower() in {"blocked", "blocked_scope"}:
+            scan_state = "blocked_scope"
         sessions = run_manager.list_agent_sessions(latest_run["run_id"]) if latest_run else []
         skill_states = {}
         for session in sessions:
@@ -2883,11 +2885,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         with active_scans_lock:
             scan_info = active_scans.get(target)
-            if not scan_info:
-                return {"status": "idle", "logs": []}
-            status = scan_info.get("status", "idle")
-            start_time = scan_info.get("start_time")
-            logs_copy = list(scan_info.get("logs", []))
+            status = scan_info.get("status", "idle") if scan_info else "idle"
+            start_time = scan_info.get("start_time") if scan_info else None
+            logs_copy = list(scan_info.get("logs", [])) if scan_info else []
+
+        # Keep terminal status accurate after a dashboard restart and reconcile
+        # older dashboard workers that stored a scope block as a generic failure.
+        if status not in {"starting", "running", "stopping", "stopped"}:
+            try:
+                latest_run = RunManager(TARGETS_DIR / target).get_latest_or_active_run()
+                run_status = str((latest_run or {}).get("status", "")).lower()
+                if run_status in {"blocked", "blocked_scope"}:
+                    status = "blocked_scope"
+                elif status in {"idle", "failed", "error"} and run_status in {"completed", "failed"}:
+                    status = run_status
+            except (OSError, TypeError, ValueError):
+                pass
 
         return {
             "status": status,
