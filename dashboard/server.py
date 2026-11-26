@@ -47,7 +47,7 @@ from tools.llm_client import LLMClient, load_dotenv_if_present, redact_secrets
 from tools.checkpoint_manager import CheckpointManager
 from tools.run_manager import RunManager
 from tools.skill_registry import SkillRegistry
-from tools.finding_dedupe import deduplicate_findings, finding_identity
+from tools.finding_dedupe import deduplicate_findings, finding_identity, resolve_finding_lifecycle
 
 logger = logging.getLogger(__name__)
 
@@ -654,16 +654,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             target_name = urllib.parse.unquote(target_match.group(1))
             sub = target_match.group(2)
 
-            try:
-                from setup import validate_target_name
-                validate_target_name(target_name)
-            except ValueError:
-                self.send_error_json("Invalid target name", status=400)
-                return
-
-            target_path = TARGETS_DIR / target_name
-            if not target_path.exists():
-                self.send_error_json(f"Target '{target_name}' not found", status=404)
+            target_path = self._resolve_target_dir(target_name)
+            if target_path is None:
                 return
 
             if sub in ["", "summary"]:
@@ -674,6 +666,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             elif sub == "findings":
                 self.send_json(self.get_target_findings(target_name))
+                return
+            elif sub == "attack-graph":
+                refresh_flag = str(query.get("refresh", ["0"])[0]).strip().lower() in {"1", "true", "yes"}
+                self.send_json(self.get_target_attack_graph(target_name, refresh=refresh_flag))
                 return
             elif sub == "endpoints":
                 self.send_json(self.get_target_endpoints(target_name))
@@ -945,20 +941,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "Failed to score learning signals"}, status=500)
             return
 
+        # Target-scoped Roadmap Action Endpoints (validate, remediate, retest, skill-proposals/rollback)
+        roadmap_post_match = re.match(
+            r"^/api/targets/([^/]+)/(validate|remediate|retest|skill-proposals/rollback)$",
+            path,
+        )
+        if roadmap_post_match:
+            target_name = urllib.parse.unquote(roadmap_post_match.group(1))
+            action_route = roadmap_post_match.group(2)
+            target_path = self._resolve_target_dir(target_name)
+            if target_path is None:
+                return
+            if action_route == "validate":
+                self.handle_target_validate(target_name, target_path, body)
+            elif action_route == "remediate":
+                self.handle_target_remediate(target_name, target_path, body)
+            elif action_route == "retest":
+                self.handle_target_retest(target_name, target_path, body)
+            elif action_route == "skill-proposals/rollback":
+                self.handle_skill_proposal_rollback(target_name, target_path, body)
+            return
+
         # Target-scoped Schedules & Skill Proposals mutations
         target_post_match = re.match(r"^/api/targets/([^/]+)/(schedules|skill-proposals)$", path)
         if target_post_match:
             target_name = urllib.parse.unquote(target_post_match.group(1))
             resource = target_post_match.group(2)
-            try:
-                from setup import validate_target_name
-                validate_target_name(target_name)
-            except ValueError:
-                self.send_error_json("Invalid target name", status=400)
-                return
-            target_path = TARGETS_DIR / target_name
-            if not target_path.exists():
-                self.send_error_json(f"Target '{target_name}' not found", status=404)
+            target_path = self._resolve_target_dir(target_name)
+            if target_path is None:
                 return
 
             action = str(body.get("action", "")).strip().lower()
@@ -987,7 +997,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         self.send_error_json("Unsupported schedule action", status=400)
                 else:
                     from tools.skill_learner import SkillLearner
-                    learner = SkillLearner(target_dir=target_path)
+                    learner = SkillLearner(target_dir=target_path, skills_dir=SKILLS_DIR)
                     if action == "propose":
                         proposals = learner.propose_skills()
                         self.send_json({"status": "success", "proposals": proposals})
@@ -1003,6 +1013,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             reason=str(body.get("reason", "Rejected in dashboard")),
                         )
                         self.send_json({"status": "success", "proposal": rejected})
+                    elif action in {"rollback", "disable", "enable"}:
+                        self.handle_skill_proposal_rollback(target_name, target_path, {**body, "action": action})
                     else:
                         self.send_error_json("Unsupported skill-proposal action", status=400)
             except (KeyError, ValueError, FileNotFoundError) as exc:
@@ -2236,6 +2248,658 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         return statuses
 
+    def _resolve_target_dir(self, target_name: str) -> Optional[Path]:
+        """Validate target name, enforce TARGETS_DIR containment, and verify directory exists."""
+        if _has_newline(target_name):
+            self.send_error_json("Invalid target name", status=400)
+            return None
+        try:
+            from setup import validate_target_name
+            validate_target_name(target_name)
+        except ValueError:
+            self.send_error_json("Invalid target name", status=400)
+            return None
+
+        targets_root = TARGETS_DIR.resolve()
+        target_path = (targets_root / target_name).resolve()
+        if not target_path.is_relative_to(targets_root) or target_path == targets_root:
+            self.send_error_json("Invalid target name", status=400)
+            return None
+        if not target_path.exists() or not target_path.is_dir():
+            self.send_error_json(f"Target '{target_name}' not found", status=404)
+            return None
+        return target_path
+
+    @staticmethod
+    def _resolve_dashboard_lifecycle(item: Dict[str, Any]) -> Tuple[str, str]:
+        """
+        Resolve additive finding lifecycle status when backed by valid
+        validation_result (proof_artifact + evidence_ids) or human validation_record;
+        forces unverified findings without proof to ('candidate', 'unverified').
+        """
+        if not isinstance(item, dict):
+            return "candidate", "unverified"
+
+        status, val_status = resolve_finding_lifecycle(item)
+
+        # Support human_reviewed / confirmed human validation_record outcomes
+        record = item.get("validation_record")
+        human_ok = False
+        if isinstance(record, dict) and str(record.get("verified_by", "")).strip().startswith("human:"):
+            outcome = str(record.get("outcome", "")).strip().lower()
+            req_status = str(item.get("status", "")).strip().lower()
+            if outcome in {"accepted_risk", "fixed", "false_positive", "not_reproduced", "inconclusive"}:
+                human_ok = True
+            elif outcome == "human_reviewed" or (req_status == "human_reviewed" and bool(record.get("notes") or record.get("method"))):
+                status, val_status = "human_reviewed", "human_reviewed"
+                human_ok = True
+            elif outcome in {"confirmed", "reproduced", "validated"} and bool(record.get("method")) and bool(
+                record.get("evidence_ids") or item.get("evidence_ids")
+            ):
+                if outcome == "confirmed" or req_status == "confirmed":
+                    status, val_status = "confirmed", "confirmed"
+                else:
+                    status, val_status = "validated", "validated"
+                human_ok = True
+
+        # Support machine validation_result with explicit proof_artifact + evidence_ids
+        vr = item.get("validation_result")
+        if not human_ok and isinstance(vr, dict):
+            is_non_deterministic = (
+                vr.get("deterministic") is False
+                or vr.get("llm_only") is True
+                or str(vr.get("method", "")).strip().lower() == "llm_only"
+            )
+            if not is_non_deterministic:
+                vr_status = str(vr.get("status", "")).strip().lower()
+                has_proof = bool(str(vr.get("proof_artifact") or item.get("proof_artifact") or "").strip())
+                ev_ids = vr.get("evidence_ids") or item.get("evidence_ids") or []
+                has_ev = bool(ev_ids) if isinstance(ev_ids, list) else bool(ev_ids)
+                if vr_status in {"confirmed", "validated"}:
+                    if has_proof and has_ev:
+                        status, val_status = vr_status, vr_status
+                    else:
+                        status, val_status = "candidate", "unverified"
+                elif vr_status == "fixed":
+                    if has_proof and has_ev:
+                        status, val_status = "fixed", "fixed"
+                elif vr_status in {"validating", "inconclusive", "false_positive"}:
+                    status, val_status = vr_status, vr_status
+
+        # Retest lifecycle progression (fixed / inconclusive) preserves proof & evidence
+        latest_retest = item.get("latest_retest")
+        if isinstance(latest_retest, dict) and status not in {"accepted_risk", "false_positive"}:
+            rt_outcome = str(latest_retest.get("outcome", "")).strip().lower()
+            has_rt_proof = bool(
+                str(latest_retest.get("retest_proof_artifact") or latest_retest.get("retest_artifact") or "").strip()
+            )
+            has_rt_ev = bool(
+                latest_retest.get("retest_evidence_id")
+                or latest_retest.get("retest_evidence_ids")
+                or latest_retest.get("original_evidence_ids")
+            )
+            if rt_outcome == "fixed" and (has_rt_proof or has_rt_ev):
+                status, val_status = "fixed", "fixed"
+            elif rt_outcome == "inconclusive" and latest_retest.get("retest_id") and status == "candidate":
+                status, val_status = "inconclusive", "inconclusive"
+
+        return status, val_status
+
+    @staticmethod
+    def _enrich_findings_from_evidence(target_dir: Path, findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Attach persisted validation proofs, retest outcomes, and remediation reports by finding_id."""
+        output_dir = target_dir / "output"
+        evidence_dir = output_dir / "evidence"
+        validation_dir = evidence_dir / "validation"
+        retests_dir = evidence_dir / "retests"
+        remediation_dir = output_dir / "remediation"
+        ledger_file = evidence_dir / "ledger.jsonl"
+
+        ledger_by_run: Dict[str, Dict[str, Any]] = {}
+        if ledger_file.is_file():
+            try:
+                for line in ledger_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(entry, dict) and entry.get("validation_run_id"):
+                        ledger_by_run[str(entry["validation_run_id"])] = entry
+            except OSError:
+                pass
+
+        val_by_fid: Dict[str, Dict[str, Any]] = {}
+        if validation_dir.is_dir():
+            for p in sorted(validation_dir.glob("*.json"), key=lambda x: x.stat().st_mtime):
+                try:
+                    bundle = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if not isinstance(bundle, dict) or not bundle.get("finding_id"):
+                    continue
+                fid = str(bundle["finding_id"])
+                run_id = str(bundle.get("validation_run_id", ""))
+                ledger_entry = ledger_by_run.get(run_id, {})
+                ev_id = ledger_entry.get("evidence_id")
+                ev_ids = [ev_id] if ev_id else []
+                proof_rel = ledger_entry.get("source_artifact") or f"output/evidence/validation/{p.name}"
+                val_by_fid[fid] = {
+                    "finding_id": fid,
+                    "validation_run_id": run_id,
+                    "target": bundle.get("target", ""),
+                    "endpoint": bundle.get("endpoint", ""),
+                    "method": bundle.get("method", "GET"),
+                    "strategy": bundle.get("strategy", ""),
+                    "strategy_version": bundle.get("strategy_version", "1.0.0"),
+                    "status": bundle.get("status", "candidate"),
+                    "confidence": bundle.get("confidence", 0.0),
+                    "limitations": list(bundle.get("limitations") or []),
+                    "timestamp": bundle.get("timestamp", ""),
+                    "evidence_ids": ev_ids,
+                    "proof_artifact": proof_rel,
+                }
+
+        retests_by_fid: Dict[str, List[Dict[str, Any]]] = {}
+        if retests_dir.is_dir():
+            for p in sorted(retests_dir.glob("*.json"), key=lambda x: x.stat().st_mtime):
+                try:
+                    rr = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if isinstance(rr, dict) and rr.get("finding_id"):
+                    retests_by_fid.setdefault(str(rr["finding_id"]), []).append(rr)
+
+        rem_by_fid: Dict[str, Dict[str, Any]] = {}
+        if remediation_dir.is_dir():
+            for p in sorted(remediation_dir.glob("*.json"), key=lambda x: x.stat().st_mtime):
+                try:
+                    rep = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if isinstance(rep, dict) and rep.get("finding_id"):
+                    rem_by_fid[str(rep["finding_id"])] = rep
+
+        for f in findings:
+            fid = str(f.get("finding_id") or f.get("id") or "").strip()
+            if fid and fid in val_by_fid and not isinstance(f.get("validation_result"), dict):
+                vr = val_by_fid[fid]
+                f["validation_result"] = vr
+                if not f.get("proof_artifact") and vr.get("proof_artifact"):
+                    f["proof_artifact"] = vr["proof_artifact"]
+                ev_list = list(f.get("evidence_ids") or [])
+                for eid in vr.get("evidence_ids") or []:
+                    if eid and eid not in ev_list:
+                        ev_list.append(eid)
+                f["evidence_ids"] = ev_list
+
+            if fid and fid in retests_by_fid and not f.get("latest_retest"):
+                hist = retests_by_fid[fid]
+                f["retest_history"] = hist
+                f["latest_retest"] = hist[-1]
+                f["retest_outcome"] = hist[-1].get("outcome", "")
+                ev_list = list(f.get("evidence_ids") or [])
+                for rr in hist:
+                    for eid in (rr.get("original_evidence_ids") or []) + (rr.get("retest_evidence_ids") or []):
+                        if eid and eid not in ev_list:
+                            ev_list.append(eid)
+                    if rr.get("retest_evidence_id") and rr["retest_evidence_id"] not in ev_list:
+                        ev_list.append(rr["retest_evidence_id"])
+                f["evidence_ids"] = ev_list
+
+            if fid and fid in rem_by_fid and not isinstance(f.get("remediation_report"), dict):
+                f["remediation_report"] = rem_by_fid[fid]
+
+        return findings
+
+    def _find_target_finding(self, target_name: str, finding_id: str) -> Optional[Dict[str, Any]]:
+        """Find a target finding by finding_id or id."""
+        fid = str(finding_id or "").strip()
+        if not fid:
+            return None
+        for f in self.get_target_findings(target_name):
+            if str(f.get("finding_id") or "").strip() == fid or str(f.get("id") or "").strip() == fid:
+                return dict(f)
+        return None
+
+    def get_target_attack_graph(self, target_name: str, refresh: bool = False) -> Dict[str, Any]:
+        """Load or build output/report/attack-graph.json including attack_chains, chain_summary, and mermaid."""
+        target_path = (TARGETS_DIR / target_name).resolve()
+        report_dir = target_path / "output" / "report"
+        graph_file = report_dir / "attack-graph.json"
+        chains_file = report_dir / "attack-chains.json"
+
+        graph_data: Optional[Dict[str, Any]] = None
+        if not refresh and graph_file.is_file():
+            try:
+                loaded = json.loads(graph_file.read_text(encoding="utf-8", errors="replace"))
+                if isinstance(loaded, dict):
+                    graph_data = loaded
+            except (OSError, json.JSONDecodeError):
+                graph_data = None
+
+        if graph_data is None:
+            try:
+                from tools.attack_graph import AttackGraphBuilder
+                graph_data = AttackGraphBuilder(target_name, target_path).build_graph()
+            except Exception as exc:
+                logger.warning("Failed to build attack graph for %s: %s", target_name, exc)
+                graph_data = {
+                    "target": target_name,
+                    "total_nodes": 0,
+                    "total_edges": 0,
+                    "nodes": [],
+                    "edges": [],
+                    "attack_chains": [],
+                    "chain_summary": {
+                        "total_chains": 0,
+                        "verified_chains": 0,
+                        "inferred_chains": 0,
+                        "max_path_risk_score": 0.0,
+                        "max_path_severity": "INFO",
+                    },
+                    "trust_boundaries": [],
+                    "chain_mermaid": "graph TD",
+                    "mermaid": "graph TD",
+                }
+
+        nodes = graph_data.get("nodes") if isinstance(graph_data.get("nodes"), list) else []
+        edges = graph_data.get("edges") if isinstance(graph_data.get("edges"), list) else []
+        chains = graph_data.get("attack_chains") if isinstance(graph_data.get("attack_chains"), list) else None
+        chain_summary = graph_data.get("chain_summary") if isinstance(graph_data.get("chain_summary"), dict) else None
+
+        if (chains is None or chain_summary is None) and chains_file.is_file():
+            try:
+                chains_loaded = json.loads(chains_file.read_text(encoding="utf-8", errors="replace"))
+                if isinstance(chains_loaded, dict):
+                    if chains is None and isinstance(chains_loaded.get("attack_chains"), list):
+                        chains = chains_loaded["attack_chains"]
+                    if chain_summary is None and isinstance(chains_loaded.get("chain_summary"), dict):
+                        chain_summary = chains_loaded["chain_summary"]
+                    if not graph_data.get("chain_mermaid") and chains_loaded.get("mermaid"):
+                        graph_data["chain_mermaid"] = chains_loaded["mermaid"]
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        if chains is None or chain_summary is None:
+            try:
+                from tools.attack_chain import AttackChainEngine
+                chain_report = AttackChainEngine(target_name).build_from_target_dir(target_path, write_report=False)
+                if chains is None:
+                    chains = chain_report.get("attack_chains", [])
+                if chain_summary is None:
+                    chain_summary = chain_report.get("chain_summary", {})
+                if not graph_data.get("chain_mermaid"):
+                    graph_data["chain_mermaid"] = chain_report.get("mermaid", "graph TD")
+            except Exception:
+                chains = chains or []
+                chain_summary = chain_summary or {
+                    "total_chains": len(chains),
+                    "verified_chains": sum(1 for c in chains if c.get("verified")),
+                    "inferred_chains": sum(1 for c in chains if c.get("inferred")),
+                    "max_path_risk_score": max((float(c.get("path_risk_score", 0.0)) for c in chains), default=0.0),
+                    "max_path_severity": "INFO",
+                }
+
+        mermaid = str(graph_data.get("mermaid") or graph_data.get("chain_mermaid") or "").strip()
+        if not mermaid:
+            try:
+                from tools.attack_chain import AttackChainEngine
+                mermaid = AttackChainEngine.render_mermaid(nodes, edges, chains)
+            except Exception:
+                mermaid = "graph TD"
+
+        return {
+            "target": graph_data.get("target", target_name),
+            "total_nodes": graph_data.get("total_nodes", len(nodes)),
+            "total_edges": graph_data.get("total_edges", len(edges)),
+            "nodes": nodes,
+            "edges": edges,
+            "attack_chains": chains,
+            "chain_summary": chain_summary,
+            "trust_boundaries": graph_data.get("trust_boundaries", []),
+            "chain_mermaid": graph_data.get("chain_mermaid") or mermaid,
+            "mermaid": mermaid,
+        }
+
+    def handle_target_validate(self, target_name: str, target_path: Path, body: Dict[str, Any]) -> None:
+        """Trigger ExploitValidator safely on a finding or target (non-destructive by default)."""
+        try:
+            from tools.exploit_validator import ExploitValidator
+            from tools.scope_validator import ScopeValidator
+
+            raw_max = body.get("max_requests", 20)
+            max_requests = max(1, min(50, int(raw_max)))
+            raw_timeout = body.get("timeout_seconds", 10.0)
+            timeout_seconds = max(1.0, min(30.0, float(raw_timeout)))
+
+            scope_validator = ScopeValidator(target_name, target_dir=target_path)
+            cp_mgr = CheckpointManager(target_name, target_path)
+            validator = ExploitValidator(
+                target=target_name,
+                target_dir=target_path,
+                scope_validator=scope_validator,
+                checkpoint_manager=cp_mgr,
+                max_requests=max_requests,
+                timeout_seconds=timeout_seconds,
+            )
+
+            proof_ref = body.get("proof_ref") or body.get("proof_artifact")
+            if proof_ref is not None and "finding" not in body and not body.get("finding_id"):
+                proof_str = str(proof_ref).strip()
+                if not proof_str or _has_newline(proof_str):
+                    self.send_error_json("Invalid proof reference", status=400)
+                    return
+                candidate_path = Path(proof_str)
+                if candidate_path.is_absolute() or ".." in candidate_path.parts:
+                    resolved_proof = (target_path / proof_str).resolve() if not candidate_path.is_absolute() else candidate_path.resolve()
+                    if not resolved_proof.is_relative_to(target_path.resolve()):
+                        self.send_error_json("Invalid proof reference outside target workspace", status=400)
+                        return
+                res = validator.reproduce_from_proof(proof_str)
+                self.send_json({
+                    "status": "success",
+                    "target": target_name,
+                    "validation_result": res.to_dict(),
+                })
+                return
+
+            if "finding" in body:
+                raw_finding = body.get("finding")
+                if not isinstance(raw_finding, dict):
+                    self.send_error_json("'finding' must be a JSON object", status=400)
+                    return
+                finding_copy = dict(raw_finding)
+                res = validator.validate_finding(finding_copy, mutate_finding=True)
+                self.send_json({
+                    "status": "success",
+                    "target": target_name,
+                    "validation_result": res.to_dict(),
+                    "finding": finding_copy,
+                })
+                return
+
+            if body.get("finding_id"):
+                fid = str(body.get("finding_id")).strip()
+                matched = self._find_target_finding(target_name, fid)
+                if matched is None:
+                    self.send_error_json(f"Finding '{fid}' not found", status=404)
+                    return
+                res = validator.validate_finding(matched, mutate_finding=True)
+                self.send_json({
+                    "status": "success",
+                    "target": target_name,
+                    "validation_result": res.to_dict(),
+                    "finding": matched,
+                })
+                return
+
+            findings = [dict(f) for f in self.get_target_findings(target_name)]
+            results = validator.validate_findings(findings, mutate_findings=True)
+            self.send_json({
+                "status": "success",
+                "target": target_name,
+                "total_validated": len(results),
+                "validation_results": [r.to_dict() for r in results],
+                "findings": findings,
+            })
+        except (TypeError, ValueError) as exc:
+            self.send_error_json(str(exc), status=400)
+        except Exception as exc:
+            logger.exception("Validation endpoint error for %s", target_name)
+            self.send_json({"error": str(exc), "status": "error"}, status=500)
+
+    def handle_target_remediate(self, target_name: str, target_path: Path, body: Dict[str, Any]) -> None:
+        """Run RemediationAssistant in isolated temp/worktree with require_confirmed=True default."""
+        try:
+            from tools.remediation_assistant import (
+                ApprovalRequiredError,
+                RemediationAssistant,
+                RemediationError,
+                SecurityBoundaryError,
+            )
+
+            if "finding" in body:
+                raw_finding = body.get("finding")
+                if not isinstance(raw_finding, dict):
+                    self.send_error_json("'finding' must be a JSON object", status=400)
+                    return
+                finding_copy = dict(raw_finding)
+            elif body.get("finding_id"):
+                fid = str(body.get("finding_id")).strip()
+                matched = self._find_target_finding(target_name, fid)
+                if matched is None:
+                    self.send_error_json(f"Finding '{fid}' not found", status=404)
+                    return
+                finding_copy = matched
+            else:
+                self.send_error_json("Either 'finding' or 'finding_id' is required", status=400)
+                return
+
+            raw_repo = body.get("repo_root")
+            if raw_repo is not None:
+                if _has_newline(raw_repo) or not str(raw_repo).strip():
+                    self.send_error_json("Invalid repo_root", status=400)
+                    return
+                repo_root = Path(str(raw_repo).strip()).resolve()
+                if not repo_root.is_dir():
+                    self.send_error_json("Invalid repo_root: directory does not exist", status=400)
+                    return
+            else:
+                candidate_repo = (target_path / "repo").resolve()
+                repo_root = candidate_repo if candidate_repo.is_dir() else PROJECT_ROOT
+
+            raw_test_paths = body.get("test_paths")
+            test_paths = None
+            if raw_test_paths is not None:
+                if not isinstance(raw_test_paths, list):
+                    self.send_error_json("'test_paths' must be a list of relative paths", status=400)
+                    return
+                test_paths = []
+                for tp in raw_test_paths:
+                    tp_str = str(tp or "").strip()
+                    if not tp_str or _has_newline(tp_str):
+                        self.send_error_json("Invalid test_paths entry", status=400)
+                        return
+                    tp_path = Path(tp_str)
+                    if tp_path.is_absolute() or ".." in tp_path.parts:
+                        self.send_error_json("test_paths entries must stay inside repo_root", status=400)
+                        return
+                    test_paths.append(tp_str)
+
+            proposed_diff = body.get("proposed_diff")
+            if proposed_diff is not None and not isinstance(proposed_diff, str):
+                self.send_error_json("'proposed_diff' must be a string", status=400)
+                return
+
+            require_confirmed = bool(body.get("require_confirmed", True))
+            run_tests = bool(body.get("run_tests", True))
+            use_git_worktree = bool(body.get("use_git_worktree", False))
+
+            assistant = RemediationAssistant(
+                repo_root=repo_root,
+                target=target_name,
+                target_dir=target_path,
+                checkpoint_manager=CheckpointManager(target_name, target_path),
+            )
+            if use_git_worktree:
+                assistant.test_runner.use_git_worktree = True
+
+            report = assistant.remediate(
+                finding_copy,
+                require_confirmed=require_confirmed,
+                test_paths=test_paths,
+                proposed_diff=proposed_diff,
+                run_tests=run_tests,
+            )
+            report_dict = report.to_dict()
+
+            # Persist remediation proposal artifact inside target workspace for UI inspection
+            rem_dir = (target_path / "output" / "remediation").resolve()
+            if rem_dir.is_relative_to(target_path.resolve()):
+                rem_dir.mkdir(parents=True, exist_ok=True)
+                safe_fid = re.sub(r"[^A-Za-z0-9._-]", "_", str(report.finding_id or "finding"))[:80]
+                rem_file = (rem_dir / f"{safe_fid}.json").resolve()
+                if rem_file.is_relative_to(rem_dir):
+                    rem_file.write_text(json.dumps(report_dict, indent=2, ensure_ascii=False), encoding="utf-8")
+
+            self.send_json({
+                "status": "success",
+                "target": target_name,
+                "remediation_report": report_dict,
+            })
+        except (SecurityBoundaryError, ApprovalRequiredError) as exc:
+            self.send_error_json(str(exc), status=403)
+        except (RemediationError, TypeError, ValueError) as exc:
+            self.send_error_json(str(exc), status=400)
+        except Exception as exc:
+            logger.exception("Remediation endpoint error for %s", target_name)
+            self.send_json({"error": str(exc), "status": "error"}, status=500)
+
+    def handle_target_retest(self, target_name: str, target_path: Path, body: Dict[str, Any]) -> None:
+        """Run RetestEngine on a finding and return RetestResult."""
+        try:
+            from tools.retest_engine import RetestEngine
+            from tools.scope_validator import ScopeValidator
+
+            if "finding" in body:
+                raw_finding = body.get("finding")
+                if not isinstance(raw_finding, dict):
+                    self.send_error_json("'finding' must be a JSON object", status=400)
+                    return
+                finding_copy = dict(raw_finding)
+            elif body.get("finding_id"):
+                fid = str(body.get("finding_id")).strip()
+                matched = self._find_target_finding(target_name, fid)
+                if matched is None:
+                    self.send_error_json(f"Finding '{fid}' not found", status=404)
+                    return
+                finding_copy = matched
+            else:
+                self.send_error_json("Either 'finding' or 'finding_id' is required", status=400)
+                return
+
+            proof_artifact = body.get("proof_artifact")
+            if proof_artifact is not None:
+                proof_str = str(proof_artifact).strip()
+                if _has_newline(proof_str):
+                    self.send_error_json("Invalid proof_artifact", status=400)
+                    return
+                if proof_str:
+                    p_cand = Path(proof_str)
+                    if p_cand.is_absolute() or ".." in p_cand.parts:
+                        resolved_p = (target_path / proof_str).resolve() if not p_cand.is_absolute() else p_cand.resolve()
+                        if not resolved_p.is_relative_to(target_path.resolve()):
+                            self.send_error_json("Invalid proof_artifact outside target workspace", status=400)
+                            return
+                proof_artifact = proof_str or None
+
+            max_requests = max(1, min(50, int(body.get("max_requests", 20))))
+            reg_max_requests = max(0, min(20, int(body.get("regression_max_requests", 5))))
+            timeout_seconds = max(1.0, min(30.0, float(body.get("timeout_seconds", 10.0))))
+
+            engine = RetestEngine(
+                target=target_name,
+                target_dir=target_path,
+                scope_validator=ScopeValidator(target_name, target_dir=target_path),
+                checkpoint_manager=CheckpointManager(target_name, target_path),
+                max_requests=max_requests,
+                regression_max_requests=reg_max_requests,
+                timeout_seconds=timeout_seconds,
+            )
+
+            val_res = body.get("validation_result")
+            if val_res is not None and not isinstance(val_res, dict):
+                self.send_error_json("'validation_result' must be a JSON object", status=400)
+                return
+            reg_routes = body.get("regression_routes")
+            if reg_routes is not None and not isinstance(reg_routes, list):
+                self.send_error_json("'regression_routes' must be a list", status=400)
+                return
+            exp_routes = body.get("expected_routes")
+            if exp_routes is not None and not isinstance(exp_routes, dict):
+                self.send_error_json("'expected_routes' must be a JSON object", status=400)
+                return
+            env_ctx = body.get("environment")
+            if env_ctx is not None and not isinstance(env_ctx, dict):
+                self.send_error_json("'environment' must be a JSON object", status=400)
+                return
+
+            result = engine.retest_finding(
+                finding_copy,
+                validation_result=val_res,
+                proof_artifact=proof_artifact,
+                remediation_id=str(body.get("remediation_id", "") or ""),
+                code_version=str(body.get("code_version", "") or ""),
+                environment=env_ctx,
+                regression_routes=reg_routes,
+                expected_routes=exp_routes,
+                check_reintroduced_vulns=bool(body.get("check_reintroduced_vulns", False)),
+                mutate_finding=True,
+            )
+
+            self.send_json({
+                "status": "success",
+                "target": target_name,
+                "retest_result": result.to_dict(),
+                "finding": finding_copy,
+            })
+        except (TypeError, ValueError) as exc:
+            self.send_error_json(str(exc), status=400)
+        except Exception as exc:
+            logger.exception("Retest endpoint error for %s", target_name)
+            self.send_json({"error": str(exc), "status": "error"}, status=500)
+
+    def handle_skill_proposal_rollback(self, target_name: str, target_path: Path, body: Dict[str, Any]) -> None:
+        """Safely rollback, disable, or enable a skill proposal via SkillLearner."""
+        try:
+            from tools.skill_learner import PolicyInvariantViolation, SkillLearner
+
+            proposal_id = str(body.get("proposal_id", "")).strip()
+            if not proposal_id:
+                self.send_error_json("proposal_id is required", status=400)
+                return
+
+            action = str(body.get("action", "rollback")).strip().lower()
+            learner = SkillLearner(target_dir=target_path, skills_dir=SKILLS_DIR)
+
+            if action == "rollback":
+                updated = learner.rollback_proposal(
+                    proposal_id,
+                    reason=str(body.get("reason", "Rolled back via dashboard")),
+                    rolled_back_by=str(body.get("actor", body.get("rolled_back_by", "dashboard"))),
+                    restore_previous=bool(body.get("restore_previous", False)),
+                )
+            elif action == "disable":
+                updated = learner.disable_proposal(
+                    proposal_id,
+                    reason=str(body.get("reason", "Disabled via dashboard")),
+                    disabled_by=str(body.get("actor", body.get("disabled_by", "dashboard"))),
+                )
+            elif action == "enable":
+                updated = learner.enable_proposal(
+                    proposal_id,
+                    enabled_by=str(body.get("actor", body.get("enabled_by", "dashboard"))),
+                )
+            else:
+                self.send_error_json("Unsupported action; expected rollback, disable, or enable", status=400)
+                return
+
+            self.send_json({
+                "status": "success",
+                "target": target_name,
+                "action": action,
+                "proposal": updated,
+            })
+        except KeyError as exc:
+            self.send_error_json(str(exc), status=404)
+        except (PolicyInvariantViolation, ValueError, FileNotFoundError) as exc:
+            self.send_error_json(str(exc), status=400)
+        except Exception as exc:
+            logger.exception("Skill proposal rollback error for %s", target_name)
+            self.send_json({"error": str(exc), "status": "error"}, status=500)
+
     def get_target_findings(self, target_name):
         target_dir = TARGETS_DIR / target_name
         output_dir = target_dir / "output"
@@ -2276,12 +2940,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             finding.setdefault("id", f"report-{index}")
                             finding.setdefault("endpoint", finding.get("url", ""))
                             finding.setdefault("category", finding.get("type", "candidate"))
+                            finding.setdefault("evidence_ids", [])
                             severity = str(finding.get("severity") or "UNASSESSED").upper()
                             finding.setdefault("severity_level", next((level for level in
                                 ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO") if level in severity), "UNASSESSED"))
-                            finding.setdefault("validation_status", "unverified")
-                            finding.setdefault("status", "candidate")
                             normalized.append(finding)
+                        self._enrich_findings_from_evidence(target_dir, normalized)
+                        for finding in normalized:
+                            status, val_status = self._resolve_dashboard_lifecycle(finding)
+                            finding["status"] = status
+                            finding["validation_status"] = val_status
                         return normalized
             except (OSError, json.JSONDecodeError):
                 pass
@@ -2312,7 +2980,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         findings_dir = output_dir / "findings"
         if findings_dir.exists():
             for fpath in findings_dir.rglob("*.json"):
-                if fpath.name.startswith(("confirmed-", "candidates-")) or fpath.name.endswith("-results.json"):
+                if fpath.name.startswith(("confirmed-", "validated-", "candidates-")) or fpath.name.endswith("-results.json"):
                     try:
                         content = json.loads(fpath.read_text(encoding="utf-8"))
                         items = content if isinstance(content, list) else content.get("findings", [content])
@@ -2350,14 +3018,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
                                 elif "INFO" in sev_upper:
                                     sev_lvl = "INFO"
 
-                                validation = item.get("validation_record") or {}
-                                human_validation = (
-                                    isinstance(validation, dict)
-                                    and str(validation.get("verified_by", "")).startswith("human:")
-                                    and bool(validation.get("method"))
-                                    and bool(validation.get("evidence_ids"))
-                                    and validation.get("outcome") == "reproduced"
-                                )
                                 existing = grouped.get(identity)
                                 if existing:
                                     add_occurrence(existing, source_reference, line)
@@ -2365,10 +3025,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                                         dom_lookup[(source_basename(source_reference), sink)] = existing
                                     continue
 
+                                status, val_status = self._resolve_dashboard_lifecycle(item)
                                 finding = {
                                     "id": f"{fpath.stem}-{len(findings)+1}",
+                                    "finding_id": item.get("finding_id") or item.get("id") or f"{fpath.stem}-{len(findings)+1}",
                                     "title": raw_title,
                                     "category": fpath.parent.name,
+                                    "cwe": item.get("cwe", ""),
+                                    "method": item.get("method", "GET"),
+                                    "strategy": item.get("strategy", ""),
                                     "severity": raw_sev,
                                     "severity_level": sev_lvl,
                                     "endpoint": url,
@@ -2380,10 +3045,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
                                     "occurrences": [{"source_file": source_reference, "line": line}],
                                     "raw_record_count": 1,
                                     "details": item.get("notes", item.get("context", "")),
-                                    "status": "validated" if human_validation else "candidate",
-                                    "validation_status": "validated" if human_validation else "unverified",
+                                    "status": status,
+                                    "validation_status": val_status,
                                     "confidence": item.get("confidence", "not-scored"),
-                                    "evidence_ids": item.get("evidence_ids", []),
+                                    "confidence_score": item.get("confidence_score"),
+                                    "evidence_ids": list(item.get("evidence_ids") or []),
+                                    "proof_artifact": item.get("proof_artifact", ""),
+                                    "validation_run_id": item.get("validation_run_id", ""),
+                                    "validation_result": item.get("validation_result"),
+                                    "validation_record": item.get("validation_record"),
+                                    "latest_retest": item.get("latest_retest"),
+                                    "retest_history": item.get("retest_history"),
+                                    "retest_outcome": item.get("retest_outcome", ""),
+                                    "remediation_report": item.get("remediation_report"),
                                     "poc_sh": item.get("poc_sh", ""),
                                     "poc_py": item.get("poc_py", ""),
                                 }
@@ -2494,7 +3168,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-        return deduplicate_findings(findings)
+        deduped = deduplicate_findings(findings)
+        self._enrich_findings_from_evidence(target_dir, deduped)
+        for f in deduped:
+            status, val_status = self._resolve_dashboard_lifecycle(f)
+            f["status"] = status
+            f["validation_status"] = val_status
+        return deduped
 
     def get_target_endpoints(self, target_name):
         ep_file = TARGETS_DIR / target_name / "output" / "js" / "endpoints.json"

@@ -1287,8 +1287,8 @@
         <div class="card" style="margin-bottom: 20px;">
           <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
             <div>
-              <h1 style="margin:0 0 4px; font:700 20px 'Space Grotesk', system-ui, sans-serif; color:#fff;">Triage Candidates & Evidence</h1>
-              <p class="hint" style="margin:0;">Grouped by likely underlying issue. Automated signals are candidates, not confirmed vulnerabilities.</p>
+              <h1 style="margin:0 0 4px; font:700 20px 'Space Grotesk', system-ui, sans-serif; color:#fff;">Triage Candidates &amp; Evidence</h1>
+              <p class="hint" style="margin:0;">Grouped by likely underlying issue. Automated signals remain candidates until deterministic validation or human review confirms proof.</p>
             </div>
             <!-- Severity Filter Buttons -->
             <div style="display:flex; gap:6px; flex-wrap:wrap;">
@@ -1300,6 +1300,34 @@
               <button onclick="filterFindings('UNASSESSED')" class="ghost filter-btn" data-filter="UNASSESSED">Unassessed</button>
             </div>
           </div>
+        </div>
+
+        <!-- Attack Chain Visualization Panel -->
+        <div id="attackChainPanel" class="card" style="margin-bottom: 20px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:12px;">
+            <div>
+              <h2 style="font-size:15px; text-transform:uppercase; letter-spacing:.08em; margin:0 0 4px; color:var(--cyan);">Attack Chain &amp; Graph Correlation</h2>
+              <p class="hint" style="margin:0;">Technical prerequisite-to-consequence chains and node/edge summary from <code class="mono">/api/targets/{t}/attack-graph</code></p>
+            </div>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <span id="attackGraphSummaryPill" class="pill"><b>0 CHAINS</b></span>
+              <button onclick="fetchAttackGraph(true)" class="ghost" style="padding:5px 12px; font-size:12px;">Refresh Graph</button>
+            </div>
+          </div>
+          <div id="attackChainStats" style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px;"></div>
+          <div id="attackChainsList" style="display:flex; flex-direction:column; gap:10px; margin-bottom:12px;">
+            <p class="hint" style="margin:0;">No correlated attack chains generated yet.</p>
+          </div>
+          <div id="attackGraphNodesEdges" class="box" style="margin-bottom:12px; font-size:12px;">
+            <span class="hint">Nodes &amp; edges summary will appear once an attack graph is built.</span>
+          </div>
+          <details>
+            <summary class="mono" style="cursor:pointer; font-size:12px; color:var(--cyan);">Mermaid Attack Graph Source</summary>
+            <div style="display:flex; justify-content:flex-end; margin:6px 0;">
+              <button onclick="copyAttackGraphMermaid()" class="ghost" style="padding:3px 10px; font-size:11px;">Copy Mermaid</button>
+            </div>
+            <pre id="attackGraphMermaid" class="ans mono" style="font-size:11px; overflow-x:auto; margin:0;">graph TD</pre>
+          </details>
         </div>
 
         <!-- Findings List -->
@@ -2324,6 +2352,8 @@
       if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
       await fetchFindings();
       if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
+      await fetchAttackGraph();
+      if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
       await fetchSkillsStatus();
       if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
       await fetchEndpoints();
@@ -2471,6 +2501,74 @@
       renderFindingsList();
     }
 
+    function getLifecycleBadgeHtml(finding) {
+      const raw = String((finding && (finding.status || finding.validation_status)) || 'candidate').toLowerCase();
+      const map = {
+        confirmed: { cls: 'tag ok', label: 'CONFIRMED' },
+        validated: { cls: 'tag ok', label: 'VALIDATED' },
+        human_reviewed: { cls: 'tag ok', label: 'HUMAN REVIEWED' },
+        fixed: { cls: 'tag ok', label: 'FIXED' },
+        validating: { cls: 'tag low', label: 'VALIDATING' },
+        inconclusive: { cls: 'tag med', label: 'INCONCLUSIVE' },
+        false_positive: { cls: 'tag info', label: 'FALSE POSITIVE' },
+        accepted_risk: { cls: 'tag low', label: 'ACCEPTED RISK' },
+        candidate: { cls: 'tag warn', label: 'CANDIDATE' },
+        unverified: { cls: 'tag warn', label: 'CANDIDATE' },
+      };
+      const entry = map[raw] || { cls: 'tag warn', label: raw.toUpperCase() };
+      return `<span class="${entry.cls}" data-lifecycle="${escapeHtml(raw)}">${escapeHtml(entry.label)}</span>`;
+    }
+
+    function renderFindingActionSummaries(f) {
+      const blocks = [];
+      if (f.validation_result && typeof f.validation_result === 'object') {
+        const vr = f.validation_result;
+        const lims = Array.isArray(vr.limitations) && vr.limitations.length ? vr.limitations.join('; ') : '';
+        blocks.push(`
+          <div class="box" style="margin:8px 0 0; padding:10px 12px; border-color:rgba(0,229,255,.25);">
+            <div style="display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap;">
+              <strong style="font-size:11px; color:var(--cyan); text-transform:uppercase;">Validation Summary</strong>
+              <span class="mono" style="font-size:11px; color:var(--mut);">${escapeHtml(vr.strategy || 'replay')} &bull; ${escapeHtml(String(vr.status || '').toUpperCase())} (${Number(vr.confidence || 0).toFixed(2)})</span>
+            </div>
+            ${vr.proof_artifact ? `<div class="mono" style="font-size:11px; color:var(--ok); margin-top:4px;">Proof: ${escapeHtml(vr.proof_artifact)}</div>` : ''}
+            ${lims ? `<div class="hint" style="font-size:11px; margin-top:3px;">Limitations: ${escapeHtml(lims)}</div>` : ''}
+          </div>
+        `);
+      }
+      if (f.latest_retest && typeof f.latest_retest === 'object') {
+        const rt = f.latest_retest;
+        const lims = Array.isArray(rt.limitations) && rt.limitations.length ? rt.limitations.join('; ') : '';
+        blocks.push(`
+          <div class="box" style="margin:8px 0 0; padding:10px 12px; border-color:rgba(25,230,176,.28);">
+            <div style="display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap;">
+              <strong style="font-size:11px; color:var(--ok); text-transform:uppercase;">Retest Summary</strong>
+              <span class="mono" style="font-size:11px; color:#fff;">${escapeHtml(String(rt.outcome || 'inconclusive').toUpperCase())} &bull; ${escapeHtml(rt.retest_id || '')}</span>
+            </div>
+            ${rt.retest_proof_artifact ? `<div class="mono" style="font-size:11px; color:var(--cyan); margin-top:4px;">Retest Proof: ${escapeHtml(rt.retest_proof_artifact)}</div>` : ''}
+            ${rt.original_proof_sha256 ? `<div class="mono" style="font-size:11px; color:var(--mut); margin-top:2px;">Original SHA-256: ${escapeHtml(rt.original_proof_sha256.slice(0, 16))}...</div>` : ''}
+            ${lims ? `<div class="hint" style="font-size:11px; margin-top:3px;">${escapeHtml(lims)}</div>` : ''}
+          </div>
+        `);
+      }
+      if (f.remediation_report && typeof f.remediation_report === 'object') {
+        const rem = f.remediation_report;
+        const testSummary = rem.test_results && rem.test_results.summary ? rem.test_results.summary : '';
+        blocks.push(`
+          <div class="box" style="margin:8px 0 0; padding:10px 12px; border-color:rgba(169,139,255,.35);">
+            <div style="display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap;">
+              <strong style="font-size:11px; color:var(--vio); text-transform:uppercase;">Remediation Summary</strong>
+              <span class="mono" style="font-size:11px; color:var(--warn);">${escapeHtml(String(rem.approval_status || 'pending_approval').toUpperCase())}</span>
+            </div>
+            ${rem.affected_file ? `<div class="mono" style="font-size:11px; color:var(--cyan); margin-top:4px;">File: ${escapeHtml(rem.affected_file)}</div>` : ''}
+            ${rem.recommended_fix ? `<div style="font-size:12px; color:#cbd5e1; margin-top:4px;">${escapeHtml(rem.recommended_fix)}</div>` : ''}
+            ${testSummary ? `<div class="mono" style="font-size:11px; color:var(--ok); margin-top:4px;">Tests: ${escapeHtml(testSummary)}</div>` : ''}
+            ${rem.patch_diff ? `<pre class="mono" style="font-size:11px; color:#dbe9ff; margin:6px 0 0; overflow-x:auto;">${escapeHtml(rem.patch_diff)}</pre>` : ''}
+          </div>
+        `);
+      }
+      return blocks.join('');
+    }
+
     function renderFindingsList() {
       const container = document.getElementById('findingsContainer');
       const filtered = activeFilter === "ALL" 
@@ -2490,22 +2588,26 @@
         else if (f.severity_level === "LOW") tagClass = "tag low";
 
         const findingId = `finding-${idx}`;
+        const rawIdx = currentFindings.indexOf(f);
         const sourceRef = f.source_file ? `${f.source_file}${f.line ? `:L${f.line}` : ''}` : '';
         const occurrenceCount = Number(f.raw_record_count || 1);
         const sourceCount = (f.occurrences || []).length;
+        const lifecycleBadge = getLifecycleBadgeHtml(f);
+        const actionSummaries = renderFindingActionSummaries(f);
 
         return `
           <div class="card" style="margin-bottom:6px;">
             <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:8px;">
               <div>
-                <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:4px;">
                   <span class="${tagClass}">${escapeHtml(f.severity_level)}</span>
+                  ${lifecycleBadge}
                   <strong style="font:600 16px 'Space Grotesk', system-ui, sans-serif; color:#fff;">${escapeHtml(f.title)}</strong>
                 </div>
                 <div class="mono" style="font-size:12px; color:var(--mut);">${escapeHtml(f.endpoint || sourceRef || 'Global Scope')}</div>
                 ${sourceRef && f.endpoint ? `<small class="mono" style="display:block; margin-top:3px; color:var(--mut);">Source: ${escapeHtml(sourceRef)}</small>` : ''}
               </div>
-              <span class="pill" style="font-size:11px;">${escapeHtml((f.validation_status || 'unverified').toUpperCase())} · ${escapeHtml((f.confidence || 'not-scored').toUpperCase())}</span>
+              <span class="pill" style="font-size:11px;">${escapeHtml((f.validation_status || 'unverified').toUpperCase())} · ${escapeHtml(String(f.confidence || 'not-scored').toUpperCase())}</span>
             </div>
 
             ${occurrenceCount > 1 ? `<small class="hint" style="display:block; margin-top:6px;">Grouped ${occurrenceCount} raw records across ${sourceCount || 1} source locations.</small>` : ''}
@@ -2527,12 +2629,21 @@
               </div>
             ` : ''}
 
-            <div style="margin-top:12px; display:flex; justify-content:space-between; align-items:center;">
+            ${actionSummaries}
+
+            <div id="findingActionResult-${rawIdx}" style="display:none; margin-top:10px; padding:8px 12px; border-radius:8px; font-size:12px;"></div>
+
+            <div style="margin-top:12px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
               <button onclick="toggleEvidence('${findingId}')" class="btn-vio">Show evidence / details</button>
+              <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                <button onclick="validateFindingAction(${rawIdx})" class="ghost" style="padding:5px 12px; font-size:12px;">Validate</button>
+                <button onclick="remediateFindingAction(${rawIdx})" class="ghost" style="padding:5px 12px; font-size:12px;">Remediate</button>
+                <button onclick="retestFindingAction(${rawIdx})" class="ghost" style="padding:5px 12px; font-size:12px;">Retest</button>
+              </div>
             </div>
 
             <div id="${findingId}" class="ans" style="display:none; margin-top:10px;">
-              <h4 style="margin:0 0 6px; font-size:13px; color:var(--cyan);">Remediation & Technical Evidence</h4>
+              <h4 style="margin:0 0 6px; font-size:13px; color:var(--cyan);">Remediation &amp; Technical Evidence</h4>
               <p style="margin:0; font-size:13px; color:#cbd5e1; line-height:1.6;">${escapeHtml(f.details || 'No extended details recorded.')}</p>
               ${f.evidence_ids && f.evidence_ids.length ? `<p class="mono" style="margin:8px 0 0; font-size:11px; color:var(--cyan);">Evidence IDs: ${escapeHtml(f.evidence_ids.join(', '))}</p>` : ''}
               ${(f.poc_sh || f.poc_py) ? `
@@ -2548,6 +2659,162 @@
           </div>
         `;
       }).join('');
+    }
+
+    async function validateFindingAction(idx) {
+      const f = currentFindings[idx];
+      if (!currentTarget || !f) return;
+      const box = document.getElementById(`findingActionResult-${idx}`);
+      if (box) { box.style.display = 'block'; box.className = 'note'; box.textContent = 'Running non-destructive validation...'; }
+      try {
+        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/validate`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ finding: f })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          if (box) { box.className = 'panel bad'; box.textContent = data.error || 'Validation failed'; }
+          return;
+        }
+        const vr = data.validation_result || {};
+        currentFindings[idx] = Object.assign({}, f, data.finding || {}, { validation_result: vr });
+        renderFindingsList();
+      } catch (e) {
+        if (box) { box.className = 'panel bad'; box.textContent = 'Validation error: ' + e; }
+      }
+    }
+
+    async function remediateFindingAction(idx) {
+      const f = currentFindings[idx];
+      if (!currentTarget || !f) return;
+      const box = document.getElementById(`findingActionResult-${idx}`);
+      if (box) { box.style.display = 'block'; box.className = 'note'; box.textContent = 'Generating isolated remediation proposal (require_confirmed=true)...'; }
+      try {
+        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/remediate`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ finding: f, require_confirmed: true })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          if (box) { box.className = 'panel bad'; box.textContent = data.error || 'Remediation blocked or failed'; }
+          return;
+        }
+        currentFindings[idx] = Object.assign({}, f, { remediation_report: data.remediation_report });
+        renderFindingsList();
+      } catch (e) {
+        if (box) { box.className = 'panel bad'; box.textContent = 'Remediation error: ' + e; }
+      }
+    }
+
+    async function retestFindingAction(idx) {
+      const f = currentFindings[idx];
+      if (!currentTarget || !f) return;
+      const box = document.getElementById(`findingActionResult-${idx}`);
+      if (box) { box.style.display = 'block'; box.className = 'note'; box.textContent = 'Running verification retest...'; }
+      try {
+        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/retest`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ finding: f })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          if (box) { box.className = 'panel bad'; box.textContent = data.error || 'Retest failed'; }
+          return;
+        }
+        currentFindings[idx] = Object.assign({}, f, data.finding || {}, { latest_retest: data.retest_result });
+        renderFindingsList();
+      } catch (e) {
+        if (box) { box.className = 'panel bad'; box.textContent = 'Retest error: ' + e; }
+      }
+    }
+
+    async function fetchAttackGraph(refresh = false) {
+      const reqTarget = currentTarget;
+      const reqEpoch = targetSwitchEpoch;
+      if (!reqTarget) return;
+      try {
+        const url = `/api/targets/${encodeURIComponent(reqTarget)}/attack-graph${refresh ? '?refresh=1' : ''}`;
+        const res = await fetch(url);
+        const data = await res.json();
+        if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
+
+        const chains = Array.isArray(data.attack_chains) ? data.attack_chains : [];
+        const summary = data.chain_summary || {};
+        const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+        const edges = Array.isArray(data.edges) ? data.edges : [];
+        const mermaid = data.mermaid || data.chain_mermaid || 'graph TD';
+
+        const pill = document.getElementById('attackGraphSummaryPill');
+        if (pill) {
+          pill.innerHTML = `<b>${chains.length} CHAINS &bull; ${Number(data.total_nodes || nodes.length)} NODES</b>`;
+        }
+
+        const statsEl = document.getElementById('attackChainStats');
+        if (statsEl) {
+          statsEl.innerHTML = `
+            <span class="pill ok">Verified: <b>${Number(summary.verified_chains || 0)}</b></span>
+            <span class="pill warn">Inferred: <b>${Number(summary.inferred_chains || 0)}</b></span>
+            <span class="pill">Max Risk: <b>${Number(summary.max_path_risk_score || 0).toFixed(2)} (${escapeHtml(summary.max_path_severity || 'INFO')})</b></span>
+            <span class="pill">Edges: <b>${Number(data.total_edges || edges.length)}</b></span>
+          `;
+        }
+
+        const chainsEl = document.getElementById('attackChainsList');
+        if (chainsEl) {
+          if (chains.length === 0) {
+            chainsEl.innerHTML = '<p class="hint" style="margin:0;">No multi-step attack chains correlated for this target yet.</p>';
+          } else {
+            chainsEl.innerHTML = chains.map(ch => {
+              const sev = String(ch.path_severity || 'INFO').toUpperCase();
+              const sevCls = sev === 'CRITICAL' ? 'crit' : (sev === 'HIGH' ? 'high' : (sev === 'MEDIUM' ? 'med' : 'low'));
+              const verTag = ch.verified ? '<span class="tag ok">VERIFIED</span>' : '<span class="tag warn">INFERRED</span>';
+              const steps = Array.isArray(ch.steps) ? ch.steps : [];
+              const missing = Array.isArray(ch.missing_prerequisites) ? ch.missing_prerequisites : [];
+              return `
+                <div class="box" style="margin:0;">
+                  <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                    <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                      <span class="tag ${sevCls}">${escapeHtml(sev)} (${Number(ch.path_risk_score || 0).toFixed(2)})</span>
+                      ${verTag}
+                      <strong style="color:#fff; font-size:13px;">${escapeHtml(ch.name || ch.chain_id || 'Attack Chain')}</strong>
+                    </div>
+                    <span class="mono hint" style="font-size:11px;">${steps.length} steps</span>
+                  </div>
+                  ${steps.length ? `<div class="mono" style="margin-top:6px; font-size:11px; color:var(--cyan);">${steps.map(s => `${s.step_number}. ${escapeHtml(s.title || s.primitive)} [${escapeHtml(s.status || 'candidate')}]`).join(' &rarr; ')}</div>` : ''}
+                  ${missing.length ? `<div class="hint" style="margin-top:4px; font-size:11px; color:var(--warn);">Missing prerequisites: ${escapeHtml(missing.join('; '))}</div>` : ''}
+                </div>
+              `;
+            }).join('');
+          }
+        }
+
+        const neEl = document.getElementById('attackGraphNodesEdges');
+        if (neEl) {
+          const topEdges = edges.slice(0, 8);
+          neEl.innerHTML = `
+            <div style="display:flex; justify-content:space-between; margin-bottom:6px;">
+              <strong style="color:#fff; font-size:12px;">Node &amp; Edge Summary</strong>
+              <span class="mono hint">${nodes.length} nodes &bull; ${edges.length} edges</span>
+            </div>
+            ${topEdges.length ? topEdges.map(e => `
+              <div class="mono" style="font-size:11px; color:#cbd5e1; margin-top:2px;">
+                ${escapeHtml(e.source)} <span style="color:var(--cyan);">--[${escapeHtml(e.relation)}]--></span> ${escapeHtml(e.target)}
+                <span class="tag ${e.verified ? 'ok' : 'warn'}" style="font-size:9px; padding:1px 6px; margin-left:6px;">${e.verified ? 'VERIFIED' : 'INFERRED'}</span>
+              </div>
+            `).join('') : '<span class="hint">No graph edges recorded yet.</span>'}
+          `;
+        }
+
+        const merEl = document.getElementById('attackGraphMermaid');
+        if (merEl) merEl.textContent = mermaid;
+      } catch (e) {
+        console.error("Attack graph error:", e);
+      }
+    }
+
+    function copyAttackGraphMermaid() {
+      const merEl = document.getElementById('attackGraphMermaid');
+      if (merEl) copyToClipboard(merEl.textContent || 'graph TD');
     }
 
     function toggleEvidence(id) {
@@ -3599,21 +3866,38 @@
           if (proposals.length === 0) {
             pl.innerHTML = '<p class="hint" style="margin:0;">No skill proposals drafted yet.</p>';
           } else {
-            pl.innerHTML = proposals.map(pr => `
-              <div class="box" style="margin-bottom:8px; display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
-                <div>
-                  <strong class="mono" style="color:#fff;">${escapeHtml(pr.skill_id || pr.proposal_id)}</strong>
-                  <span class="tag ${pr.status === 'approved' ? 'ok' : (pr.status === 'rejected' ? 'bad' : 'med')}" style="margin-left:8px; font-size:10px;">${escapeHtml(String(pr.status || 'pending').toUpperCase())}</span>
-                  <div class="hint" style="font-size:12px; margin-top:4px;">${escapeHtml(pr.title || '')}</div>
-                </div>
-                ${pr.status === 'pending' ? `
-                  <div style="display:flex; gap:6px;">
-                    <button class="btn" style="padding:4px 10px; font-size:11px;" onclick="decideSkillProposal('${escapeHtml(pr.proposal_id)}', 'approve')">Approve</button>
-                    <button class="ghost" style="padding:4px 10px; font-size:11px;" onclick="decideSkillProposal('${escapeHtml(pr.proposal_id)}', 'reject')">Reject</button>
+            pl.innerHTML = proposals.map(pr => {
+              const st = String(pr.status || 'pending').toLowerCase();
+              const tagCls = st === 'approved' ? 'ok' : ((st === 'rejected' || st === 'rolled_back') ? 'bad' : (st === 'disabled' ? 'info' : 'med'));
+              let actionBtns = '';
+              if (st === 'pending') {
+                actionBtns = `
+                  <button class="btn" style="padding:4px 10px; font-size:11px;" onclick="decideSkillProposal('${escapeJs(pr.proposal_id)}', 'approve')">Approve</button>
+                  <button class="ghost" style="padding:4px 10px; font-size:11px;" onclick="decideSkillProposal('${escapeJs(pr.proposal_id)}', 'reject')">Reject</button>
+                `;
+              } else if (st === 'approved') {
+                actionBtns = `
+                  <button class="btn-warn" style="padding:4px 10px; font-size:11px;" onclick="rollbackSkillProposal('${escapeJs(pr.proposal_id)}', 'disable')">Disable</button>
+                  <button class="btn-danger" style="padding:4px 10px; font-size:11px;" onclick="rollbackSkillProposal('${escapeJs(pr.proposal_id)}', 'rollback')">Rollback</button>
+                `;
+              } else if (st === 'disabled') {
+                actionBtns = `
+                  <button class="btn" style="padding:4px 10px; font-size:11px;" onclick="rollbackSkillProposal('${escapeJs(pr.proposal_id)}', 'enable')">Enable</button>
+                  <button class="btn-danger" style="padding:4px 10px; font-size:11px;" onclick="rollbackSkillProposal('${escapeJs(pr.proposal_id)}', 'rollback')">Rollback</button>
+                `;
+              }
+              return `
+                <div class="box" style="margin-bottom:8px; display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+                  <div>
+                    <strong class="mono" style="color:#fff;">${escapeHtml(pr.skill_id || pr.proposal_id)}</strong>
+                    <span class="tag ${tagCls}" style="margin-left:8px; font-size:10px;">${escapeHtml(st.toUpperCase())}</span>
+                    <span class="mono hint" style="margin-left:6px; font-size:11px;">v${Number(pr.version || 1)}</span>
+                    <div class="hint" style="font-size:12px; margin-top:4px;">${escapeHtml(pr.title || '')}</div>
                   </div>
-                ` : ''}
-              </div>
-            `).join('');
+                  <div style="display:flex; gap:6px; flex-wrap:wrap;">${actionBtns}</div>
+                </div>
+              `;
+            }).join('');
           }
         }
       } catch (e) {
@@ -3664,6 +3948,21 @@
         body: JSON.stringify({ action, proposal_id: proposalId })
       });
       await fetchAutomation();
+      await fetchSkillsStatus();
+    }
+
+    async function rollbackSkillProposal(proposalId, action = 'rollback') {
+      if (!currentTarget) return;
+      const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/skill-proposals/rollback`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, proposal_id: proposalId })
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || `Failed to ${action} skill proposal.`);
+      }
+      await fetchAutomation();
+      await fetchSkillsStatus();
     }
 
     // Lightweight 100% offline markdown renderer
