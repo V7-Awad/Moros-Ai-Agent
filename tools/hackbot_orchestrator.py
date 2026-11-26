@@ -22,7 +22,7 @@ import threading
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 # Import LLM client and Skill execution runner
 tools_dir = Path(__file__).parent.resolve()
@@ -101,7 +101,7 @@ MAX_REVIEW_RETRIES = 5
 
 
 class HackbotOrchestrator:
-    def __init__(self, target: str, target_dir: str, skills: list,
+    def __init__(self, target: str, target_dir: str, skills: list = None,
                  models: list = None, runs_per_skill: int = 1,
                  review_model: str = None, api_spec: str = None,
                  active_host_limit: int = 100, root_only_active: bool = False,
@@ -109,10 +109,11 @@ class HackbotOrchestrator:
                  request_delay: float = 0.3, parallel: bool = False,
                  budget_usd: float = 10.0, mcp_servers: list = None,
                  enable_tracing: bool = True, smart_routing: bool = False,
-                 max_subagents: int = 5):
+                 max_subagents: int = 5, resume_run_id: Optional[str] = None,
+                 proxy: Optional[str] = None):
         self.target = target
         self.target_dir = Path(target_dir)
-        self.skills = skills
+        self.skills = list(skills or [])
         self.models = models or ["default"]
         self.runs_per_skill = runs_per_skill
         self.review_model = review_model
@@ -124,6 +125,11 @@ class HackbotOrchestrator:
         self.request_delay = max(0.0, request_delay)
         self.parallel = parallel
         self.max_subagents = max(1, int(max_subagents))
+        self.resume_run_id = str(resume_run_id).strip() if resume_run_id else None
+        self.proxy = proxy.strip() if isinstance(proxy, str) and proxy.strip() else None
+        if self.proxy:
+            os.environ["MOROS_PROXY"] = self.proxy
+        self._resumed_completed_skills: set = set()
         self.budget_usd = float(budget_usd)
         self.smart_routing = bool(smart_routing)
         self.scope_authorized = False
@@ -264,9 +270,14 @@ class HackbotOrchestrator:
         Returns a dict of blocked_skill -> explanation reason.
         """
         blocked = {}
+        completed_on_resume = getattr(self, "_resumed_completed_skills", set())
         for skill in self.skills:
+            if skill in completed_on_resume:
+                continue
             deps = SKILL_DEPENDENCIES.get(skill, [])
             for dep in deps:
+                if dep in completed_on_resume:
+                    continue
                 if dep not in self.skills:
                     if not self._check_dependency_artifact(dep):
                         reason = f"Prerequisite skill '{dep}' is missing from run schedule and required artifact was not found on disk."
@@ -387,13 +398,36 @@ class HackbotOrchestrator:
         logger.info(f"Runs per skill: {self.runs_per_skill}")
         logger.info("=" * 60)
 
-        # Step 1: Initialize durable run
-        self.current_run = self.run_manager.create_run(
-            target=self.target,
-            skills=self.skills,
-            dry_run=False,
-            models=",".join(self.models)
-        )
+        # Step 1: Initialize or resume durable run
+        self.current_run = None
+        self._resumed_completed_skills = set()
+        resumed_plan = None
+        if self.resume_run_id:
+            requested_id = None if self.resume_run_id.lower() == "latest" else self.resume_run_id
+            resumed_plan = self.run_manager.prepare_resume_plan(requested_id)
+            if resumed_plan:
+                self.current_run = self.run_manager.mark_run_resumed(resumed_plan["run_id"])
+                self._resumed_completed_skills = set(self.current_run.get("skills_completed") or [])
+                if not self.skills:
+                    self.skills = list(self.current_run.get("skills_requested") or [])
+                logger.info(
+                    "♻️  Resuming run %s (skipping %d completed skill(s))",
+                    self.current_run["run_id"],
+                    len(self._resumed_completed_skills),
+                )
+            else:
+                logger.warning(
+                    "⚠️  No resumable run found for '%s'; starting a fresh run.",
+                    self.resume_run_id,
+                )
+
+        if not self.current_run:
+            self.current_run = self.run_manager.create_run(
+                target=self.target,
+                skills=self.skills,
+                dry_run=False,
+                models=",".join(self.models)
+            )
         run_id = self.current_run["run_id"]
         if self.tracer:
             self.current_trace_id = self.tracer.start_trace(f"scan:{self.target}")
@@ -492,6 +526,21 @@ class HackbotOrchestrator:
                 ordered_skills.append("review-skill")
             if "report-conglomeration" in self.skills and "report-conglomeration" not in ordered_skills and "report-conglomeration" not in blocked_skills:
                 ordered_skills.append("report-conglomeration")
+
+            if self._resumed_completed_skills:
+                pending_non_report = [
+                    s for s in ordered_skills
+                    if s != "report-conglomeration" and s not in self._resumed_completed_skills
+                ]
+                kept_skills = []
+                for s in ordered_skills:
+                    if s in self._resumed_completed_skills and not (s == "report-conglomeration" and pending_non_report):
+                        logger.info(f"⏭️  Skipping completed skill on resume: {s}")
+                        self._log_event(s, "SKIPPED_RESUMED", f"Already completed in run {run_id}")
+                    else:
+                        kept_skills.append(s)
+                ordered_skills = kept_skills
+
             logger.info(f"Execution order: {' → '.join(ordered_skills)}")
 
             if self.learning_engine is not None:
@@ -604,6 +653,7 @@ class HackbotOrchestrator:
                 logger.info("\n✅ Orchestration complete!")
             return {"status": "BLOCKED_SCOPE" if policy_stop else ("FAILED" if self.failed_skills else "SUCCESS"),
                     "run_id": run_id,
+                    "resumed": bool(resumed_plan),
                     "trace_id": self.current_trace_id,
                     "cost_summary": self.cost_tracker.get_running_total(),
                     "failed_skills": self.failed_skills,

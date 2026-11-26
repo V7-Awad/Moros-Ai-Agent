@@ -171,6 +171,12 @@ Examples:
                         help="Secondary authorization header for dual-auth IDOR/BOLA diffing")
     parser.add_argument("--oob-url", default=None,
                         help="External OOB/Interactsh callback URL for blind vulnerability checks")
+    parser.add_argument("--proxy", default=None,
+                        help="HTTP/HTTPS/SOCKS5 proxy URL for scoped target requests (sets MOROS_PROXY)")
+    parser.add_argument("--resume", nargs="?", const="latest", default=None,
+                        help="Resume the latest (or specified) incomplete scan run ID")
+    parser.add_argument("--no-failover", action="store_true",
+                        help="Disable cross-provider LLM failover (sets MOROS_LLM_FAILOVER=0)")
     parser.add_argument("--dashboard", action="store_true",
                         help="Launch local web dashboard viewer")
     parser.add_argument("--port", type=int, default=8080,
@@ -190,6 +196,12 @@ Examples:
         logging.basicConfig(level=logging.ERROR, force=True)
     else:
         logging.basicConfig(level=getattr(logging, args.log_level, logging.INFO), force=True)
+
+    # Configure proxy and LLM failover flags
+    if args.proxy:
+        os.environ["MOROS_PROXY"] = args.proxy.strip()
+    if args.no_failover:
+        os.environ["MOROS_LLM_FAILOVER"] = "0"
 
     # Configure provider overrides if specified on CLI
     if args.provider:
@@ -325,6 +337,18 @@ Examples:
                 sys.exit(1)
 
     # Parse models
+    if args.resume and args.skills == "all" and (target_path / "output" / "runs").is_dir():
+        try:
+            from run_manager import RunManager
+            resume_target = None if str(args.resume).strip().lower() == "latest" else str(args.resume).strip()
+            resume_plan = RunManager(target_path).prepare_resume_plan(resume_target)
+            if resume_plan and resume_plan.get("skills_requested"):
+                valid_prior = [s for s in resume_plan["skills_requested"] if s in all_skill_ids]
+                if valid_prior:
+                    skills = valid_prior
+        except Exception:
+            pass
+
     if args.deep_recon and "deep-recon" not in skills:
         insert_at = 1 if skills and skills[0] == "recon-subdomain" else 0
         skills.insert(insert_at, "deep-recon")
@@ -341,6 +365,10 @@ Examples:
         print(f"   Scan mode: {args.scan_mode}")
         print(f"   Models: {', '.join(models)} (smart-route: {args.smart_route})")
         print(f"   Sandbox: {args.sandbox} | Max subagents: {args.max_subagents}")
+        if args.proxy:
+            print(f"   Proxy: {args.proxy}")
+        if args.resume:
+            print(f"   Resume run: {args.resume}")
         print(f"   Budget Cap: ${args.budget:.2f} | Est. LLM Cost: ${cost_est['cost_low_usd']:.4f}–${cost_est['cost_high_usd']:.4f}")
         print(f"   Runs per skill: {args.runs_per_skill}")
         print(f"   Review model: {args.review_model or 'same as skill'}")
@@ -387,12 +415,19 @@ Examples:
     )
     try:
         orch_params = inspect.signature(HackbotOrchestrator).parameters
-        if "max_subagents" in orch_params or any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in orch_params.values()
-        ):
+        has_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in orch_params.values())
+        if "max_subagents" in orch_params or has_varkw:
             orchestrator_kwargs["max_subagents"] = args.max_subagents
+        if "resume_run_id" in orch_params or has_varkw:
+            orchestrator_kwargs["resume_run_id"] = args.resume
+        if "proxy" in orch_params or has_varkw:
+            orchestrator_kwargs["proxy"] = args.proxy
     except (TypeError, ValueError):
         orchestrator_kwargs["max_subagents"] = args.max_subagents
+        if args.resume is not None:
+            orchestrator_kwargs["resume_run_id"] = args.resume
+        if args.proxy is not None:
+            orchestrator_kwargs["proxy"] = args.proxy
 
     orchestrator = HackbotOrchestrator(**orchestrator_kwargs)
     if getattr(orchestrator, "runner", None) is not None:
