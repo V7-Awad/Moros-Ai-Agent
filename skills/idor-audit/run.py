@@ -22,6 +22,7 @@ sys.path.insert(0, str(_project_root / "tools"))
 from scope_validator import ScopeValidator
 from scoped_http import ScopedHttpClient, check_checkpoint_approval, is_gated_post_enabled
 from checkpoint_manager import CheckpointManager
+from auth_diff import AuthDiffChecker, SessionContext
 
 
 _ID_PARAM_NAMES = {"id", "user_id", "account_id", "order_id", "doc_id", "uid", "profile_id", "invoice_id"}
@@ -326,6 +327,58 @@ def main():
             print(f"IDOR Audit skipped (invalid target/scope): {e}")
         except Exception as e:
             print(f"IDOR Audit notice: {e}")
+
+        # Dual-session multi-role IDOR/BOLA diffing when secondary session credentials exist
+        cookie_b = os.environ.get("MOROS_AUTH_COOKIE_B", "").strip()
+        auth_header_b = os.environ.get("MOROS_AUTH_HEADER_B", "").strip()
+        if (cookie_b or auth_header_b) and endpoints and req_budget > 0:
+            try:
+                user_b_headers = {}
+                if auth_header_b and ":" in auth_header_b:
+                    hk, hv = auth_header_b.split(":", 1)
+                    user_b_headers[hk.strip()] = hv.strip()
+                elif auth_header_b:
+                    user_b_headers["Authorization"] = auth_header_b
+
+                cookie_a = os.environ.get("MOROS_AUTH_COOKIE", "").strip()
+                auth_header_a = os.environ.get("MOROS_AUTH_HEADER", "").strip()
+                user_a_headers = {}
+                if auth_header_a and ":" in auth_header_a:
+                    hk, hv = auth_header_a.split(":", 1)
+                    user_a_headers[hk.strip()] = hv.strip()
+                elif auth_header_a:
+                    user_a_headers["Authorization"] = auth_header_a
+
+                diff_checker = AuthDiffChecker(
+                    target=args.target,
+                    scope_validator=ScopeValidator(args.target, target_dir=Path(args.target_dir)),
+                    user_a=SessionContext(name="user_a", role="owner", auth_headers=user_a_headers, cookies=cookie_a),
+                    user_b=SessionContext(name="user_b", role="peer", auth_headers=user_b_headers, cookies=cookie_b),
+                    max_requests_per_session=max(2, min(6, req_budget)),
+                    delay_seconds=0.2,
+                )
+                diff_targets = (candidate_eps or endpoints)[:4]
+                diff_results = diff_checker.check_batch(diff_targets)
+                seen_urls = {f.get("url") for f in findings}
+                for dr in diff_results:
+                    if not dr.get("vulnerable"):
+                        continue
+                    finding_url = dr.get("url", "")
+                    if finding_url in seen_urls and dr.get("cwe") == "CWE-639":
+                        continue
+                    findings.append({
+                        "title": dr.get("title") or f"Dual-Session Auth Differential ({dr.get('finding_type')}) on {finding_url}",
+                        "severity": dr.get("severity", "HIGH"),
+                        "url": finding_url,
+                        "cwe": dr.get("cwe", "CWE-639"),
+                        "evidence": dr.get("evidence", "Secondary user session accessed primary user resource."),
+                        "notes": dr.get("notes", "Confirmed via User A vs User B vs Unauthenticated response diffing."),
+                        "status": "candidate",
+                        "validation_status": "unverified",
+                        "curl": f"curl -s -i '{finding_url}'",
+                    })
+            except Exception as exc:
+                print(f"Dual-session AuthDiff notice: {exc}")
 
     out_file.write_text(json.dumps({"findings": findings, "count": len(findings)}, indent=2), encoding="utf-8")
     print(f"IDOR Audit completed: {len(findings)} candidate findings recorded.")

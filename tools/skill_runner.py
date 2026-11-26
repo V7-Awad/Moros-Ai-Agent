@@ -1039,11 +1039,17 @@ class SkillRunner:
                         "notes": "A harmless marker was reflected. No script payload was sent or executed; manual context review is required."
                     })
         elif skill_name == "ssrf-identify":
+            oob_base = (os.environ.get("MOROS_OOB_URL") or os.environ.get("MOROS_CALLBACK_URL") or "").strip()
             for ep in endpoints:
                 raw_params = ep.get("parameters", [])
                 params = [str(p.get("name", "") if isinstance(p, dict) else p).lower() for p in raw_params]
                 if any(k in params for k in ["url", "uri", "image_url", "dest", "redirect", "webhook"]):
                     matched_param = next((p for p in params if p in ["url", "uri", "image_url", "dest", "webhook"]), "")
+                    ep_url = ep.get("url") or ep.get("path", "")
+                    canary_url = None
+                    if oob_base:
+                        token = f"ssrf-{hashlib.sha256(f'{ep_url}:{matched_param}'.encode('utf-8')).hexdigest()[:10]}"
+                        canary_url = f"{oob_base.rstrip('/')}/{token}"
                     evidence = self.record_candidate_evidence(
                         skill_name, "SSRF", Path(ep.get("_source_artifact", ep_file)), ep,
                         f"A URL-like parameter named {matched_param} exists; server-side fetching is unknown.",
@@ -1051,8 +1057,10 @@ class SkillRunner:
                     findings.append({
                         "title": f"Potential server-side URL input on {ep.get('url') or ep.get('path', 'unknown route')}",
                         "type": "SSRF",
-                        "url": ep.get("url") or ep.get("path", ""),
+                        "url": ep_url,
                         "parameter": matched_param,
+                        "callback_listener_configured": bool(oob_base),
+                        "oob_canary_url": canary_url,
                         "status": "candidate",
                         "validation_status": "unverified",
                         "confidence": "low",

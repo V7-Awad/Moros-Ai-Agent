@@ -171,6 +171,16 @@ Examples:
                         help="Secondary authorization header for dual-auth IDOR/BOLA diffing")
     parser.add_argument("--oob-url", default=None,
                         help="External OOB/Interactsh callback URL for blind vulnerability checks")
+    parser.add_argument("--oob-listen", action="store_true",
+                        help="Start local OOB HTTP callback listener during scan")
+    parser.add_argument("--schedule", default=None,
+                        help="Register recurring scan schedule (e.g. 'interval:3600' or 'cron:0 2 * * *') and exit")
+    parser.add_argument("--list-schedules", action="store_true",
+                        help="List saved scan schedules for --target and exit")
+    parser.add_argument("--proposals", choices=["list", "generate"], default=None,
+                        help="List or generate learned SKILL.md proposals for --target and exit")
+    parser.add_argument("--approve-proposal", default=None,
+                        help="Approve and activate a pending skill proposal ID for --target and exit")
     parser.add_argument("--proxy", default=None,
                         help="HTTP/HTTPS/SOCKS5 proxy URL for scoped target requests (sets MOROS_PROXY)")
     parser.add_argument("--resume", nargs="?", const="latest", default=None,
@@ -318,6 +328,55 @@ Examples:
         print(f"   Run: python setup.py init-target --domain {args.target}")
         sys.exit(1)
 
+    # Handle --list-schedules / --schedule
+    if args.list_schedules or args.schedule:
+        from scheduler import ScanScheduler
+        sched = ScanScheduler(target=args.target, target_dir=target_path)
+        if args.schedule:
+            raw_spec = str(args.schedule).strip()
+            if raw_spec.startswith("interval:"):
+                interval_val = float(raw_spec.split(":", 1)[1].strip())
+                created = sched.create_schedule(
+                    name=f"cli-{args.scan_mode}",
+                    interval_seconds=interval_val,
+                    budget_usd=args.budget,
+                    scan_mode=args.scan_mode,
+                )
+            elif raw_spec.startswith("cron:"):
+                cron_expr = raw_spec.split(":", 1)[1].strip()
+                created = sched.create_schedule(
+                    name=f"cli-{args.scan_mode}",
+                    cron=cron_expr,
+                    budget_usd=args.budget,
+                    scan_mode=args.scan_mode,
+                )
+            else:
+                created = sched.create_schedule(
+                    name=f"cli-{args.scan_mode}",
+                    cron=raw_spec,
+                    budget_usd=args.budget,
+                    scan_mode=args.scan_mode,
+                )
+            print(json.dumps({"status": "scheduled", "schedule": created}, indent=2))
+            sys.exit(0)
+        print(json.dumps({"target": args.target, "schedules": sched.list_schedules()}, indent=2))
+        sys.exit(0)
+
+    # Handle --proposals / --approve-proposal
+    if args.proposals or args.approve_proposal:
+        from skill_learner import SkillLearner
+        learner = SkillLearner(target_dir=target_path)
+        if args.approve_proposal:
+            approved = learner.approve_proposal(args.approve_proposal, approved_by="cli-operator")
+            print(json.dumps({"status": "approved", "proposal": approved}, indent=2))
+            sys.exit(0)
+        if args.proposals == "generate":
+            drafts = learner.propose_skills()
+            print(json.dumps({"target": args.target, "generated": drafts}, indent=2))
+            sys.exit(0)
+        print(json.dumps({"target": args.target, "proposals": learner.list_proposals()}, indent=2))
+        sys.exit(0)
+
     # Parse skills
     if args.skills == "all":
         if args.scan_mode == "quick":
@@ -434,9 +493,25 @@ Examples:
         orchestrator.runner.sandbox_mode = args.sandbox
         orchestrator.runner.max_subagents = args.max_subagents
 
+    oob_server = None
+    if args.oob_listen and not os.environ.get("MOROS_OOB_URL"):
+        try:
+            from oob_server import OOBServer
+            oob_server = OOBServer(host="127.0.0.1", port=0, log_dir=target_path / "output" / "logs")
+            listen_url = oob_server.start()
+            os.environ["MOROS_OOB_URL"] = listen_url
+            os.environ["MOROS_CALLBACK_URL"] = listen_url
+            print(f"   📡 Local OOB Callback Listener active: {listen_url}")
+        except Exception as exc:
+            print(f"   ⚠️  Could not start local OOB listener: {exc}")
+
     scan_started_at = time.time()
     try:
         result = orchestrator.run()
+        if oob_server is not None:
+            hits = oob_server.list_callbacks()
+            if hits:
+                print(f"\n   📡 OOB Listener captured {len(hits)} callback(s) during scan.")
         if orchestrator.cost_tracker.get_running_total().get("total_calls", 0) > 0:
             print("\n" + orchestrator.cost_tracker.format_human_summary())
         if result and result.get("status") == "BLOCKED_SCOPE":
@@ -466,6 +541,12 @@ Examples:
     except Exception as e:
         print(f"\n❌ Fatal error: {e}")
         raise
+    finally:
+        if oob_server is not None:
+            try:
+                oob_server.stop()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

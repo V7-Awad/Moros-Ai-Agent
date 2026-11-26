@@ -48,7 +48,8 @@ class BrowserCrawler:
                  timeout_ms: int = 30000, safe_mode: bool = False,
                  exact_host_only: bool = False,
                  max_requests: int = 100, request_delay: float = 0.4,
-                 max_pages: int = 20):
+                 max_pages: int = 20, interactive_login: bool = False,
+                 auth_state_file: str = None, auth_wait_seconds: int = 120):
         self.target = target
         self.target_domain = urlparse(target).netloc
         self.target_hostname = (urlparse(target).hostname or "").lower().rstrip(".")
@@ -64,6 +65,9 @@ class BrowserCrawler:
         self._last_request_at = 0.0
         self.output_dir = Path(output_dir)
         self.max_depth = max_depth
+        self.interactive_login = bool(interactive_login)
+        self.auth_state_file = str(auth_state_file) if auth_state_file else None
+        self.auth_wait_seconds = max(1, int(auth_wait_seconds))
         self.user_agent = user_agent or (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -93,25 +97,32 @@ class BrowserCrawler:
         self._request_lock = asyncio.Lock()
         async with async_playwright() as p:
             browser = await p.chromium.launch(
-                headless=True,
+                headless=not self.interactive_login,
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
                 ]
             )
 
-            context = await browser.new_context(
-                user_agent=self.user_agent,
-                viewport={"width": 1920, "height": 1080},
-                java_script_enabled=True,
-                ignore_https_errors=True,
-            )
+            ctx_kwargs = {
+                "user_agent": self.user_agent,
+                "viewport": {"width": 1920, "height": 1080},
+                "java_script_enabled": True,
+                "ignore_https_errors": True,
+            }
+            if self.auth_state_file and Path(self.auth_state_file).is_file():
+                ctx_kwargs["storage_state"] = self.auth_state_file
+
+            context = await browser.new_context(**ctx_kwargs)
 
             # Set up traffic capture
             if self.capture_traffic:
                 await context.route("**/*", self._handle_route)
 
             page = await context.new_page()
+
+            if self.interactive_login:
+                await self.perform_interactive_login(page, context)
 
             # Set up response listener for JS collection
             page.on("response", lambda response: asyncio.ensure_future(
@@ -127,6 +138,22 @@ class BrowserCrawler:
         self._write_summary()
         logger.info(f"Crawl complete. Collected {len(self.discovered_js)} JS files, "
                      f"{len(self.inline_scripts)} inline scripts")
+
+    async def perform_interactive_login(self, page, context):
+        """Human takeover step: pause for manual login/MFA and persist session state."""
+        logger.info("Interactive login takeover active for %s", self.target)
+        await page.goto(self.target, wait_until="domcontentloaded", timeout=self.timeout_ms)
+        if sys.stdin and sys.stdin.isatty():
+            loop = asyncio.get_running_loop()
+            print("\n[TAKEOVER] Complete login/MFA in the browser window, then press Enter to continue...")
+            try:
+                await asyncio.wait_for(loop.run_in_executor(None, input), timeout=self.auth_wait_seconds)
+            except asyncio.TimeoutError:
+                logger.warning("Interactive login wait timed out after %ds; continuing.", self.auth_wait_seconds)
+        if self.auth_state_file:
+            Path(self.auth_state_file).parent.mkdir(parents=True, exist_ok=True)
+            await context.storage_state(path=self.auth_state_file)
+            logger.info("Saved authenticated browser storage state to %s", self.auth_state_file)
 
     async def _handle_route(self, route):
         """Intercept and log all network traffic."""
@@ -425,6 +452,12 @@ def main():
                         help="Minimum delay between safe-mode requests in seconds")
     parser.add_argument("--max-pages", type=int, default=20,
                         help="Maximum pages to visit")
+    parser.add_argument("--interactive-login", action="store_true",
+                        help="Open visible browser for manual login/MFA takeover before crawling")
+    parser.add_argument("--auth-state-file", default=None,
+                        help="Path to load/save Playwright storage_state JSON for authenticated sessions")
+    parser.add_argument("--auth-wait-seconds", type=int, default=120,
+                        help="Maximum seconds to wait during interactive login takeover (default: 120)")
 
     args = parser.parse_args()
 
@@ -442,6 +475,9 @@ def main():
         max_requests=args.max_requests,
         request_delay=args.request_delay,
         max_pages=args.max_pages,
+        interactive_login=args.interactive_login,
+        auth_state_file=args.auth_state_file,
+        auth_wait_seconds=args.auth_wait_seconds,
     )
 
     asyncio.run(crawler.crawl())

@@ -564,4 +564,95 @@ class TestCliAndRuntimeSandboxWiring:
         data = json.loads((tmp_path / "output" / "findings" / "xss-blind" / "candidates-xss-blind.json").read_text(encoding="utf-8"))
         assert data["findings"][0]["callback_listener_configured"] is True
 
+    def test_ssrf_identify_attaches_oob_canary_url(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MOROS_OOB_URL", "https://oob.example.local")
+        runner = SkillRunner("example.com", tmp_path)
+        runner.scope_authorized = True
+        api_dir = tmp_path / "output" / "api"
+        api_dir.mkdir(parents=True)
+        (api_dir / "endpoints.json").write_text(
+            json.dumps({"endpoints": [{"url": "https://example.com/fetch", "parameters": ["url"]}]}),
+            encoding="utf-8",
+        )
+        res = runner.run_vuln_skill("ssrf-identify")
+        assert res["findings_count"] >= 1
+        data = json.loads((tmp_path / "output" / "findings" / "ssrf-identify" / "candidates-ssrf-identify.json").read_text(encoding="utf-8"))
+        assert data["findings"][0]["callback_listener_configured"] is True
+        assert data["findings"][0]["oob_canary_url"].startswith("https://oob.example.local/ssrf-")
+
+    def test_idor_and_xxe_scripts_pass_scope_filter_with_zero_budget(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MOROS_HTTP_REQUESTS_REMAINING", "0")
+        monkeypatch.setenv("MOROS_AUTH_COOKIE_B", "session=peer-token")
+        monkeypatch.setenv("MOROS_OOB_URL", "https://oob.example.local")
+        runner = SkillRunner("example.com", tmp_path)
+        runner.scope_authorized = True
+
+        res_idor = runner.run_custom_skill("idor-audit")
+        res_xxe = runner.run_custom_skill("xxe-detect")
+        assert res_idor["status"] == "COMPLETED"
+        assert res_xxe["status"] == "COMPLETED"
+
+    def test_dashboard_schedules_and_proposals_post_and_html(self, tmp_path, monkeypatch):
+        import io
+        import dashboard.server as ds
+
+        monkeypatch.setattr(ds, "TARGETS_DIR", tmp_path)
+        tdir = tmp_path / "demo.local"
+        tdir.mkdir(parents=True)
+
+        # Create schedule via POST /api/targets/demo.local/schedules
+        body = json.dumps({"action": "create", "name": "nightly", "interval_seconds": 3600, "budget_usd": 4.0}).encode("utf-8")
+        h = object.__new__(ds.DashboardHandler)
+        h.path = "/api/targets/demo.local/schedules"
+        h.headers = {"Host": "127.0.0.1:8080", "Content-Length": str(len(body))}
+        h.rfile = io.BytesIO(body)
+        h.wfile = io.BytesIO()
+        h.send_response = lambda code, msg=None: setattr(h, "_code", code)
+        h.send_header = lambda k, v: None
+        h.end_headers = lambda: None
+        h.do_POST()
+        assert h._code == 200
+        created = json.loads(h.wfile.getvalue().decode("utf-8"))
+        assert created["status"] == "success"
+        sched_id = created["schedule"]["schedule_id"]
+
+        # Propose skills via POST /api/targets/demo.local/skill-proposals
+        p_body = json.dumps({"action": "propose"}).encode("utf-8")
+        hp = object.__new__(ds.DashboardHandler)
+        hp.path = "/api/targets/demo.local/skill-proposals"
+        hp.headers = {"Host": "127.0.0.1:8080", "Content-Length": str(len(p_body))}
+        hp.rfile = io.BytesIO(p_body)
+        hp.wfile = io.BytesIO()
+        hp.send_response = lambda code, msg=None: setattr(hp, "_code", code)
+        hp.send_header = lambda k, v: None
+        hp.end_headers = lambda: None
+        hp.do_POST()
+        assert hp._code == 200
+        assert json.loads(hp.wfile.getvalue().decode("utf-8"))["status"] == "success"
+
+        # Delete schedule via POST
+        del_body = json.dumps({"action": "delete", "schedule_id": sched_id}).encode("utf-8")
+        hd = object.__new__(ds.DashboardHandler)
+        hd.path = "/api/targets/demo.local/schedules"
+        hd.headers = {"Host": "127.0.0.1:8080", "Content-Length": str(len(del_body))}
+        hd.rfile = io.BytesIO(del_body)
+        hd.wfile = io.BytesIO()
+        hd.send_response = lambda code, msg=None: setattr(hd, "_code", code)
+        hd.send_header = lambda k, v: None
+        hd.end_headers = lambda: None
+        hd.do_POST()
+        assert hd._code == 200
+        assert json.loads(hd.wfile.getvalue().decode("utf-8"))["deleted"] is True
+
+        # Verify Automation UI tab & browser-crawl takeover flags exist
+        html = (PROJECT_ROOT / "dashboard" / "static" / "index.html").read_text(encoding="utf-8")
+        assert 'id="tabBtn-automation"' in html
+        assert 'id="tab-automation"' in html
+        assert "/skill-proposals" in html
+
+        crawl_src = (PROJECT_ROOT / "tools" / "browser-crawl.py").read_text(encoding="utf-8")
+        assert "--interactive-login" in crawl_src
+        assert "perform_interactive_login" in crawl_src
+
+
 

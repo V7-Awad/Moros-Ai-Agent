@@ -941,6 +941,72 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "Failed to score learning signals"}, status=500)
             return
 
+        # Target-scoped Schedules & Skill Proposals mutations
+        target_post_match = re.match(r"^/api/targets/([^/]+)/(schedules|skill-proposals)$", path)
+        if target_post_match:
+            target_name = urllib.parse.unquote(target_post_match.group(1))
+            resource = target_post_match.group(2)
+            try:
+                from setup import validate_target_name
+                validate_target_name(target_name)
+            except ValueError:
+                self.send_error_json("Invalid target name", status=400)
+                return
+            target_path = TARGETS_DIR / target_name
+            if not target_path.exists():
+                self.send_error_json(f"Target '{target_name}' not found", status=404)
+                return
+
+            action = str(body.get("action", "")).strip().lower()
+            try:
+                if resource == "schedules":
+                    from tools.scheduler import ScanScheduler
+                    sched = ScanScheduler(target=target_name, target_dir=target_path)
+                    if action == "create":
+                        created = sched.create_schedule(
+                            name=str(body.get("name", f"scan-{target_name}")),
+                            skills=body.get("skills"),
+                            interval_seconds=body.get("interval_seconds"),
+                            cron=body.get("cron"),
+                            event_type=body.get("event_type"),
+                            budget_usd=float(body.get("budget_usd", 10.0)),
+                            scan_mode=str(body.get("scan_mode", "full")),
+                        )
+                        self.send_json({"status": "success", "schedule": created})
+                    elif action == "toggle":
+                        updated = sched.set_enabled(str(body.get("schedule_id", "")), bool(body.get("enabled", True)))
+                        self.send_json({"status": "success", "schedule": updated})
+                    elif action == "delete":
+                        deleted = sched.delete_schedule(str(body.get("schedule_id", "")))
+                        self.send_json({"status": "success", "deleted": deleted})
+                    else:
+                        self.send_error_json("Unsupported schedule action", status=400)
+                else:
+                    from tools.skill_learner import SkillLearner
+                    learner = SkillLearner(target_dir=target_path)
+                    if action == "propose":
+                        proposals = learner.propose_skills()
+                        self.send_json({"status": "success", "proposals": proposals})
+                    elif action == "approve":
+                        approved = learner.approve_proposal(
+                            str(body.get("proposal_id", "")),
+                            approved_by=str(body.get("approved_by", "dashboard")),
+                        )
+                        self.send_json({"status": "success", "proposal": approved})
+                    elif action == "reject":
+                        rejected = learner.reject_proposal(
+                            str(body.get("proposal_id", "")),
+                            reason=str(body.get("reason", "Rejected in dashboard")),
+                        )
+                        self.send_json({"status": "success", "proposal": rejected})
+                    else:
+                        self.send_error_json("Unsupported skill-proposal action", status=400)
+            except (KeyError, ValueError, FileNotFoundError) as exc:
+                self.send_error_json(str(exc), status=400)
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=500)
+            return
+
         # 1. Create target
         if path == "/api/targets/create":
             domain = str(body.get("domain", "")).strip()

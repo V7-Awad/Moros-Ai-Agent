@@ -1120,6 +1120,14 @@
           </div>
           <span class="nav-badge" id="navPostureBadge">0/10</span>
         </div>
+        <div class="part" id="tabBtn-automation" onclick="switchTab('automation')">
+          <span class="chip">13</span>
+          <div>
+            <strong>Automation &amp; Skills</strong>
+            <small>Schedules &amp; learned skills</small>
+          </div>
+          <span class="nav-badge" id="navAutoBadge">0</span>
+        </div>
       </nav>
 
       <!-- System Status Widget -->
@@ -1680,6 +1688,55 @@
         </div>
       </section>
 
+      <!-- ==================== TAB 13: AUTOMATION & LEARNED SKILLS ==================== -->
+      <section id="tab-automation" style="display:none;" class="enter">
+        <div class="card" style="margin-bottom: 20px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+            <div>
+              <h1 style="margin:0 0 4px; font:700 20px 'Space Grotesk', system-ui, sans-serif; color:#fff;">Schedules &amp; Learned Skill Proposals</h1>
+              <p class="hint" style="margin:0;">Manage recurring scan triggers and review human-gated Trace2Skill proposals</p>
+            </div>
+            <div style="display:flex; gap:8px;">
+              <button onclick="generateSkillProposals()" class="btn" style="padding:6px 14px; font-size:12px;">Propose Skills from Traces</button>
+              <button onclick="fetchAutomation()" class="ghost" style="padding:6px 14px; font-size:12px;">Refresh</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom: 20px;">
+          <h2 style="font-size:14px; text-transform:uppercase; letter-spacing:.06em; margin:0 0 12px; color:#fff;">Recurring Schedules</h2>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
+            <input id="schedNameInput" type="text" placeholder="Schedule name (e.g. nightly-recon)" style="flex:1; min-width:160px;">
+            <input id="schedCronInput" type="text" class="mono" placeholder="Cron (e.g. 0 2 * * *) or seconds (e.g. 3600)" style="flex:1; min-width:180px;">
+            <input id="schedBudgetInput" type="number" step="0.5" value="5.0" style="width:90px;" title="USD budget cap">
+            <button onclick="createTargetSchedule()" class="btn" style="padding:6px 14px; font-size:12px;">Add Schedule</button>
+          </div>
+          <div class="data-table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Trigger</th>
+                  <th>Budget</th>
+                  <th>Next Run</th>
+                  <th style="text-align:right;">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="schedulesTableBody">
+                <tr><td colspan="5" style="text-align:center; padding:20px; color:var(--mut);">No schedules configured.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 style="font-size:14px; text-transform:uppercase; letter-spacing:.06em; margin:0 0 12px; color:#fff;">Skill Proposals (Human Approval Required)</h2>
+          <div id="skillProposalsList">
+            <p class="hint" style="margin:0;">No skill proposals drafted yet.</p>
+          </div>
+        </div>
+      </section>
+
     </main>
   </div>
 
@@ -1944,7 +2001,7 @@
 
     // --- Tab Navigation ---
     function switchTab(tabId) {
-      const tabs = ['overview', 'pipeline', 'findings', 'endpoints', 'checkpoints', 'terminal', 'conversations', 'report', 'costs', 'traces', 'memory', 'posture'];
+      const tabs = ['overview', 'pipeline', 'findings', 'endpoints', 'checkpoints', 'terminal', 'conversations', 'report', 'costs', 'traces', 'memory', 'posture', 'automation'];
       tabs.forEach(t => {
         const el = document.getElementById(`tab-${t}`);
         const btn = document.getElementById(`tabBtn-${t}`);
@@ -1971,6 +2028,8 @@
         fetchMemory();
       } else if (tabId === 'posture') {
         fetchSecurityPosture();
+      } else if (tabId === 'automation') {
+        fetchAutomation();
       }
 
       // Close mobile sidebar if open
@@ -3498,6 +3557,113 @@
       } catch (e) {
         console.error("Security posture error:", e);
       }
+    }
+
+    async function fetchAutomation() {
+      const reqTarget = currentTarget;
+      if (!reqTarget) return;
+      try {
+        const [sRes, pRes] = await Promise.all([
+          fetch(`/api/targets/${encodeURIComponent(reqTarget)}/schedules`),
+          fetch(`/api/targets/${encodeURIComponent(reqTarget)}/skill-proposals`),
+        ]);
+        const sData = await sRes.json();
+        const pData = await pRes.json();
+        const schedules = Array.isArray(sData.schedules) ? sData.schedules : [];
+        const proposals = Array.isArray(pData.proposals) ? pData.proposals : [];
+
+        const badge = document.getElementById('navAutoBadge');
+        if (badge) badge.textContent = schedules.length + proposals.filter(p => p.status === 'pending').length;
+
+        const sb = document.getElementById('schedulesTableBody');
+        if (sb) {
+          if (schedules.length === 0) {
+            sb.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:20px; color:var(--mut);">No schedules configured.</td></tr>';
+          } else {
+            sb.innerHTML = schedules.map(sc => `
+              <tr>
+                <td style="color:#fff;">${escapeHtml(sc.name || sc.schedule_id)}</td>
+                <td class="mono">${escapeHtml(sc.cron || (sc.interval_seconds ? `every ${sc.interval_seconds}s` : sc.event_type || ''))}</td>
+                <td class="mono">$${Number(sc.budget_usd || 0).toFixed(2)}</td>
+                <td class="mono" style="font-size:11px;">${escapeHtml(String(sc.next_run_at || '-').slice(0, 19))}</td>
+                <td style="text-align:right;">
+                  <button class="ghost" style="padding:4px 8px; font-size:11px;" onclick="deleteTargetSchedule('${escapeHtml(sc.schedule_id)}')">Delete</button>
+                </td>
+              </tr>
+            `).join('');
+          }
+        }
+
+        const pl = document.getElementById('skillProposalsList');
+        if (pl) {
+          if (proposals.length === 0) {
+            pl.innerHTML = '<p class="hint" style="margin:0;">No skill proposals drafted yet.</p>';
+          } else {
+            pl.innerHTML = proposals.map(pr => `
+              <div class="box" style="margin-bottom:8px; display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+                <div>
+                  <strong class="mono" style="color:#fff;">${escapeHtml(pr.skill_id || pr.proposal_id)}</strong>
+                  <span class="tag ${pr.status === 'approved' ? 'ok' : (pr.status === 'rejected' ? 'bad' : 'med')}" style="margin-left:8px; font-size:10px;">${escapeHtml(String(pr.status || 'pending').toUpperCase())}</span>
+                  <div class="hint" style="font-size:12px; margin-top:4px;">${escapeHtml(pr.title || '')}</div>
+                </div>
+                ${pr.status === 'pending' ? `
+                  <div style="display:flex; gap:6px;">
+                    <button class="btn" style="padding:4px 10px; font-size:11px;" onclick="decideSkillProposal('${escapeHtml(pr.proposal_id)}', 'approve')">Approve</button>
+                    <button class="ghost" style="padding:4px 10px; font-size:11px;" onclick="decideSkillProposal('${escapeHtml(pr.proposal_id)}', 'reject')">Reject</button>
+                  </div>
+                ` : ''}
+              </div>
+            `).join('');
+          }
+        }
+      } catch (e) {
+        console.error("Automation load error:", e);
+      }
+    }
+
+    async function createTargetSchedule() {
+      if (!currentTarget) return;
+      const name = (document.getElementById('schedNameInput')?.value || '').trim();
+      const rawTrigger = (document.getElementById('schedCronInput')?.value || '').trim();
+      const budget = Number(document.getElementById('schedBudgetInput')?.value || 5.0);
+      if (!name || !rawTrigger) return;
+      const body = { action: 'create', name, budget_usd: budget };
+      if (/^\d+$/.test(rawTrigger)) {
+        body.interval_seconds = Number(rawTrigger);
+      } else {
+        body.cron = rawTrigger;
+      }
+      await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/schedules`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      });
+      await fetchAutomation();
+    }
+
+    async function deleteTargetSchedule(scheduleId) {
+      if (!currentTarget) return;
+      await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/schedules`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'delete', schedule_id: scheduleId })
+      });
+      await fetchAutomation();
+    }
+
+    async function generateSkillProposals() {
+      if (!currentTarget) return;
+      await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/skill-proposals`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'propose' })
+      });
+      await fetchAutomation();
+    }
+
+    async function decideSkillProposal(proposalId, action) {
+      if (!currentTarget) return;
+      await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/skill-proposals`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, proposal_id: proposalId })
+      });
+      await fetchAutomation();
     }
 
     // Lightweight 100% offline markdown renderer

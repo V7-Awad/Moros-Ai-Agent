@@ -125,6 +125,7 @@ def main():
             post_client = None
             post_used = 0
             allow_headers = getattr(validator, "policy", {}).get("allow_authentication", True)
+            oob_url = (os.environ.get("MOROS_OOB_URL") or os.environ.get("MOROS_CALLBACK_URL") or "").strip()
 
             for ep in endpoints[:5]:
                 if get_client.request_count + post_used >= req_budget:
@@ -181,6 +182,20 @@ def main():
                                     "curl": f"curl -s -i '{full_url}'",
                                 })
                                 probe_recorded = True
+                        if oob_url and (get_client.request_count + post_used < req_budget):
+                            oob_token = f"xxe-{len(findings)+1}-{abs(hash(full_url)) % 100000:05d}"
+                            canary_dtd = f"{oob_url.rstrip('/')}/{oob_token}"
+                            oob_xml = (
+                                '<?xml version="1.0" encoding="UTF-8"?>'
+                                f'<!DOCTYPE probe SYSTEM "{canary_dtd}">'
+                                "<probe>moros-oob-check</probe>"
+                            )
+                            post_client.post(
+                                full_url,
+                                data=oob_xml,
+                                headers={"Content-Type": "application/xml"} if allow_headers else None,
+                            )
+                            post_used = post_client.request_count
 
                 if not probe_recorded and status_code in (200, 400, 405, 415):
                     ct = resp.get("headers", {}).get("content-type", "")
@@ -189,6 +204,8 @@ def main():
                         "severity": "LOW",
                         "url": full_url,
                         "cwe": "CWE-611",
+                        "callback_listener_configured": bool(oob_url),
+                        "oob_callback_base": oob_url or None,
                         "evidence": f"Safe GET probe returned HTTP {status_code} (content-type={ct or 'unknown'}).",
                         "notes": "Candidate for HITL-approved XML entity resolution testing.",
                         "status": "candidate",

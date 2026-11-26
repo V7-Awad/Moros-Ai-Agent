@@ -8,7 +8,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-315%20passing-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-318%20passing-brightgreen.svg)](tests/)
 [![SARIF 2.1.0](https://img.shields.io/badge/SARIF-2.1.0-orange.svg)](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html)
 [![CVSS v3.1](https://img.shields.io/badge/CVSS-v3.1-red.svg)](https://www.first.org/cvss/v3.1/)
 
@@ -220,6 +220,11 @@ python run.py --target app.example.com --dry-run
 | `--cookie-b` | `<string>` | Secondary session cookie for dual-auth IDOR/BOLA comparison |
 | `--auth-header-b` | `<string>` | Secondary Authorization header for dual-auth IDOR/BOLA comparison |
 | `--oob-url` | `<url>` | External OOB/Interactsh callback URL for blind vulnerability checks |
+| `--oob-listen` | | Start local loopback OOB HTTP callback listener during scan |
+| `--schedule` | `<spec>` | Register recurring scan (`interval:3600` or `cron:0 2 * * *`) and exit |
+| `--list-schedules` | | List saved scan schedules for `--target` and exit |
+| `--proposals` | `list \| generate` | List or generate Trace2Skill proposals for `--target` and exit |
+| `--approve-proposal` | `<id>` | Approve and activate a pending skill proposal ID |
 | `--cookie` | `<string>` | Session cookie string for authenticated testing |
 | `--auth-header` | `<string>` | Custom Authorization header (e.g. `Authorization: Bearer <token>`) |
 | `--auth-file` | `<path>` | Path to JSON file containing cookies and headers |
