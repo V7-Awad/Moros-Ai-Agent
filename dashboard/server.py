@@ -15,10 +15,12 @@ Provides a local web server and REST API for:
 import hmac
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
 import secrets
+import ssl
 import subprocess
 import sys
 import threading
@@ -26,11 +28,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from socketserver import ThreadingMixIn
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 STATIC_DIR = Path(__file__).parent / "static"
@@ -210,9 +213,67 @@ def send_discord_scan_summary(target, status):
         return "unavailable"
 
 
+DEFAULT_RATE_LIMIT_RPM = 600
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+class SlidingWindowRateLimiter:
+    """Thread-safe per-client sliding-window rate limiter."""
+
+    def __init__(self, window_seconds: float = 60.0):
+        self.window_seconds = max(1.0, float(window_seconds))
+        self._buckets: Dict[str, deque] = defaultdict(deque)
+        self._lock = threading.Lock()
+
+    def allow(self, client_key: str, limit: int, now: Optional[float] = None) -> Tuple[bool, int]:
+        """Return (allowed, retry_after_seconds) for a client within the sliding window."""
+        if limit <= 0:
+            return True, 0
+        current = time.monotonic() if now is None else float(now)
+        cutoff = current - self.window_seconds
+        key = str(client_key or "local")
+
+        with self._lock:
+            bucket = self._buckets[key]
+            while bucket and bucket[0] <= cutoff:
+                bucket.popleft()
+
+            if len(bucket) >= limit:
+                oldest = bucket[0]
+                retry_after = max(1, int(math.ceil((oldest + self.window_seconds) - current)))
+                return False, retry_after
+
+            bucket.append(current)
+
+            if len(self._buckets) > 1024:
+                stale_keys = [
+                    k for k, q in self._buckets.items()
+                    if k != key and (not q or q[-1] <= cutoff)
+                ]
+                for k in stale_keys:
+                    del self._buckets[k]
+
+            return True, 0
+
+    def reset(self) -> None:
+        """Clear all recorded request timestamps."""
+        with self._lock:
+            self._buckets.clear()
+
+
+_FALLBACK_RATE_LIMITER = SlidingWindowRateLimiter()
+_SERVER_LIMITER_LOCK = threading.Lock()
+
+
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+
+    def __init__(self, *args, rate_limit_rpm: Optional[int] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.rate_limit_rpm = rate_limit_rpm
+        self.is_tls = False
+        self._rate_limiter = SlidingWindowRateLimiter()
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -220,16 +281,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
         # Mute standard noisy HTTP logging, keep terminal clean
         pass
 
-    def send_json(self, data, status=200):
+    def send_json(self, data, status=200, headers: Optional[Dict[str, str]] = None):
         body = json.dumps(data, indent=2, default=str).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "no-store")
+        if headers:
+            for k, v in headers.items():
+                self.send_header(str(k), str(v))
         self.end_headers()
         self.wfile.write(body)
 
-    def send_error_json(self, message, status=400):
-        self.send_json({"error": message, "status": "error"}, status=status)
+    def send_error_json(self, message, status=400, headers: Optional[Dict[str, str]] = None):
+        self.send_json({"error": message, "status": "error"}, status=status, headers=headers)
 
     def do_OPTIONS(self):
         self.send_error_json("Cross-origin requests are not supported", status=405)
@@ -247,6 +313,68 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if str(k).lower() == target:
                 return str(v).strip()
         return ""
+
+    def _get_rate_limiter(self) -> SlidingWindowRateLimiter:
+        server_obj = getattr(self, "server", None)
+        if server_obj is None:
+            return _FALLBACK_RATE_LIMITER
+        limiter = getattr(server_obj, "_rate_limiter", None)
+        if limiter is None:
+            with _SERVER_LIMITER_LOCK:
+                limiter = getattr(server_obj, "_rate_limiter", None)
+                if limiter is None:
+                    limiter = SlidingWindowRateLimiter()
+                    try:
+                        setattr(server_obj, "_rate_limiter", limiter)
+                    except Exception:
+                        return _FALLBACK_RATE_LIMITER
+        return limiter
+
+    def _get_rate_limit_rpm(self) -> int:
+        server_obj = getattr(self, "server", None)
+        if server_obj is not None:
+            srv_limit = getattr(server_obj, "rate_limit_rpm", None)
+            if srv_limit is not None:
+                try:
+                    return int(srv_limit)
+                except (TypeError, ValueError):
+                    pass
+        env_limit = os.environ.get("MOROS_DASHBOARD_RATE_LIMIT", "").strip()
+        if env_limit:
+            try:
+                return int(env_limit)
+            except ValueError:
+                logger.warning("Invalid MOROS_DASHBOARD_RATE_LIMIT=%r; using default %d", env_limit, DEFAULT_RATE_LIMIT_RPM)
+        return DEFAULT_RATE_LIMIT_RPM
+
+    def _get_client_ip(self) -> str:
+        client_addr = getattr(self, "client_address", None)
+        if isinstance(client_addr, (tuple, list)) and client_addr:
+            return str(client_addr[0])
+        return "local"
+
+    def _enforce_rate_limit(self) -> bool:
+        """Enforce per-client sliding-window rate limit on /api/ routes."""
+        limit = self._get_rate_limit_rpm()
+        if limit <= 0:
+            return True
+        limiter = self._get_rate_limiter()
+        allowed, retry_after = limiter.allow(self._get_client_ip(), limit)
+        if not allowed:
+            self.send_error_json(
+                "Rate limit exceeded: too many requests",
+                status=429,
+                headers={"Retry-After": str(retry_after)},
+            )
+            return False
+        return True
+
+    def _is_tls_request(self) -> bool:
+        server_obj = getattr(self, "server", None)
+        if server_obj is not None and getattr(server_obj, "is_tls", False):
+            return True
+        conn = getattr(self, "connection", None)
+        return isinstance(conn, ssl.SSLSocket)
 
     def _get_required_token(self) -> str:
         """Return configured dashboard auth token (server runtime token or MOROS_DASHBOARD_TOKEN)."""
@@ -276,27 +404,88 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return False
         return hmac.compare_digest(provided.encode("utf-8"), required.encode("utf-8"))
 
-    def _is_local_browser_request(self):
-        local_names = {"127.0.0.1", "::1", "localhost"}
-        raw_host = self._get_header("Host")
+    @staticmethod
+    def _parse_authority(raw_host: str) -> Optional[Tuple[str, Optional[int]]]:
+        """Parse an HTTP Host header into (lowercase_hostname, port_or_None)."""
         if not raw_host or any(ch in raw_host for ch in ("/", "\\", "@", "?", "#")):
-            return False
+            return None
         try:
             parsed_host = urllib.parse.urlsplit(f"//{raw_host}")
             host = (parsed_host.hostname or "").lower()
-            _ = parsed_host.port
+            port = parsed_host.port
         except ValueError:
+            return None
+        if not host:
+            return None
+        return host, port
+
+    @staticmethod
+    def _parse_origin_url(raw_url: str) -> Optional[Tuple[str, str, int]]:
+        """Parse an Origin or Referer URL into (scheme, lowercase_hostname, effective_port)."""
+        cleaned = (raw_url or "").strip()
+        if not cleaned or cleaned.lower() == "null":
+            return None
+        try:
+            parsed = urllib.parse.urlsplit(cleaned)
+        except ValueError:
+            return None
+        scheme = (parsed.scheme or "").lower()
+        if scheme not in {"http", "https"}:
+            return None
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return None
+        try:
+            explicit_port = parsed.port
+        except ValueError:
+            return None
+        effective_port = explicit_port if explicit_port is not None else (443 if scheme == "https" else 80)
+        return scheme, host, effective_port
+
+    def _origin_matches_host(self, raw_origin_url: str, raw_host: str) -> bool:
+        """Verify that Origin/Referer hostname+port matches Host (or loopback equivalent on same port)."""
+        host_parts = self._parse_authority(raw_host)
+        origin_parts = self._parse_origin_url(raw_origin_url)
+        if host_parts is None or origin_parts is None:
             return False
-        if host not in local_names:
+        host_name, host_port = host_parts
+        origin_scheme, origin_host, origin_port = origin_parts
+
+        if host_port is not None:
+            if origin_port != host_port:
+                return False
+        else:
+            default_port = 443 if origin_scheme == "https" else 80
+            if origin_port != default_port:
+                return False
+
+        if origin_host == host_name:
+            return True
+        if host_name in _LOOPBACK_HOSTS and origin_host in _LOOPBACK_HOSTS:
+            return True
+        return False
+
+    def _is_csrf_origin_valid(self) -> bool:
+        """Validate Origin (or Referer if Origin absent) when present on state-changing requests."""
+        origin = self._get_header("Origin")
+        referer = self._get_header("Referer") if not origin else ""
+        candidate = origin or referer
+        if not candidate:
+            return True
+        raw_host = self._get_header("Host")
+        return self._origin_matches_host(candidate, raw_host)
+
+    def _is_local_browser_request(self):
+        raw_host = self._get_header("Host")
+        host_parts = self._parse_authority(raw_host)
+        if host_parts is None:
+            return False
+        host, _ = host_parts
+        if host not in _LOOPBACK_HOSTS:
             return False
         origin = self._get_header("Origin")
-        if origin:
-            try:
-                origin_host = (urllib.parse.urlsplit(origin).hostname or "").lower()
-            except ValueError:
-                return False
-            if origin_host not in local_names:
-                return False
+        if origin and not self._origin_matches_host(origin, raw_host):
+            return False
         return True
 
     def _is_request_host_allowed(self) -> bool:
@@ -306,29 +495,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not allow_remote:
             return self._is_local_browser_request()
         raw_host = self._get_header("Host")
-        if not raw_host or any(ch in raw_host for ch in ("/", "\\", "@", "?", "#")):
-            return False
-        try:
-            parsed_host = urllib.parse.urlsplit(f"//{raw_host}")
-            host = (parsed_host.hostname or "").lower()
-            _ = parsed_host.port
-        except ValueError:
-            return False
-        if not host:
+        if self._parse_authority(raw_host) is None:
             return False
         origin = self._get_header("Origin")
-        if origin:
-            try:
-                origin_host = (urllib.parse.urlsplit(origin).hostname or "").lower()
-            except ValueError:
-                return False
-            if origin_host != host:
-                return False
+        if origin and not self._origin_matches_host(origin, raw_host):
+            return False
         return True
 
     def do_GET(self):
         if not self._is_request_host_allowed():
-            self.send_error_json("Dashboard is restricted to local browser requests", status=403)
+            origin = self._get_header("Origin")
+            if origin and not self._origin_matches_host(origin, self._get_header("Host")):
+                self.send_error_json("Cross-origin request blocked", status=403)
+            else:
+                self.send_error_json("Dashboard is restricted to local browser requests", status=403)
             return
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
@@ -339,13 +519,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             try:
                 from tools.a2a_server import build_agent_card
                 host = self._get_header("Host") or "127.0.0.1:8080"
-                self.send_json(build_agent_card(f"http://{host}"))
+                scheme = "https" if self._is_tls_request() else "http"
+                self.send_json(build_agent_card(f"{scheme}://{host}"))
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=500)
             return
 
         # REST API Endpoints
         if path.startswith("/api/"):
+            if not self._enforce_rate_limit():
+                return
             if not self._is_api_authorized():
                 self.send_error_json("Unauthorized: valid dashboard token required", status=401)
                 return
@@ -355,15 +538,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
         # Static file serving
         self.handle_static_get(path)
 
-    def do_POST(self):
+    def _prepare_state_changing_request(self) -> Optional[str]:
+        """Run CSRF origin, host, rate-limit, and token auth checks for POST/PUT/DELETE."""
+        if not self._is_csrf_origin_valid():
+            self.send_error_json("Cross-origin request blocked", status=403)
+            return None
         if not self._is_request_host_allowed():
             self.send_error_json("Dashboard is restricted to local browser requests", status=403)
-            return
+            return None
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+        if path.startswith("/api/"):
+            if not self._enforce_rate_limit():
+                return None
+            if not self._is_api_authorized():
+                self.send_error_json("Unauthorized: valid dashboard token required", status=401)
+                return None
+        return path
 
-        if path.startswith("/api/") and not self._is_api_authorized():
-            self.send_error_json("Unauthorized: valid dashboard token required", status=401)
+    def do_POST(self):
+        path = self._prepare_state_changing_request()
+        if path is None:
             return
 
         try:
@@ -391,6 +586,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
 
         self.send_error_json("Not Found", status=404)
+
+    def do_PUT(self):
+        if self._prepare_state_changing_request() is None:
+            return
+        self.send_error_json("Method not allowed", status=405)
+
+    def do_DELETE(self):
+        if self._prepare_state_changing_request() is None:
+            return
+        self.send_error_json("Method not allowed", status=405)
 
     def handle_static_get(self, path):
         static_root = STATIC_DIR.resolve()
@@ -2692,8 +2897,45 @@ class DashboardHandler(BaseHTTPRequestHandler):
             logger.debug("SSE stream terminated: %s", exc)
 
 
-def run_dashboard(host="127.0.0.1", port=8080, open_browser=True, default_target=None):
+def _resolve_tls_paths(
+    ssl_cert: Optional[str] = None,
+    ssl_key: Optional[str] = None,
+) -> Optional[Tuple[Path, Path]]:
+    """Validate optional TLS certificate and private key paths from args or env vars."""
+    raw_cert = ssl_cert if ssl_cert is not None else os.environ.get("MOROS_DASHBOARD_SSL_CERT", "")
+    raw_key = ssl_key if ssl_key is not None else os.environ.get("MOROS_DASHBOARD_SSL_KEY", "")
+    cert_val = str(raw_cert).strip()
+    key_val = str(raw_key).strip()
+
+    if not cert_val and not key_val:
+        return None
+    if bool(cert_val) != bool(key_val):
+        raise ValueError(
+            "Both ssl_cert (MOROS_DASHBOARD_SSL_CERT) and ssl_key (MOROS_DASHBOARD_SSL_KEY) "
+            "must be provided together to enable HTTPS/TLS."
+        )
+
+    cert_file = Path(cert_val)
+    key_file = Path(key_val)
+    if not cert_file.is_file():
+        raise FileNotFoundError(f"SSL certificate file not found: {cert_file}")
+    if not key_file.is_file():
+        raise FileNotFoundError(f"SSL private key file not found: {key_file}")
+    return cert_file, key_file
+
+
+def run_dashboard(
+    host="127.0.0.1",
+    port=8080,
+    open_browser=True,
+    default_target=None,
+    ssl_cert: Optional[str] = None,
+    ssl_key: Optional[str] = None,
+    rate_limit_rpm: Optional[int] = None,
+):
     """Run the Moros AI Agent dashboard server."""
+    tls_paths = _resolve_tls_paths(ssl_cert=ssl_cert, ssl_key=ssl_key)
+
     is_loopback = _is_loopback_host(host)
     env_token = os.environ.get("MOROS_DASHBOARD_TOKEN", "").strip()
     runtime_token = env_token
@@ -2709,11 +2951,29 @@ def run_dashboard(host="127.0.0.1", port=8080, open_browser=True, default_target
 
     server_address = (host, port)
     httpd = ThreadedHTTPServer(server_address, DashboardHandler)
-    httpd.dashboard_token = runtime_token or None
-    httpd.allow_remote = not is_loopback
+    use_tls = tls_paths is not None
+    try:
+        httpd.dashboard_token = runtime_token or None
+        httpd.allow_remote = not is_loopback
+        if rate_limit_rpm is not None:
+            httpd.rate_limit_rpm = int(rate_limit_rpm)
+
+        if tls_paths is not None:
+            cert_file, key_file = tls_paths
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            if hasattr(ssl, "TLSVersion"):
+                ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+            ssl_ctx.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
+            httpd.socket = ssl_ctx.wrap_socket(httpd.socket, server_side=True)
+            httpd.is_tls = True
+    except Exception:
+        httpd.server_close()
+        raise
 
     display_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
-    url = f"http://{display_host}:{port}"
+    scheme = "https" if use_tls else "http"
+    bound_port = httpd.server_address[1] if port == 0 else port
+    url = f"{scheme}://{display_host}:{bound_port}"
     if default_target:
         url += f"?target={default_target}"
 
@@ -2723,6 +2983,8 @@ def run_dashboard(host="127.0.0.1", port=8080, open_browser=True, default_target
     print(f"📂 Project Root: {PROJECT_ROOT}")
     print("⌨️  Press Ctrl+C to stop the dashboard server")
     print("=" * 60)
+    if use_tls:
+        print("[*] HTTPS/TLS encryption enabled.")
     if generated_ephemeral:
         print(f"[!] Non-loopback bind ({host}) without MOROS_DASHBOARD_TOKEN. Runtime token: {runtime_token}")
     elif runtime_token:
@@ -2747,7 +3009,18 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8080, help="Port (default: 8080)")
     parser.add_argument("--target", default=None, help="Default target domain to open")
     parser.add_argument("--no-open", action="store_true", help="Do not open browser automatically")
+    parser.add_argument("--ssl-cert", default=None, help="Path to TLS/SSL certificate PEM file (or MOROS_DASHBOARD_SSL_CERT)")
+    parser.add_argument("--ssl-key", default=None, help="Path to TLS/SSL private key PEM file (or MOROS_DASHBOARD_SSL_KEY)")
+    parser.add_argument("--rate-limit", type=int, default=None, help="Per-client API rate limit in requests/minute (default: 600, or MOROS_DASHBOARD_RATE_LIMIT)")
 
     args = parser.parse_args()
-    run_dashboard(host=args.host, port=args.port, open_browser=not args.no_open, default_target=args.target)
+    run_dashboard(
+        host=args.host,
+        port=args.port,
+        open_browser=not args.no_open,
+        default_target=args.target,
+        ssl_cert=args.ssl_cert,
+        ssl_key=args.ssl_key,
+        rate_limit_rpm=args.rate_limit,
+    )
 
