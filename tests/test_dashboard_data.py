@@ -3,7 +3,7 @@ import json
 import os
 import subprocess
 import types
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from dashboard import server
 
@@ -435,7 +435,18 @@ def test_scan_job_atomic_starting_stopped_preservation_and_sse_cors(tmp_path, mo
     fake_proc.wait.side_effect = wait_and_stop
 
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: fake_proc)
-    res = handler.start_scan_job("example.com", "all", "default")
+    with patch("dashboard.server.LLMClient.is_available", return_value=True):
+        client = server.LLMClient(provider="auto")
+        with server.llm_runtime_lock:
+            server.llm_runtime_state.update({
+                "configured": True,
+                "tested": True,
+                "model_responding": True,
+                "status": "connected",
+                "active_model": client.model,
+                "active_provider": client.provider,
+            })
+        res = handler.start_scan_job("example.com", "all", "default")
     assert res["status"] == "success"
     with server.active_scans_lock:
         t = server.active_scans["example.com"]["thread"]
@@ -457,6 +468,33 @@ def test_scan_job_atomic_starting_stopped_preservation_and_sse_cors(tmp_path, mo
     sse_h = _http_handler("GET", "/api/scan/stream?target=example.com")
     sse_h.handle_sse_stream("example.com")
     assert ("Access-Control-Allow-Origin", "*") not in sse_h._resp_headers
+
+
+def test_scan_job_blocked_until_current_model_connection_is_tested(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "TARGETS_DIR", tmp_path)
+    (tmp_path / "example.com").mkdir()
+    handler = _handler()
+    with server.active_scans_lock:
+        server.active_scans.clear()
+    with server.llm_runtime_lock:
+        server.llm_runtime_state.update({
+            "configured": False,
+            "tested": False,
+            "model_responding": False,
+            "status": "offline",
+            "active_model": None,
+            "active_provider": None,
+        })
+
+    with patch("dashboard.server.LLMClient.is_available", return_value=False):
+        res = handler.start_scan_job("example.com", "all", "default")
+    assert res["status"] == "error"
+    assert res["code"] == "llm_not_configured"
+
+    with patch("dashboard.server.LLMClient.is_available", return_value=True):
+        res = handler.start_scan_job("example.com", "all", "default")
+    assert res["status"] == "error"
+    assert res["code"] == "llm_not_connected"
 
 
 def test_dashboard_auth_optional_on_loopback_and_enforced_when_token_set(tmp_path, monkeypatch):

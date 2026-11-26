@@ -58,7 +58,7 @@ def test_agent_greetings():
     assert "SARIF 2.1.0" in sarif_greeting
 
 
-def test_execute_subagent_chat_deterministic():
+def test_execute_subagent_chat_does_not_run_tools_without_model():
     with tempfile.TemporaryDirectory() as tmp_dir:
         target_path = Path(tmp_dir) / "test.com"
         target_path.mkdir(parents=True)
@@ -67,18 +67,16 @@ def test_execute_subagent_chat_deterministic():
         with patch("dashboard.server.TARGETS_DIR", Path(tmp_dir)):
             handler = DashboardHandler.__new__(DashboardHandler)
 
-            # Test recon directive with mocked recon execution and mocked offline mode
+            # Offline chat must not execute tool directives through deterministic fallback.
             with patch("tools.llm_client.LLMClient.is_available", return_value=False):
                 with patch("tools.skill_runner.SkillRunner.run_recon_subdomain") as mock_recon:
                     mock_recon.return_value = {"status": "SUCCESS", "subdomains_found": 5, "alive_hosts": 2}
                     res = handler.execute_subagent_chat("test.com", "recon-agent", "Scan subdomains for test.com")
-                    assert res["status"] == "fallback"
-                    assert res["fallback_used"] is True
-                    assert res["source"] == "deterministic_fallback"
-                    assert res["provider"] == "deterministic-fallback"
-                    assert "RECON-AGENT" in res["message"]
-                    assert "Subdomain Enumeration Directive Executed" in res["message"]
-                    assert "LLM UNAVAILABLE — DETERMINISTIC FALLBACK" in res["message"]
+                    assert res["status"] == "error"
+                    assert res["fallback_used"] is False
+                    assert res["source"] == "llm_error"
+                    assert "blocked because no connected model produced a response" in res["message"]
+                    mock_recon.assert_not_called()
 
             # Verify conversation was stored
             store = ConversationStore(target_path)
@@ -86,7 +84,7 @@ def test_execute_subagent_chat_deterministic():
             assert len(history) == 2
             assert history[0]["role"] == "user"
             assert history[1]["role"] == "assistant"
-            assert history[1].get("source") == "deterministic_fallback"
+            assert history[1].get("source") == "llm_error"
 
             # Verify agent session was recorded in RunManager
             rm = RunManager(target_path)
@@ -136,7 +134,7 @@ def test_dashboard_conversation_hides_legacy_runtime_duplicates():
     ]
 
 
-def test_execute_subagent_chat_ping_failure_explicit_fallback():
+def test_execute_subagent_chat_blocks_tools_when_model_fails():
     with tempfile.TemporaryDirectory() as tmp_dir:
         target_path = Path(tmp_dir) / "test.com"
         target_path.mkdir(parents=True)
@@ -149,13 +147,10 @@ def test_execute_subagent_chat_ping_failure_explicit_fallback():
             with patch("tools.llm_client.LLMClient.is_available", return_value=True), \
                  patch("tools.llm_client.LLMClient.complete", return_value=None):
                 res = handler.execute_subagent_chat("test.com", "coordinator", "Connectivity check only. Reply exactly PONG if you can answer.")
-                assert res["status"] == "fallback"
-                assert res["fallback_used"] is True
-                assert res["source"] == "deterministic_fallback"
-                assert "LLM UNAVAILABLE — DETERMINISTIC FALLBACK" in res["message"]
-                assert "ping/connectivity request because the upstream LLM backend is unavailable" in res["message"]
-                # Must never return operational briefing pretending to be a valid response
-                assert "Operational Briefing" not in res["message"]
+                assert res["status"] == "error"
+                assert res["fallback_used"] is False
+                assert res["source"] == "llm_error"
+                assert "blocked because no connected model produced a response" in res["message"]
 
 
 def test_llm_config_connection_states():

@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +24,30 @@ def test_dry_run_exits_cleanly(tmp_path):
     )
     assert result.returncode == 0
     assert "DRY RUN" in result.stdout
+
+
+def test_active_scan_is_blocked_without_configured_model(tmp_path):
+    target_dir = tmp_path / "targets" / "test.local"
+    target_dir.mkdir(parents=True)
+    (target_dir / "scope-of-work.md").write_text(
+        "# Scope\nAuthorized testing of test.local\n## In Scope\n- test.local",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["MOROS_LLM_PROVIDER"] = "none"
+    for key in ("OPENAI_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY"):
+        env.pop(key, None)
+
+    result = subprocess.run(
+        [sys.executable, "run.py", "--target", "test.local", "--target-dir", str(target_dir),
+         "--skills", "recon-subdomain"],
+        capture_output=True,
+        text=True,
+        cwd=str(PROJECT_ROOT),
+        env=env,
+    )
+    assert result.returncode == 2
+    assert "Scan blocked: no LLM provider is configured" in result.stderr
 
 
 def test_list_skills():

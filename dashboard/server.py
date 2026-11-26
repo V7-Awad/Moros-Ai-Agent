@@ -43,13 +43,16 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from tools.conversation_store import ConversationStore, safe_agent_name
-from tools.llm_client import LLMClient, redact_secrets
+from tools.llm_client import LLMClient, load_dotenv_if_present, redact_secrets
 from tools.checkpoint_manager import CheckpointManager
 from tools.run_manager import RunManager
 from tools.skill_registry import SkillRegistry
 from tools.finding_dedupe import deduplicate_findings, finding_identity
 
 logger = logging.getLogger(__name__)
+
+# Dashboard scans and chat must use the same saved provider configuration as the CLI.
+load_dotenv_if_present()
 
 # In-memory scan manager
 active_scans = {}  # target -> {thread, status, logs, start_time, pid}
@@ -64,6 +67,7 @@ llm_runtime_state = {
     "last_tested": None,
     "last_error": None,
     "active_model": None,
+    "active_provider": None,
 }
 llm_runtime_lock = threading.Lock()
 
@@ -1049,7 +1053,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             try:
                 max_sub = int(body.get("max_subagents", 10))
                 res = self.start_scan_job(target, skills, models, dry_run, scan_mode=scan_mode, max_subagents=max_sub)
-                self.send_json(res)
+                self.send_json(res, status=200 if res.get("status") == "success" else 409)
             except Exception as exc:
                 logger.exception("Failed to enqueue dashboard scan for %s", target)
                 self.send_json({"status": "error", "message": f"Could not start scan ({type(exc).__name__})."}, status=500)
@@ -1419,6 +1423,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             llm_runtime_state["status"] = "configured" if has_key else "offline"
             llm_runtime_state["last_error"] = None
             llm_runtime_state["active_model"] = model
+            llm_runtime_state["active_provider"] = None
 
         return {
             "status": "success",
@@ -1440,6 +1445,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         api_key = str(body.get("api_key", "")).strip() or None
         base_url = str(raw_base_url or "").strip() or None
 
+        # A previous successful test must not keep scans enabled while a new
+        # provider/model is being tested.
+        with llm_runtime_lock:
+            llm_runtime_state["status"] = "testing"
+            llm_runtime_state["tested"] = False
+            llm_runtime_state["model_responding"] = False
+            llm_runtime_state["active_provider"] = None
+
         if base_url and not is_valid_http_url(base_url):
             return {
                 "status": "error",
@@ -1455,6 +1468,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     llm_runtime_state["status"] = "offline"
                     llm_runtime_state["model_responding"] = False
                     llm_runtime_state["last_error"] = "LLM credentials missing or incomplete"
+                    llm_runtime_state["tested"] = True
                 return {
                     "status": "error",
                     "message": "LLM credentials missing or incomplete",
@@ -1472,6 +1486,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     llm_runtime_state["tested"] = True
                     llm_runtime_state["last_error"] = None
                     llm_runtime_state["active_model"] = client.model
+                    llm_runtime_state["active_provider"] = client.provider
                 return {
                     "status": "success",
                     "message": f"Connected to {client.provider}/{client.model}! Response: {clean_resp}",
@@ -1488,6 +1503,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     llm_runtime_state["model_responding"] = False
                     llm_runtime_state["tested"] = True
                     llm_runtime_state["last_error"] = detail
+                    llm_runtime_state["active_provider"] = None
                 return {
                     "status": "error",
                     "message": f"Connection failed: {detail}",
@@ -1501,6 +1517,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 llm_runtime_state["model_responding"] = False
                 llm_runtime_state["tested"] = True
                 llm_runtime_state["last_error"] = err_msg
+                llm_runtime_state["active_provider"] = None
             return {
                 "status": "error",
                 "message": f"Connection test failed: {err_msg}",
@@ -2099,146 +2116,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "fallback_used": False,
             }
 
-        # Deterministic Fallback Path (LLM failed or unavailable)
-        # Explicitly labeled fallback — NEVER present as a Gemini or successful agent response
-        fallback_source = "deterministic_fallback"
-        fallback_provider = "deterministic-fallback"
-        fallback_model = "deterministic-fallback"
-
-        msg_lower = message.lower()
-        if any(k in msg_lower for k in ["recon", "subdomain", "enumerate", "alive hosts"]):
-            res = runner.run_recon_subdomain(active_validation=False)
-            sub_count = res.get("subdomains_found", 0)
-            alive_count = res.get("alive_hosts", 0)
-            sub_file = target_path / "output" / "recon" / "subdomains.txt"
-            sample_subs = []
-            if sub_file.exists():
-                sample_subs = [s.strip() for s in sub_file.read_text(encoding="utf-8").splitlines() if s.strip()][:8]
-            sub_list = "\n".join(f"- `{s}`" for s in sample_subs) if sample_subs else "- None recorded yet"
-            fallback_body = (
-                f"🌐 **[RECON-AGENT] Subdomain Enumeration Directive Executed**\n\n"
-                f"Target: `{target}` | Status: `COMPLETED (Deterministic Fallback)`\n\n"
-                f"### Key Metrics\n"
-                f"- **Total Subdomains Discovered:** `{sub_count}`\n"
-                f"- **Alive Web Endpoints:** `{alive_count}`\n"
-                f"- **Workspace Output:** `targets/{target}/output/recon/`\n\n"
-                f"### Discovered Subdomain Sample\n{sub_list}\n\n"
-                f"**Next Action:** Run `run_js_analyze` or test active endpoints for parameter reflection."
-            )
-        elif any(k in msg_lower for k in ["js", "javascript", "secret", "token", "source map", "sourcemap", "ast"]):
-            res = runner.run_js_analyze()
-            sec_count = res.get("secrets_found", 0)
-            ep_count = res.get("endpoints_found", 0)
-            sec_file = target_path / "output" / "js" / "secrets-findings.json"
-            sec_items = []
-            if sec_file.exists():
-                try:
-                    s_data = json.loads(sec_file.read_text(encoding="utf-8"))
-                    sec_items = s_data.get("findings", [])[:5]
-                except Exception:
-                    pass
-            sec_summary = "\n".join(f"- `{s.get('type')}` in `{s.get('source_file')}` ({s.get('severity')})" for s in sec_items) if sec_items else "- No exposed API keys or tokens identified."
-            fallback_body = (
-                f"⚡ **[JS-ANALYZER] JavaScript & Secret Extraction Executed**\n\n"
-                f"Target: `{target}` | Status: `COMPLETED (Deterministic Fallback)`\n\n"
-                f"### Key Metrics\n"
-                f"- **Secrets / Credentials Flagged:** `{sec_count}`\n"
-                f"- **Endpoints Extracted via AST:** `{ep_count}`\n"
-                f"- **Workspace Output:** `targets/{target}/output/js/`\n\n"
-                f"### Extracted Secrets\n{sec_summary}\n\n"
-                f"**Next Action:** Validate detected secret patterns against live endpoints or test candidate routes."
-            )
-        elif any(k in msg_lower for k in ["sarif", "github", "code scanning", "export", "report"]):
-            res = runner.run_report_conglomeration()
-            findings_count = res.get("findings_count", 0)
-            sarif_path = res.get("sarif_path") or f"targets/{target}/output/report/findings.sarif"
-            report_path = res.get("report_path") or f"targets/{target}/output/report/"
-            fallback_body = (
-                f"📄 **[REPORT-SPECIALIST] Enterprise Deliverables Compiled**\n\n"
-                f"Target: `{target}` | Status: `COMPLETED (Deterministic Fallback)`\n\n"
-                f"### Export Artifacts\n"
-                f"- **OASIS SARIF 2.1.0:** `{sarif_path}` (Directly uploadable via `github/codeql-action/upload-sarif`)\n"
-                f"- **Executive Deliverable:** `{report_path}`\n"
-                f"- **Total Triage Items Processed:** `{findings_count}`\n\n"
-                f"**CI/CD Integration Hint:**\n"
-                f"```bash\n"
-                f"# Upload to GitHub Code Scanning Alerts\n"
-                f"gh code-scanning upload-sarif --sarif {sarif_path}\n"
-                f"```"
-            )
-        elif any(k in msg_lower for k in ["verify", "verification", "review", "proof", "reproduce", "candidate"]):
-            res = runner.run_review_skill("all")
-            status_str = res.get("overall_status", "SUCCESS")
-            fallback_body = (
-                f"🔍 **[REVIEW-VERIFIER] Verification Gate Executed**\n\n"
-                f"Target: `{target}` | Status: `{status_str} (Deterministic Fallback)`\n\n"
-                f"- Evaluated candidate findings against strict evidence gates.\n"
-                f"- Verified reproduction proof standards (independent evidence, cURL validation).\n"
-                f"- Findings without reproducible evidence marked as unverified candidates to eliminate false positives."
-            )
-        elif any(k in msg_lower for k in ["endpoint", "endpoints", "routes", "url", "urls"]):
-            eps = _tool_list_endpoints()
-            ep_text = "\n".join(f"- `{e}`" for e in eps[:15]) if eps else "- No endpoints discovered yet. Run recon or js-analyze first."
-            fallback_body = (
-                f"🛡️ **[AGENT: {agent.upper()}] Discovered Endpoints Inventory**\n\n"
-                f"Target: `{target}` | Inventory Count: `{len(eps)}`\n\n"
-                f"### Target Routes\n{ep_text}\n\n"
-                f"Directives available: Ask to test specific endpoints or run vulnerability auditing."
-            )
-        elif any(k in msg_lower for k in ["finding", "findings", "vuln", "vulnerabilities", "bug", "status"]):
-            findings = self.get_target_findings(target)
-            validated = sum(1 for f in findings if f.get("validation_status") == "validated")
-            candidates = len(findings) - validated
-            f_sample = "\n".join(f"- **{f.get('title')}** — `{f.get('severity')}` [{f.get('validation_status')}]" for f in findings[:8]) if findings else "- No findings recorded in workspace."
-            fallback_body = (
-                f"🛡️ **[AGENT: {agent.upper()}] Workspace Triage Overview**\n\n"
-                f"Target: `{target}` | Total Items: `{len(findings)}` ({validated} validated, {candidates} unverified candidates)\n\n"
-                f"### Key Findings\n{f_sample}\n\n"
-                f"Use `Verify findings` to invoke the verification gate or `Generate SARIF 2.1.0` to compile CI/CD reports."
-            )
-        elif any(k in msg_lower for k in ["pong", "ping", "connectivity", "hello", "hi"]):
-            fallback_body = (
-                f"The agent could not generate a model response for your ping/connectivity request because the upstream LLM backend is unavailable.\n\n"
-                f"**LLM Error Details:** `{llm_error_msg or 'No response from model'}`\n\n"
-                f"Please test model connectivity in Dashboard Settings or check your API key quota."
-            )
-        else:
-            summary_data = self.get_target_summary(target)
-            endpoints = summary_data.get("total_endpoints", 0)
-            findings = summary_data.get("total_findings", 0)
-            fallback_body = (
-                f"🛡️ **[AGENT: {agent.upper()}] Deterministic Workspace Briefing**\n\n"
-                f"Target: `{target}` | Status: `FALLBACK_READY`\n\n"
-                f"Workspace context for `{target}` contains {endpoints} endpoints and {findings} triage items. "
-                f"Deterministic tools remain available under authorization scope.\n\n"
-                f"**Suggested Directives:**\n"
-                f"- `Run subdomain recon` — Enumerate subdomains & alive hosts\n"
-                f"- `Analyze JavaScript` — Crawl JS files, extract AST routes & scan for secrets\n"
-                f"- `Verify findings` — Execute independent cURL replay & prune false positives\n"
-                f"- `Export SARIF 2.1.0` — Build GitHub Code Scanning deliverable"
-            )
-
         err_detail = llm_error_msg or "Model execution failed or timed out"
-        fallback_banner = (
-            f"⚠️ **[LLM UNAVAILABLE — DETERMINISTIC FALLBACK]**\n"
-            f"*Model '{client.provider}/{client.model}' failed: {err_detail}*\n\n"
-            f"---\n\n"
+        failure_message = (
+            "Agent action blocked because no connected model produced a response. "
+            "Configure and test an LLM provider in Dashboard Settings, then retry."
         )
-        full_fallback_message = fallback_banner + fallback_body
-
-        store.append(agent, "assistant", full_fallback_message, provider=fallback_provider, model=fallback_model, source=fallback_source)
-        rm.update_agent_session(run_id, agent_id=agent, status="fallback_completed", summary=full_fallback_message[:200])
-
+        store.append(agent, "assistant", failure_message, provider=client.provider, model=client.model, source="llm_error")
+        rm.update_agent_session(run_id, agent_id=agent, status="failed", summary=redact_secrets(err_detail)[:200])
         return {
-            "status": "fallback",
+            "status": "error",
             "agent": agent,
-            "provider": fallback_provider,
-            "model": fallback_model,
-            "message": full_fallback_message,
-            "source": fallback_source,
-            "fallback_used": True,
-            "llm_error": llm_error_msg,
+            "provider": client.provider,
+            "model": client.model,
+            "message": failure_message,
+            "source": "llm_error",
+            "fallback_used": False,
+            "llm_error": redact_secrets(err_detail),
         }
+
 
     def get_target_skills_status(self, target_name):
         target_dir = TARGETS_DIR / target_name
@@ -2745,6 +2640,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
     # ==================== SCAN MANAGEMENT ====================
 
     def start_scan_job(self, target, skills, models, dry_run=False, scan_mode="quick", max_subagents=10):
+        if not dry_run:
+            client = LLMClient(provider="auto")
+            if not client.is_available():
+                return {
+                    "status": "error",
+                    "message": "Scan blocked: configure an LLM provider, then test the model connection in Settings.",
+                    "code": "llm_not_configured",
+                }
+            with llm_runtime_lock:
+                runtime_snapshot = dict(llm_runtime_state)
+            connected = (
+                runtime_snapshot.get("status") == "connected"
+                and runtime_snapshot.get("tested") is True
+                and runtime_snapshot.get("model_responding") is True
+                and runtime_snapshot.get("active_model") == client.model
+                and runtime_snapshot.get("active_provider") == client.provider
+            )
+            if not connected:
+                return {
+                    "status": "error",
+                    "message": "Scan blocked: the configured model has not passed a connection test. Test the current provider/model in Settings, then start the scan.",
+                    "code": "llm_not_connected",
+                }
+
         log_buffer = []
         with active_scans_lock:
             existing = active_scans.get(target)
