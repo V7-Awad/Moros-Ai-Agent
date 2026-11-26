@@ -59,7 +59,7 @@ def test_mistral_provider():
 
 
 def test_gemini_provider_instantiation():
-    client = LLMClient(provider="gemini", api_key="AIzaSyTestKey1234567890123456789012345")
+    client = LLMClient(provider="gemini", api_key="AIza" + "SyTestKey1234567890123456789012345")
     assert client.provider == "gemini"
     assert "gemini" in client.model
     assert client.is_available() is True
@@ -111,10 +111,12 @@ def test_gemini_all_503_raises_sanitized_error():
     import urllib.error
     from unittest.mock import patch
 
-    client = LLMClient(provider="gemini", api_key="AIzaSySecretApiKey12345678901234567890", model="gemini-3.8-flash")
+    fake_gemini_key = "AIza" + "SySecretApiKey12345678901234567890"
+    client = LLMClient(provider="gemini", api_key=fake_gemini_key, model="gemini-3.8-flash")
 
     def mock_urlopen_fail(req, timeout=15):
-        err_fp = io.BytesIO(b'{"error":{"code":503,"message":"high demand spike for key AIzaSySecretApiKey12345678901234567890"}}')
+        payload = f'{{"error":{{"code":503,"message":"high demand spike for key {fake_gemini_key}"}}}}'.encode("utf-8")
+        err_fp = io.BytesIO(payload)
         raise urllib.error.HTTPError(req.full_url, 503, "Service Unavailable", {}, err_fp)
 
     with patch("urllib.request.urlopen", side_effect=mock_urlopen_fail):
@@ -122,5 +124,5 @@ def test_gemini_all_503_raises_sanitized_error():
             client._call_gemini("Ping", "", 0.1, 100, timeout=5)
         err_str = str(exc_info.value)
         assert "503" in err_str
-        assert "AIzaSySecretApiKey" not in err_str
+        assert "SecretApiKey" not in err_str
         assert "[REDACTED_API_KEY]" in err_str

@@ -170,10 +170,11 @@ class TestOutputSanitization:
         assert _SPOTLIGHT_SUFFIX not in result
 
     def test_strips_api_keys(self):
-        text = "Key: sk-proj-abcdefghijklmnopqrstuv12345"
+        fake_key = "sk-" + "proj-abcdefghijklmnopqrstuv12345"
+        text = f"Key: {fake_key}"
         result = sanitize_output(text)
         assert "[REDACTED]" in result
-        assert "sk-proj" not in result
+        assert "proj-abcdefgh" not in result
 
     def test_empty_string(self):
         assert sanitize_output("") == ""

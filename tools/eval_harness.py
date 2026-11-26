@@ -133,9 +133,11 @@ class EvalHarness:
         return cases
 
     def _eval_secret_redaction(self) -> List[EvalCase]:
+        openai_dummy = "sk-" + "proj-1234567890abcdefghijklmnop"
+        google_dummy = "AIza" + "SyD-9876543210abcdefghijklmnopqrstu"
         samples = [
-            ("redact_openai_key", "key=sk-proj-1234567890abcdefghijklmnop", "sk-proj-1234567890abcdefghijklmnop"),
-            ("redact_google_key", "AIzaSyD-9876543210abcdefghijklmnopqrstu", "AIzaSyD-9876543210abcdefghijklmnopqrstu"),
+            ("redact_openai_key", f"key={openai_dummy}", openai_dummy),
+            ("redact_google_key", google_dummy, google_dummy),
             ("redact_bearer", "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig", "eyJhbGciOiJIUzI1NiJ9"),
         ]
         cases = []

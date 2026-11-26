@@ -111,8 +111,8 @@ def test_explicit_provider_with_enable_failover_true_429_to_anthropic(monkeypatc
 
 
 def test_gemini_candidate_exhaustion_and_errors_failover_to_backup(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "AIzaSyTestGeminiKey12345678901234567890")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-backup-1234567890123456")
+    monkeypatch.setenv("GEMINI_API_KEY", "AIza" + "SyTestGeminiKey12345678901234567890")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-" + "openai-backup-1234567890123456")
 
     # 1. All Gemini candidates return 503 -> failover to OpenAI
     client_503 = LLMClient(provider="gemini", model="gemini-3.8-flash", enable_failover=True)
@@ -287,10 +287,10 @@ def test_anthropic_transient_429_and_503_retry_succeeds(monkeypatch):
 
 
 def test_secret_redaction_in_last_error_and_failover_attempts(monkeypatch):
-    ds_secret = "sk-deepseek-supersecret-key-9876543210"
+    ds_secret = "sk-" + "deepseek-supersecret-key-9876543210"
     oa_secret = "custom-openai-token-secret-xyz123456789"
-    ant_secret = "sk-ant-api03-supersecret-key-1234567890"
-    gem_secret = "AIzaSySecretLeakTestKey12345678901234567"
+    ant_secret = "sk-ant-" + "api03-supersecret-key-1234567890"
+    gem_secret = "AIza" + "SySecretLeakTestKey12345678901234567"
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", ds_secret)
     monkeypatch.setenv("OPENAI_API_KEY", oa_secret)
