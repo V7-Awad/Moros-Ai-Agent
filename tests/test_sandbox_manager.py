@@ -79,3 +79,72 @@ class TestSandboxFactoryAndAdapters:
         d = r.to_dict()
         assert d["exit_code"] == 0
         assert d["duration_ms"] == 12.3
+
+    def test_docker_sandbox_accepts_extra_env_and_scrubs_secrets(self):
+        sb = create_sandbox(
+            "docker",
+            extra_env={"OPENAI_API_KEY": "sk-bad", "MOROS_IN_SCOPE": "example.com"},
+            scrub_secrets=True,
+        )
+        assert isinstance(sb, DockerSandbox)
+        assert sb._extra_env["MOROS_IN_SCOPE"] == "example.com"
+
+
+class TestCustomSkillSandboxIntegration:
+    def test_run_custom_skill_scrubs_secrets_and_preserves_moros_env(self, tmp_path, monkeypatch):
+        import json
+        import skill_registry
+        from skill_runner import SkillRunner
+
+        skills_dir = tmp_path / "skills"
+        skill_dir = skills_dir / "env-audit-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("# Env Audit Skill\n", encoding="utf-8")
+        (skill_dir / "run.py").write_text(
+            "import argparse, json, os\n"
+            "from pathlib import Path\n"
+            "p = argparse.ArgumentParser()\n"
+            "p.add_argument('--target'); p.add_argument('--target-dir'); p.add_argument('--output-dir')\n"
+            "a = p.parse_args()\n"
+            "out = Path(a.output_dir) / 'findings' / 'candidates-env-audit-skill.json'\n"
+            "out.parent.mkdir(parents=True, exist_ok=True)\n"
+            "finding = {\n"
+            "  'title': 'Env Check',\n"
+            "  'url': f'https://{a.target}/check',\n"
+            "  'gemini_present': 'GEMINI_API_KEY' in os.environ,\n"
+            "  'openai_present': 'OPENAI_API_KEY' in os.environ,\n"
+            "  'remaining': os.environ.get('MOROS_HTTP_REQUESTS_REMAINING'),\n"
+            "  'delay': os.environ.get('MOROS_REQUEST_DELAY'),\n"
+            "  'in_scope': os.environ.get('MOROS_IN_SCOPE'),\n"
+            "  'out_of_scope': os.environ.get('MOROS_OUT_OF_SCOPE'),\n"
+            "}\n"
+            "out.write_text(json.dumps({'findings': [finding]}), encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(skill_registry, "SKILLS_DIR", skills_dir)
+        monkeypatch.setenv("GEMINI_API_KEY", "AIza-secret-gemini-key")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-secret-openai-key")
+        monkeypatch.setenv("MOROS_HTTP_REQUESTS_REMAINING", "7")
+        monkeypatch.setenv("MOROS_REQUEST_DELAY", "0.25")
+        monkeypatch.setenv("MOROS_IN_SCOPE", "*.example.com")
+        monkeypatch.setenv("MOROS_OUT_OF_SCOPE", "blog.example.com")
+
+        target_dir = tmp_path / "target"
+        target_dir.mkdir()
+        runner = SkillRunner("example.com", target_dir)
+        res = runner.run_custom_skill("env-audit-skill")
+
+        assert res["status"] == "COMPLETED"
+        assert res["findings_count"] == 1
+        data = json.loads(
+            (target_dir / "output" / "findings" / "candidates-env-audit-skill.json").read_text(encoding="utf-8")
+        )
+        recorded = data["findings"][0]
+        assert recorded["gemini_present"] is False
+        assert recorded["openai_present"] is False
+        assert recorded["remaining"] == "7"
+        assert recorded["delay"] == "0.25"
+        assert recorded["in_scope"] == "*.example.com"
+        assert recorded["out_of_scope"] == "blog.example.com"
+        assert (target_dir / "output" / "evidence" / "ledger.jsonl").is_file()

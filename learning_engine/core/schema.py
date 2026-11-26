@@ -65,6 +65,8 @@ CREATE INDEX IF NOT EXISTS idx_findings_class    ON findings (vuln_class);
 CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings (severity);
 CREATE INDEX IF NOT EXISTS idx_triage_finding    ON triage (finding_id);
 CREATE INDEX IF NOT EXISTS idx_lessons_class     ON lessons (vuln_class);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lessons_class_source ON lessons (vuln_class, source);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_patterns_pattern     ON patterns (pattern);
 """
 
 FTS_SCHEMA = """
@@ -82,6 +84,14 @@ CREATE TRIGGER IF NOT EXISTS lessons_fts_ai AFTER INSERT ON lessons BEGIN
     INSERT INTO lessons_fts (rowid, lesson, vuln_class)
     VALUES (new.id, new.lesson, new.vuln_class);
 END;
+CREATE TRIGGER IF NOT EXISTS lessons_fts_au AFTER UPDATE ON lessons BEGIN
+    DELETE FROM lessons_fts WHERE rowid = old.id;
+    INSERT INTO lessons_fts (rowid, lesson, vuln_class)
+    VALUES (new.id, new.lesson, new.vuln_class);
+END;
+CREATE TRIGGER IF NOT EXISTS lessons_fts_ad AFTER DELETE ON lessons BEGIN
+    DELETE FROM lessons_fts WHERE rowid = old.id;
+END;
 """
 
 SCHEMA = BASE_SCHEMA + FTS_SCHEMA
@@ -89,6 +99,8 @@ SCHEMA = BASE_SCHEMA + FTS_SCHEMA
 FTS_PRELUDE = """
 DROP TRIGGER IF EXISTS findings_fts_ai;
 DROP TRIGGER IF EXISTS lessons_fts_ai;
+DROP TRIGGER IF EXISTS lessons_fts_au;
+DROP TRIGGER IF EXISTS lessons_fts_ad;
 DROP TABLE IF EXISTS findings_fts;
 DROP TABLE IF EXISTS lessons_fts;
 """
@@ -102,9 +114,9 @@ def _fts_objects_present(conn) -> bool:
     rows = conn.execute(
         "SELECT name FROM sqlite_master "
         "WHERE (type = 'table' AND name IN ('findings_fts', 'lessons_fts')) "
-        "   OR (type = 'trigger' AND name IN ('findings_fts_ai', 'lessons_fts_ai'))"
+        "   OR (type = 'trigger' AND name IN ('findings_fts_ai', 'lessons_fts_ai', 'lessons_fts_au', 'lessons_fts_ad'))"
     ).fetchall()
-    return len(rows) == 4
+    return len(rows) == 6
 
 
 def _backfill_fts(conn) -> None:

@@ -322,3 +322,155 @@ class TestOrchestratorAndDashboardIntegration:
         assert len(traces["traces"]) == 1
         assert memory["stats"]["semantic_facts"] >= 1
 
+
+class TestCliAndRuntimeSandboxWiring:
+    def test_cli_forwards_max_subagents_and_sandbox_to_orchestrator(self, tmp_path, monkeypatch):
+        import os
+        import run as moros_run
+
+        target_dir = tmp_path / "example.com"
+        target_dir.mkdir(parents=True)
+        (target_dir / "scope-of-work.md").write_text(
+            "Authorized security test for example.com (in scope).", encoding="utf-8"
+        )
+
+        captured = {}
+
+        class DummyRunner:
+            sandbox_mode = None
+            max_subagents = None
+
+        class DummyCostTracker:
+            @staticmethod
+            def get_running_total():
+                return {"total_calls": 0}
+
+        class DummyOrchestrator:
+            def __init__(self, **kwargs):
+                captured["kwargs"] = kwargs
+                self.runner = DummyRunner()
+                self.cost_tracker = DummyCostTracker()
+                captured["instance"] = self
+
+            def run(self):
+                return {"status": "SUCCESS"}
+
+        monkeypatch.delenv("MOROS_SANDBOX_MODE", raising=False)
+        monkeypatch.delenv("MOROS_MAX_SUBAGENTS", raising=False)
+        monkeypatch.setattr(moros_run, "HackbotOrchestrator", DummyOrchestrator)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "run.py",
+                "--target", "example.com",
+                "--target-dir", str(target_dir),
+                "--skills", "recon-subdomain",
+                "--max-subagents", "3",
+                "--sandbox", "local",
+            ],
+        )
+        moros_run.main()
+
+        assert captured["kwargs"]["max_subagents"] == 3
+        assert os.environ.get("MOROS_SANDBOX_MODE") == "local"
+        assert os.environ.get("MOROS_MAX_SUBAGENTS") == "3"
+        assert captured["instance"].runner.sandbox_mode == "local"
+        assert captured["instance"].runner.max_subagents == 3
+
+    def test_cli_dry_run_accepts_sandbox_and_max_subagents(self, tmp_path):
+        import subprocess
+
+        target_dir = tmp_path / "test.local"
+        target_dir.mkdir(parents=True)
+        (target_dir / "scope-of-work.md").write_text(
+            "# Scope\nAuthorized testing of test.local\n", encoding="utf-8"
+        )
+
+        proc = subprocess.run(
+            [
+                sys.executable, "run.py",
+                "--target", "test.local",
+                "--target-dir", str(target_dir),
+                "--sandbox", "none",
+                "--max-subagents", "4",
+                "--dry-run",
+            ],
+            capture_output=True, text=True, cwd=str(PROJECT_ROOT),
+        )
+        assert proc.returncode == 0
+        assert "Sandbox: none" in proc.stdout
+        assert "Max subagents: 4" in proc.stdout
+
+        bad = subprocess.run(
+            [
+                sys.executable, "run.py",
+                "--target", "test.local",
+                "--target-dir", str(target_dir),
+                "--sandbox", "invalid-mode",
+                "--dry-run",
+            ],
+            capture_output=True, text=True, cwd=str(PROJECT_ROOT),
+        )
+        assert bad.returncode != 0
+
+    def test_agent_runner_enforces_max_subagents_and_sandboxed_exec(self, tmp_path, monkeypatch):
+        class SubLLM:
+            provider = "mock"
+            model = "mock-sub"
+            last_error = None
+            last_usage = {"input_tokens": 10, "output_tokens": 10}
+
+            def __init__(self):
+                self.calls = 0
+                self.child_calls = 0
+                self.prompts = []
+
+            def is_available(self):
+                return True
+
+            def complete(self, prompt, **kwargs):
+                if "Begin autonomous investigation" in prompt:
+                    self.child_calls += 1
+                    return "Thought: child task\nFinal Answer: Child finished"
+                self.calls += 1
+                self.prompts.append(prompt)
+                if self.calls == 1:
+                    return 'Thought: spawn 1\nAction: spawn_subagent(role="One", goal="G1")'
+                if self.calls == 2:
+                    return 'Thought: spawn 2\nAction: spawn_subagent(role="Two", goal="G2")'
+                return "Thought: done\nFinal Answer: Enforced cap"
+
+        child_llm = SubLLM()
+        parent_llm = SubLLM()
+        ctx = AgentContext(
+            target="example.com",
+            target_dir=tmp_path,
+            skill="parent",
+            run_id="run-cap",
+            max_subagents=1,
+            sandbox_mode="local",
+        )
+        tools = build_default_agent_tools(ctx, llm_client=child_llm, allow_subagents=True)
+        runner = AgentRunner(llm_client=parent_llm, max_subagents=1, sandbox_mode="local")
+        res = runner.run(ctx, tools, "Sys", "Go", persist_conversation=False)
+        assert res.status == "completed"
+        assert "Enforced cap" in res.summary
+        assert child_llm.child_calls == 1
+        assert len(parent_llm.prompts) == 3
+        assert "Maximum subagents limit (1) reached" not in parent_llm.prompts[1]
+        assert "Maximum subagents limit (1) reached" in parent_llm.prompts[2]
+
+        monkeypatch.setenv("GEMINI_API_KEY", "AIza-leak")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-leak")
+        sb_res = tools.execute_sandboxed(
+            [
+                sys.executable,
+                "-c",
+                "import os; print(os.environ.get('GEMINI_API_KEY', 'CLEAN'), os.environ.get('OPENAI_API_KEY', 'CLEAN'))",
+            ],
+            sandbox_mode="local",
+        )
+        assert sb_res["status"] == "success"
+        assert "CLEAN CLEAN" in sb_res["stdout"]
+

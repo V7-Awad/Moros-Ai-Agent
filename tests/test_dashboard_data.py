@@ -457,3 +457,134 @@ def test_scan_job_atomic_starting_stopped_preservation_and_sse_cors(tmp_path, mo
     sse_h = _http_handler("GET", "/api/scan/stream?target=example.com")
     sse_h.handle_sse_stream("example.com")
     assert ("Access-Control-Allow-Origin", "*") not in sse_h._resp_headers
+
+
+def test_dashboard_auth_optional_on_loopback_and_enforced_when_token_set(tmp_path, monkeypatch):
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_text("<h1>Moros UI</h1>", encoding="utf-8")
+    targets_dir = tmp_path / "targets"
+    targets_dir.mkdir()
+    monkeypatch.setattr(server, "STATIC_DIR", static_dir)
+    monkeypatch.setattr(server, "TARGETS_DIR", targets_dir)
+
+    # 1. Loopback remains frictionless when MOROS_DASHBOARD_TOKEN is unset
+    monkeypatch.delenv("MOROS_DASHBOARD_TOKEN", raising=False)
+    h_open = _http_handler("GET", "/api/targets")
+    h_open.do_GET()
+    assert h_open._status_code == 200
+    assert _response_json(h_open) == []
+
+    # 2. When MOROS_DASHBOARD_TOKEN is set, /api/* requires Bearer or X-Moros-Token
+    secret = "moros-test-secret-token-987654"
+    monkeypatch.setenv("MOROS_DASHBOARD_TOKEN", secret)
+
+    h_missing = _http_handler("GET", "/api/targets")
+    h_missing.do_GET()
+    assert h_missing._status_code == 401
+    assert secret not in h_missing.wfile.getvalue().decode("utf-8")
+
+    h_bad = _http_handler("GET", "/api/targets", headers={"Authorization": "Bearer wrong-token"})
+    h_bad.do_GET()
+    assert h_bad._status_code == 401
+    assert secret not in h_bad.wfile.getvalue().decode("utf-8")
+
+    h_post_missing = _http_handler("POST", "/api/targets/create", body={"domain": "example.com"})
+    h_post_missing.do_POST()
+    assert h_post_missing._status_code == 401
+
+    # Static UI remains accessible on GET / so browser can prompt for token
+    h_static = _http_handler("GET", "/")
+    h_static.do_GET()
+    assert h_static._status_code == 200
+    assert b"Moros UI" in h_static.wfile.getvalue()
+
+    # Valid Bearer token succeeds
+    h_bearer = _http_handler("GET", "/api/targets", headers={"Authorization": f"Bearer {secret}"})
+    h_bearer.do_GET()
+    assert h_bearer._status_code == 200
+
+    # Valid X-Moros-Token succeeds (including case-insensitive header name)
+    h_xheader = _http_handler("GET", "/api/targets", headers={"x-moros-token": secret})
+    h_xheader.do_GET()
+    assert h_xheader._status_code == 200
+
+
+def test_non_loopback_bind_auto_generates_runtime_token_and_logs_warning(tmp_path, monkeypatch, caplog):
+    import logging
+    import threading
+    import urllib.error
+    import urllib.request
+
+    monkeypatch.delenv("MOROS_DASHBOARD_TOKEN", raising=False)
+    monkeypatch.setattr(server, "TARGETS_DIR", tmp_path)
+
+    captured_httpd = {}
+    orig_server_cls = server.ThreadedHTTPServer
+
+    class FakeServer(orig_server_cls):
+        def serve_forever(self, poll_interval=0.5):
+            captured_httpd["httpd"] = self
+            return
+
+    monkeypatch.setattr(server, "ThreadedHTTPServer", FakeServer)
+
+    with caplog.at_level(logging.WARNING):
+        server.run_dashboard(host="0.0.0.0", port=0, open_browser=False)
+
+    assert any("non-loopback host '0.0.0.0'" in rec.message for rec in caplog.records)
+    httpd = captured_httpd["httpd"]
+    assert httpd.allow_remote is True
+    runtime_token = httpd.dashboard_token
+    assert isinstance(runtime_token, str) and len(runtime_token) >= 24
+
+    # Spin up real ephemeral ThreadedHTTPServer with remote-bind attributes to test live HTTP auth
+    real_httpd = orig_server_cls(("127.0.0.1", 0), server.DashboardHandler)
+    real_httpd.dashboard_token = runtime_token
+    real_httpd.allow_remote = True
+    port = real_httpd.server_address[1]
+    t = threading.Thread(target=real_httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        # Unauthenticated /api/targets -> 401 and token never leaked in response
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/targets", timeout=5)
+            assert False, "Expected HTTP 401"
+        except urllib.error.HTTPError as err:
+            assert err.code == 401
+            body = err.read().decode("utf-8")
+            assert runtime_token not in body
+
+        # Authenticated with X-Moros-Token -> 200
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/targets",
+            headers={"X-Moros-Token": runtime_token},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 200
+            assert json.loads(resp.read().decode("utf-8")) == []
+
+        # Remote Host header allowed when allow_remote=True, still requires token
+        h_remote = _http_handler("GET", "/api/targets", headers={"Host": "192.168.1.50:8080", "Authorization": f"Bearer {runtime_token}"})
+        h_remote.server = real_httpd
+        h_remote.do_GET()
+        assert h_remote._status_code == 200
+
+        # Mismatched Origin header still rejected with 403
+        h_csrf = _http_handler("GET", "/api/targets", headers={"Host": "192.168.1.50:8080", "Origin": "https://evil.com", "Authorization": f"Bearer {runtime_token}"})
+        h_csrf.server = real_httpd
+        h_csrf.do_GET()
+        assert h_csrf._status_code == 403
+    finally:
+        real_httpd.shutdown()
+        real_httpd.server_close()
+
+
+def test_dashboard_html_contains_session_storage_token_prompt():
+    from pathlib import Path
+
+    html = (Path(__file__).resolve().parent.parent / "dashboard" / "static" / "index.html").read_text(encoding="utf-8")
+    assert "sessionStorage" in html
+    assert "authTokenModal" in html
+    assert "Authorization" in html
+

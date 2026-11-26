@@ -20,12 +20,14 @@ Reference: https://spec.modelcontextprotocol.io/
 import json
 import logging
 import os
+import shlex
 import subprocess
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 logger = logging.getLogger("mcp-client")
 
@@ -185,7 +187,7 @@ class StdioTransport:
 
 class HttpTransport:
     """
-    MCP transport over HTTP (simple request/response, no streaming).
+    MCP transport over HTTP (supports JSON and SSE ``text/event-stream`` responses).
     """
 
     def __init__(self, base_url: str, headers: Dict[str, str] = None, timeout: int = 30):
@@ -193,10 +195,140 @@ class HttpTransport:
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             raise ValueError(f"Unsupported or invalid HTTP MCP URL: {base_url}")
         self._base_url = base_url.rstrip("/")
-        self._headers = headers or {}
+        self._headers = dict(headers) if headers else {}
         self._timeout = timeout
         self._request_id = 0
+        self._session_id: Optional[str] = None
         self._lock = threading.Lock()
+
+    @staticmethod
+    def parse_sse_events(raw_text: str) -> List[Dict[str, Any]]:
+        """Parse Server-Sent Events (text/event-stream) payloads into JSON-RPC dicts."""
+        if not raw_text:
+            return []
+        normalized = raw_text.replace("\r\n", "\n").replace("\r", "\n")
+        messages: List[Dict[str, Any]] = []
+        data_lines: List[str] = []
+
+        def _flush():
+            if not data_lines:
+                return
+            payload = "\n".join(data_lines).strip()
+            data_lines.clear()
+            if not payload or payload == "[DONE]":
+                return
+            try:
+                parsed = json.loads(payload)
+            except json.JSONDecodeError:
+                return
+            if isinstance(parsed, dict):
+                messages.append(parsed)
+
+        for line in normalized.split("\n"):
+            if line == "":
+                _flush()
+                continue
+            if line.startswith(":"):
+                continue
+            field, sep, value = line.partition(":")
+            if sep and value.startswith(" "):
+                value = value[1:]
+            if field == "data":
+                data_lines.append(value)
+
+        _flush()
+        return messages
+
+    @staticmethod
+    def _select_jsonrpc_message(messages: List[Dict[str, Any]],
+                                req_id: Optional[int] = None) -> Dict[str, Any]:
+        """Select the JSON-RPC response matching req_id from parsed SSE events."""
+        if req_id is not None:
+            for msg in messages:
+                if msg.get("id") == req_id and ("result" in msg or "error" in msg):
+                    return msg
+            for msg in messages:
+                if msg.get("id") == req_id:
+                    return msg
+        for msg in reversed(messages):
+            if "result" in msg or "error" in msg:
+                return msg
+        raise MCPError(-1, "HTTP transport error: No JSON-RPC response found in SSE stream")
+
+    @classmethod
+    def parse_sse_response(cls, raw_text: str, req_id: Optional[int] = None) -> Dict[str, Any]:
+        """Parse an SSE stream body and return the matching JSON-RPC message."""
+        events = cls.parse_sse_events(raw_text)
+        return cls._select_jsonrpc_message(events, req_id=req_id)
+
+    def _read_sse_response(self, resp: Any, req_id: Optional[int] = None) -> Dict[str, Any]:
+        """Read an SSE response stream incrementally or from a buffered body."""
+        readline_fn = getattr(resp, "readline", None)
+        if callable(readline_fn):
+            first_line = readline_fn()
+            if isinstance(first_line, (bytes, bytearray, str)):
+                messages: List[Dict[str, Any]] = []
+                data_lines: List[str] = []
+
+                def _flush_event() -> Optional[Dict[str, Any]]:
+                    if not data_lines:
+                        return None
+                    payload = "\n".join(data_lines).strip()
+                    data_lines.clear()
+                    if not payload or payload == "[DONE]":
+                        return None
+                    try:
+                        parsed = json.loads(payload)
+                    except json.JSONDecodeError:
+                        return None
+                    if not isinstance(parsed, dict):
+                        return None
+                    messages.append(parsed)
+                    if req_id is not None and parsed.get("id") == req_id and (
+                        "result" in parsed or "error" in parsed
+                    ):
+                        return parsed
+                    return None
+
+                line_obj: Any = first_line
+                while True:
+                    if isinstance(line_obj, (bytes, bytearray)):
+                        line_str = line_obj.decode("utf-8")
+                    elif isinstance(line_obj, str):
+                        line_str = line_obj
+                    else:
+                        break
+                    if line_str == "":
+                        break
+                    stripped = line_str.rstrip("\r\n")
+                    if stripped == "":
+                        matched = _flush_event()
+                        if matched is not None:
+                            return matched
+                    elif not stripped.startswith(":"):
+                        field, sep, value = stripped.partition(":")
+                        if sep and value.startswith(" "):
+                            value = value[1:]
+                        if field == "data":
+                            data_lines.append(value)
+                    line_obj = readline_fn()
+
+                matched = _flush_event()
+                if matched is not None:
+                    return matched
+                return self._select_jsonrpc_message(messages, req_id=req_id)
+
+        raw_bytes = resp.read()
+        raw_text = raw_bytes.decode("utf-8") if isinstance(raw_bytes, (bytes, bytearray)) else str(raw_bytes)
+        return self.parse_sse_response(raw_text, req_id=req_id)
+
+    def _build_headers(self, include_accept_sse: bool = False) -> Dict[str, str]:
+        headers = {**self._headers, "Content-Type": "application/json"}
+        if include_accept_sse and not any(k.lower() == "accept" for k in headers):
+            headers["Accept"] = "application/json, text/event-stream"
+        if self._session_id and not any(k.lower() == "mcp-session-id" for k in headers):
+            headers["Mcp-Session-Id"] = self._session_id
+        return headers
 
     def start(self):
         """Verify connectivity to the MCP HTTP server."""
@@ -225,7 +357,7 @@ class HttpTransport:
             request["params"] = params
 
         payload = json.dumps(request, ensure_ascii=False).encode("utf-8")
-        headers = {**self._headers, "Content-Type": "application/json"}
+        headers = self._build_headers(include_accept_sse=True)
 
         try:
             req = urllib.request.Request(
@@ -235,8 +367,30 @@ class HttpTransport:
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                body = resp.read().decode("utf-8")
-                response = json.loads(body)
+                resp_headers = getattr(resp, "headers", None)
+                content_type = ""
+                if resp_headers is not None:
+                    session_hdr = resp_headers.get("Mcp-Session-Id") or resp_headers.get("mcp-session-id")
+                    if isinstance(session_hdr, str) and session_hdr.strip():
+                        self._session_id = session_hdr.strip()
+                    raw_ct = resp_headers.get("Content-Type") or resp_headers.get("content-type")
+                    if isinstance(raw_ct, str):
+                        content_type = raw_ct.lower()
+
+                if "text/event-stream" in content_type:
+                    response = self._read_sse_response(resp, req_id=req_id)
+                else:
+                    raw_body = resp.read()
+                    body = raw_body.decode("utf-8") if isinstance(raw_body, (bytes, bytearray)) else str(raw_body)
+                    try:
+                        response = json.loads(body)
+                    except json.JSONDecodeError:
+                        if body.lstrip().startswith(("data:", "event:", ":")):
+                            response = self.parse_sse_response(body, req_id=req_id)
+                        else:
+                            raise
+        except MCPError:
+            raise
         except (urllib.error.URLError, json.JSONDecodeError, UnicodeDecodeError, TimeoutError, OSError) as exc:
             raise MCPError(-1, f"HTTP transport error: {exc}")
 
@@ -255,7 +409,7 @@ class HttpTransport:
         if params is not None:
             notification["params"] = params
         payload = json.dumps(notification, ensure_ascii=False).encode("utf-8")
-        headers = {**self._headers, "Content-Type": "application/json"}
+        headers = self._build_headers(include_accept_sse=True)
         try:
             req = urllib.request.Request(
                 self._base_url,
@@ -269,7 +423,7 @@ class HttpTransport:
             logger.debug("HTTP MCP notification %s failed: %s", method, exc)
 
     def stop(self):
-        pass  # stateless
+        self._session_id = None
 
 
 class MCPClient:
@@ -283,21 +437,134 @@ class MCPClient:
                  command: List[str] = None,
                  url: str = None,
                  env: Dict[str, str] = None,
-                 tool_allowlist: List[str] = None):
+                 tool_allowlist: List[str] = None,
+                 headers: Dict[str, str] = None,
+                 cwd: str = None,
+                 timeout: int = 30):
         self.server_name = server_name
         self._tools: Dict[str, MCPTool] = {}
         self._allowlist = set(tool_allowlist) if tool_allowlist is not None else None
 
-        if transport == "stdio":
+        normalized_transport = (transport or "").strip().lower()
+        if normalized_transport == "stdio":
             if not command:
                 raise ValueError("stdio transport requires a command list")
-            self._transport = StdioTransport(command, env=env)
-        elif transport == "http":
+            self._transport = StdioTransport(command, env=env, cwd=cwd)
+        elif normalized_transport in ("http", "sse"):
             if not url:
                 raise ValueError("http transport requires a url")
-            self._transport = HttpTransport(url)
+            self._transport = HttpTransport(url, headers=headers, timeout=timeout)
         else:
             raise ValueError(f"Unsupported transport: {transport}")
+
+    @classmethod
+    def load_from_config(cls, config_path: Union[str, Path]) -> List["MCPClient"]:
+        """
+        Instantiate MCPClient instances from an ``mcp-servers.json`` config file.
+
+        Supports standard ``{"mcpServers": {...}}``, ``{"servers": {...}}``,
+        list-based ``{"servers": [...]}``, and flat ``{"name": {...}}`` schemas.
+        Disabled entries (``disabled: true`` or ``enabled: false``) are skipped.
+        """
+        path = Path(config_path)
+        raw_text = path.read_text(encoding="utf-8")
+        try:
+            data = json.loads(raw_text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid MCP config JSON in {path}: {exc}") from exc
+
+        entries: List[Tuple[str, Dict[str, Any]]] = []
+        if isinstance(data, dict):
+            if "mcpServers" in data:
+                servers_obj = data["mcpServers"]
+            elif "servers" in data:
+                servers_obj = data["servers"]
+            else:
+                servers_obj = data
+
+            if isinstance(servers_obj, dict):
+                for name, cfg in servers_obj.items():
+                    if isinstance(cfg, dict):
+                        entries.append((str(name), cfg))
+                    else:
+                        raise ValueError(f"MCP server entry '{name}' must be an object")
+            elif isinstance(servers_obj, list):
+                for idx, cfg in enumerate(servers_obj, 1):
+                    if not isinstance(cfg, dict):
+                        raise ValueError(f"MCP server entry #{idx} must be an object")
+                    entries.append((str(cfg.get("name") or f"mcp-{idx}"), cfg))
+            else:
+                raise ValueError("MCP servers collection must be an object or list")
+        elif isinstance(data, list):
+            for idx, cfg in enumerate(data, 1):
+                if not isinstance(cfg, dict):
+                    raise ValueError(f"MCP server entry #{idx} must be an object")
+                entries.append((str(cfg.get("name") or f"mcp-{idx}"), cfg))
+        else:
+            raise ValueError("MCP config root must be a JSON object or array")
+
+        clients: List[MCPClient] = []
+        for name, cfg in entries:
+            if cfg.get("disabled") is True or cfg.get("enabled") is False:
+                logger.debug("Skipping disabled MCP server '%s'", name)
+                continue
+
+            raw_transport = (cfg.get("transport") or cfg.get("type") or "").strip().lower()
+            if not raw_transport:
+                if cfg.get("command") is not None:
+                    raw_transport = "stdio"
+                elif cfg.get("url") is not None:
+                    raw_transport = "http"
+
+            command: Optional[List[str]] = None
+            url: Optional[str] = cfg.get("url")
+
+            if raw_transport == "stdio":
+                raw_cmd = cfg.get("command")
+                raw_args = cfg.get("args") or []
+                if not isinstance(raw_args, list):
+                    raise ValueError(f"MCP server '{name}' args must be a list")
+                args_list = [str(a) for a in raw_args]
+                if isinstance(raw_cmd, list):
+                    command = [str(c) for c in raw_cmd] + args_list
+                elif isinstance(raw_cmd, str) and raw_cmd.strip():
+                    cmd_str = raw_cmd.strip()
+                    if args_list:
+                        command = [cmd_str] + args_list
+                    elif " " in cmd_str and not Path(cmd_str).exists():
+                        command = shlex.split(cmd_str)
+                    else:
+                        command = [cmd_str]
+
+            allowlist: Optional[List[str]] = None
+            for key in ("tool_allowlist", "toolAllowlist", "allowlist"):
+                if key in cfg:
+                    raw_allow = cfg[key]
+                    if raw_allow is not None and not isinstance(raw_allow, list):
+                        raise ValueError(f"MCP server '{name}' {key} must be a list")
+                    allowlist = [str(t) for t in raw_allow] if raw_allow is not None else None
+                    break
+
+            env = cfg.get("env")
+            if env is not None and not isinstance(env, dict):
+                raise ValueError(f"MCP server '{name}' env must be an object")
+            headers = cfg.get("headers")
+            if headers is not None and not isinstance(headers, dict):
+                raise ValueError(f"MCP server '{name}' headers must be an object")
+
+            clients.append(cls(
+                server_name=name,
+                transport=raw_transport or "stdio",
+                command=command,
+                url=url,
+                env={str(k): str(v) for k, v in env.items()} if env else None,
+                tool_allowlist=allowlist,
+                headers={str(k): str(v) for k, v in headers.items()} if headers else None,
+                cwd=cfg.get("cwd"),
+                timeout=int(cfg.get("timeout", 30)),
+            ))
+
+        return clients
 
     def connect(self):
         """Start transport and perform MCP initialization handshake."""

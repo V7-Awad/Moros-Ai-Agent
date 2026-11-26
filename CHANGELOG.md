@@ -14,6 +14,10 @@ All notable changes to the Moros AI Agent project are documented in this file.
 - **Parallel Deep Recon & Subagent Fan-Out**: Added `skills/deep-recon/SKILL.md` (`--deep-recon`), `SkillRunner.run_deep_recon()`, and `spawn_subagents_parallel` in `tools/agent_runtime.py`.
 - **AAIF Skill Frontmatter & Eval Harness**: Added YAML frontmatter parsing + `export_aaif_manifest()` in `tools/skill_registry.py`, plus deterministic safety/routing evaluations in `tools/eval_harness.py` and `evals/`.
 - **Dashboard Endpoints**: Added `/api/security/posture`, `/api/targets/<target>/costs`, `/api/targets/<target>/traces`, and `/api/targets/<target>/memory` in `dashboard/server.py`.
+- **OOB Callback Server & Dual-Auth IDOR Diffing (`tools/oob_server.py`, `tools/auth_diff.py`)**: Built-in HTTP/DNS canary token correlation server for blind XSS/SSRF/XXE (`--oob-url`) and multi-session User A vs User B vs Unauthenticated response diffing (`--cookie-b`, `--auth-header-b`).
+- **Sandboxed Execution & Per-Step Routing (`tools/skill_runner.py`, `tools/agent_runtime.py`, `tools/agent_security.py`)**: Custom skill scripts execute inside `LocalSandbox` with scrubbed secrets, optional `per_step_routing` dynamically selects per-step models, and `SKILL_TOOL_PERMISSIONS` maps standard agent tools cleanly across tiers.
+- **Dashboard Observability UI, MCP SSE & Arabic Reporting (`dashboard/static/index.html`, `tools/mcp_client.py`, `tools/report_i18n.py`)**: Interactive tabs for Costs, Traces, Memory, and OWASP Posture; SSE `text/event-stream` response parsing + `mcp-servers.json` loader; and `--lang ar --dialect msa|egyptian` bilingual reporting.
+- **Scheduler, A2A Protocol, Skill Learner & Juice Shop Benchmark (`tools/scheduler.py`, `tools/a2a_server.py`, `tools/skill_learner.py`, `evals/juice_shop_benchmark.py`)**: Scheduled/webhook scan manager, `/.well-known/agent.json` & `/api/a2a` endpoints, Trace2Skill candidate skill proposal generator (requiring explicit approval), and vulnerable-app TP/FP regression benchmark.
 
 ## [2.2.0] - 2026-11-24
 ### Added

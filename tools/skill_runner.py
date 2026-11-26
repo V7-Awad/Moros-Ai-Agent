@@ -25,13 +25,14 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 tools_dir = Path(__file__).parent.resolve()
 if str(tools_dir) not in sys.path:
     sys.path.insert(0, str(tools_dir))
 
 from agent_runtime import AgentRunner, AgentContext, AgentResult, ToolRegistry
+import sandbox_manager
 from scoped_http import ScopedHttpClient
 from finding_review import review_candidates
 from finding_dedupe import deduplicate_findings
@@ -42,7 +43,9 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 class SkillRunner:
     def __init__(self, target: str, target_dir: Path, llm_client=None,
-                 max_http_requests: int = 40, request_delay: float = 0.4):
+                 max_http_requests: int = 40, request_delay: float = 0.4,
+                 sandbox_mode: Optional[str] = None,
+                 max_subagents: Optional[int] = None):
         self.target = target
         self.target_dir = Path(target_dir)
         self.output_dir = self.target_dir / "output"
@@ -57,6 +60,15 @@ class SkillRunner:
         self.model_router = None
         self.trace_id = None
         self.mcp_clients = []
+        raw_sb = sandbox_mode if sandbox_mode is not None else os.environ.get("MOROS_SANDBOX_MODE", "local")
+        self.sandbox_mode = str(raw_sb or "local").strip().lower() or "local"
+        if max_subagents is not None:
+            self.max_subagents = max(0, int(max_subagents))
+        else:
+            try:
+                self.max_subagents = max(0, int(os.environ.get("MOROS_MAX_SUBAGENTS", 5)))
+            except ValueError:
+                self.max_subagents = 5
         self.http = ScopedHttpClient(target, max_requests=max_http_requests, delay_seconds=request_delay)
 
     @staticmethod
@@ -127,6 +139,21 @@ class SkillRunner:
                                          **evidence}, ensure_ascii=False) + "\n")
             self._recorded_evidence_ids.add(evidence_id)
         return evidence
+
+    def record_evidence(self, skill: str, artifact_ref: str, finding_type: str,
+                        claim: str, url: str = "") -> dict:
+        """Compatibility wrapper delegating to record_candidate_evidence."""
+        artifact_path = Path(artifact_ref)
+        if not artifact_path.is_absolute():
+            candidate = self.output_dir / artifact_ref
+            artifact_path = candidate if candidate.exists() else (self.target_dir / artifact_ref)
+        return self.record_candidate_evidence(
+            skill=skill,
+            finding_type=finding_type,
+            artifact_path=artifact_path,
+            endpoint={"url": url, "parameters": []},
+            claim=claim,
+        )
 
     def log_step(self, skill: str, log_name: str, message: str):
         """Append a message to a skill's step log file."""
@@ -1329,19 +1356,65 @@ class SkillRunner:
             self.log_step(skill_name, "step-custom-audit.log", f"Executing custom skill script: {exec_script.name}")
             cmd = [
                 sys.executable,
-                str(exec_script),
+                str(exec_script.resolve()),
                 "--target", self.target,
-                "--target-dir", str(self.target_dir),
-                "--output-dir", str(self.output_dir),
+                "--target-dir", str(self.target_dir.resolve()),
+                "--output-dir", str(self.output_dir.resolve()),
             ]
-            try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-                if proc.stdout:
-                    self.log_step(skill_name, "script-stdout.log", proc.stdout)
-                if proc.stderr:
-                    self.log_step(skill_name, "script-stderr.log", proc.stderr)
-            except Exception as e:
-                self.log_step(skill_name, "step-custom-audit.log", f"Script execution warning: {e}")
+            sandbox_mode = str(
+                getattr(self, "sandbox_mode", None) or os.environ.get("MOROS_SANDBOX_MODE", "local")
+            ).strip().lower() or "local"
+
+            if sandbox_mode == "none":
+                try:
+                    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                    if proc.stdout:
+                        self.log_step(skill_name, "script-stdout.log", proc.stdout)
+                    if proc.stderr:
+                        self.log_step(skill_name, "script-stderr.log", proc.stderr)
+                except Exception as e:
+                    self.log_step(skill_name, "step-custom-audit.log", f"Script execution warning: {e}")
+            else:
+                extra_env: Dict[str, str] = {}
+                if "MOROS_HTTP_REQUESTS_REMAINING" not in os.environ and hasattr(self.http, "max_requests"):
+                    extra_env["MOROS_HTTP_REQUESTS_REMAINING"] = str(
+                        max(0, self.http.max_requests - self.http.request_count)
+                    )
+                if "MOROS_REQUEST_DELAY" not in os.environ and hasattr(self.http, "delay_seconds"):
+                    extra_env["MOROS_REQUEST_DELAY"] = str(self.http.delay_seconds)
+                try:
+                    with sandbox_manager.create_sandbox(sandbox_mode, extra_env=extra_env, scrub_secrets=True) as sb:
+                        sb_res = sb.run_command(cmd, timeout=120)
+                    if sb_res.stdout:
+                        self.log_step(skill_name, "script-stdout.log", sb_res.stdout)
+                    if sb_res.stderr:
+                        self.log_step(skill_name, "script-stderr.log", sb_res.stderr)
+                    if sb_res.timed_out:
+                        self.log_step(
+                            skill_name,
+                            "step-custom-audit.log",
+                            f"Script execution timed out in {sb_res.backend} sandbox.",
+                        )
+                except Exception as e:
+                    self.log_step(
+                        skill_name,
+                        "step-custom-audit.log",
+                        f"Sandbox error ({e}); falling back to scrubbed subprocess.",
+                    )
+                    try:
+                        proc = subprocess.run(
+                            cmd,
+                            env=sandbox_manager.build_scrubbed_env(extra_env),
+                            capture_output=True,
+                            text=True,
+                            timeout=120,
+                        )
+                        if proc.stdout:
+                            self.log_step(skill_name, "script-stdout.log", proc.stdout)
+                        if proc.stderr:
+                            self.log_step(skill_name, "script-stderr.log", proc.stderr)
+                    except Exception as sub_e:
+                        self.log_step(skill_name, "step-custom-audit.log", f"Script execution warning: {sub_e}")
 
             # Read any findings generated by the script
             if out_findings.exists():
@@ -1365,6 +1438,10 @@ class SkillRunner:
             # Try LLM ReAct agent execution if LLM is available
             if self.llm and self.llm.is_available():
                 self.log_step(skill_name, "step-custom-audit.log", f"Launching autonomous ReAct agent for {title} with {self.llm.provider}/{self.llm.model}")
+                sandbox_mode = str(
+                    getattr(self, "sandbox_mode", None) or os.environ.get("MOROS_SANDBOX_MODE", "local")
+                ).strip().lower() or "local"
+                max_subagents = getattr(self, "max_subagents", 5)
                 ctx = AgentContext(
                     target=self.target,
                     target_dir=self.target_dir,
@@ -1378,10 +1455,15 @@ class SkillRunner:
                     },
                     budget={"max_steps": 6, "max_tokens": 4000, "timeout_seconds": 120,
                             "request_budget": max(0, self.http.max_requests - self.http.request_count),
-                            "request_delay": self.http.delay_seconds}
+                            "request_delay": self.http.delay_seconds,
+                            "max_subagents": max_subagents},
+                    max_subagents=max_subagents,
+                    sandbox_mode=sandbox_mode,
                 )
                 tools = build_default_agent_tools(
-                    ctx, llm_client=self.llm, allow_subagents=True, http_client=self.http
+                    ctx, llm_client=self.llm, allow_subagents=True,
+                    max_subagents=max_subagents, http_client=self.http,
+                    sandbox_mode=sandbox_mode,
                 )
                 for client in getattr(self, "mcp_clients", []) or []:
                     try:
@@ -1412,6 +1494,8 @@ class SkillRunner:
                     action_budget=action_budget,
                     model_router=getattr(self, "model_router", None),
                     trace_id=getattr(self, "trace_id", None),
+                    max_subagents=max_subagents,
+                    sandbox_mode=sandbox_mode,
                 )
                 agent_res = runner.run(ctx, tools, system_prompt, user_goal)
                 summary = agent_res.summary
@@ -1451,11 +1535,12 @@ class SkillRunner:
         }, indent=2), encoding="utf-8")
 
         for f in findings:
-            self.record_evidence(
+            self.record_candidate_evidence(
                 skill=skill_name,
-                artifact_ref=f"findings/candidates-{skill_name}.json",
                 finding_type=f.get("title", title),
-                claim=f.get("notes", title)
+                artifact_path=out_findings,
+                endpoint={"url": f.get("url", ""), "parameters": []},
+                claim=f.get("notes", title),
             )
 
         self.log_step(skill_name, "step-custom-audit.log", f"{title} completed: {len(findings)} candidates recorded.")
@@ -1690,7 +1775,10 @@ class SkillRunner:
             if f.get("poc_py"):
                 md += f"- **Python Reproduction Script:** `{f.get('poc_py')}`\n"
             for evidence in f.get("evidence", []):
-                md += f"- **Evidence:** `{evidence.get('evidence_id', 'unlinked')}` from `{evidence.get('source_artifact', 'unknown source')}` (SHA256: `{evidence.get('source_sha256', 'unavailable')}`)\n"
+                if isinstance(evidence, dict):
+                    md += f"- **Evidence:** `{evidence.get('evidence_id', 'unlinked')}` from `{evidence.get('source_artifact', 'unknown source')}` (SHA256: `{evidence.get('source_sha256', 'unavailable')}`)\n"
+                else:
+                    md += f"- **Evidence:** `{evidence}`\n"
             if f.get("curl"):
                 md += f"- **Reproduction cURL:**\n```bash\n{f.get('curl')}\n```\n"
             if f.get("notes"):
@@ -1706,6 +1794,14 @@ class SkillRunner:
             md += "\n"
 
         report_md_file.write_text(md, encoding="utf-8")
+        if os.environ.get("MOROS_REPORT_LANG", "en").lower() == "ar":
+            try:
+                from report_i18n import format_report_markdown
+                dialect = os.environ.get("MOROS_REPORT_DIALECT", "msa")
+                ar_md = format_report_markdown(self.target, all_findings, lang="ar", dialect=dialect)
+                (report_dir / f"hackbot-report-{self.target}-{date_str}-ar.md").write_text(ar_md, encoding="utf-8")
+            except Exception as exc:
+                self.log_step(skill, "step-08-i18n-error.log", f"Arabic report generation notice: {exc}")
         report_json_file.write_text(json.dumps({"target": self.target, "summary": {
             "triage_items": len(all_findings), "raw_records": raw_findings_count,
             "raw_occurrences": raw_record_count, "unverified_candidates": candidate_count,

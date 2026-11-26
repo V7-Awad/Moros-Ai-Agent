@@ -10,10 +10,14 @@ Provides:
 - Explicit LLM_UNAVAILABLE state detection & offline fallback
 """
 
+import inspect
 import json
 import logging
+import os
 import re
+import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -27,6 +31,7 @@ if str(_tools_dir) not in sys.path:
 
 from conversation_store import ConversationStore, safe_agent_name
 from llm_client import LLMClient
+from sandbox_manager import create_sandbox
 from agent_security import (
     ActionBudget,
     check_tool_permission,
@@ -36,6 +41,56 @@ from agent_security import (
 )
 
 logger = logging.getLogger("agent-runtime")
+
+
+def run_sandboxed_command(
+    command: List[str],
+    sandbox_mode: str = "local",
+    timeout: int = 60,
+    extra_env: Optional[Dict[str, str]] = None,
+    cwd: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Execute a shell/custom command with optional SandboxManager isolation."""
+    mode = (sandbox_mode or "local").strip().lower()
+    if mode == "none":
+        env = dict(os.environ)
+        if extra_env:
+            env.update(extra_env)
+        started = time.monotonic()
+        try:
+            proc = subprocess.run(
+                command,
+                cwd=cwd,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            return {
+                "status": "success" if proc.returncode == 0 else "error",
+                "exit_code": proc.returncode,
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+                "duration_ms": round((time.monotonic() - started) * 1000, 1),
+                "backend": "none",
+                "timed_out": False,
+            }
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "status": "error",
+                "exit_code": -1,
+                "stdout": (exc.stdout or "") if isinstance(exc.stdout, str) else "",
+                "stderr": f"Command timed out after {timeout}s",
+                "duration_ms": round((time.monotonic() - started) * 1000, 1),
+                "backend": "none",
+                "timed_out": True,
+            }
+
+    with create_sandbox(mode, extra_env=extra_env, scrub_secrets=True) as sb:
+        res = sb.run_command(command, timeout=timeout, cwd=cwd)
+    out = res.to_dict()
+    out["status"] = "success" if res.exit_code == 0 and not res.timed_out else "error"
+    return out
 
 
 @dataclass
@@ -54,6 +109,8 @@ class AgentContext:
         "max_history_items": 40,
         "max_prompt_chars": 48000,
     })
+    max_subagents: int = 5
+    sandbox_mode: str = "local"
 
 
 @dataclass
@@ -79,11 +136,13 @@ class AgentResult:
 
 
 class ToolDefinition:
-    def __init__(self, name: str, func: Callable, description: str, parameters: Dict[str, Any] = None):
+    def __init__(self, name: str, func: Callable, description: str,
+                 parameters: Dict[str, Any] = None, sandboxed: bool = False):
         self.name = name
         self.func = func
         self.description = description
         self.parameters = parameters or {}
+        self.sandboxed = sandboxed
 
     def to_schema(self) -> Dict[str, Any]:
         return {
@@ -97,8 +156,9 @@ class ToolRegistry:
     def __init__(self):
         self._tools: Dict[str, ToolDefinition] = {}
 
-    def register(self, name: str, func: Callable, description: str, parameters: Dict[str, Any] = None):
-        self._tools[name] = ToolDefinition(name, func, description, parameters)
+    def register(self, name: str, func: Callable, description: str,
+                 parameters: Dict[str, Any] = None, sandboxed: bool = False):
+        self._tools[name] = ToolDefinition(name, func, description, parameters, sandboxed=sandboxed)
 
     def register_mcp_client(self, mcp_client, prefix: str = "") -> int:
         """Mount discovered tools from an external MCPClient into this registry."""
@@ -127,12 +187,34 @@ class ToolRegistry:
     def list_schemas(self) -> List[Dict[str, Any]]:
         return [t.to_schema() for t in self._tools.values()]
 
-    def execute(self, name: str, kwargs: Dict[str, Any] = None, timeout_seconds: int = 60) -> Dict[str, Any]:
+    def execute_sandboxed(self, command: List[str], sandbox_mode: str = "local",
+                          timeout_seconds: int = 60, extra_env: Optional[Dict[str, str]] = None,
+                          cwd: Optional[str] = None) -> Dict[str, Any]:
+        """Run a subprocess command using SandboxManager isolation."""
+        return run_sandboxed_command(
+            command,
+            sandbox_mode=sandbox_mode,
+            timeout=timeout_seconds,
+            extra_env=extra_env,
+            cwd=cwd,
+        )
+
+    def execute(self, name: str, kwargs: Dict[str, Any] = None, timeout_seconds: int = 60,
+                sandbox_mode: Optional[str] = None) -> Dict[str, Any]:
         tool = self._tools.get(name)
         if not tool:
             return {"status": "error", "error": f"Tool '{name}' not found in registry"}
 
-        kwargs = kwargs or {}
+        kwargs = dict(kwargs or {})
+        if tool.sandboxed and sandbox_mode is not None:
+            try:
+                sig = inspect.signature(tool.func)
+                if "sandbox_mode" in sig.parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+                ):
+                    kwargs.setdefault("sandbox_mode", sandbox_mode)
+            except (TypeError, ValueError):
+                pass
         start_time = time.time()
         try:
             result = tool.func(**kwargs)
@@ -151,7 +233,10 @@ class AgentRunner:
                  cost_tracker=None, tracer=None, memory_manager=None,
                  action_budget: Optional[ActionBudget] = None,
                  model_router=None, trace_id: Optional[str] = None,
-                 enforce_permissions: bool = False):
+                 enforce_permissions: bool = False,
+                 max_subagents: Optional[int] = None,
+                 sandbox_mode: Optional[str] = None,
+                 per_step_routing: bool = False):
         self.llm = llm_client or LLMClient(provider="auto")
         self.cost_tracker = cost_tracker
         self.tracer = tracer
@@ -160,6 +245,9 @@ class AgentRunner:
         self.model_router = model_router
         self.trace_id = trace_id
         self.enforce_permissions = enforce_permissions
+        self.max_subagents = max(0, int(max_subagents)) if max_subagents is not None else None
+        self.sandbox_mode = sandbox_mode.strip().lower() if sandbox_mode else None
+        self.per_step_routing = per_step_routing
 
     def run(self, context: AgentContext, tools: ToolRegistry, system_prompt: str, user_goal: str,
             fallback_fn: Optional[Callable[[AgentContext], AgentResult]] = None,
@@ -243,6 +331,21 @@ class AgentRunner:
         findings_accumulated: List[Dict[str, Any]] = []
         artifacts_accumulated: List[str] = []
         llm_failure = None
+        last_provider = getattr(self.llm, "provider", "auto")
+        last_model = getattr(self.llm, "model", "default")
+
+        if self.max_subagents is not None:
+            effective_max_subagents = self.max_subagents
+        elif "max_subagents" in context.budget:
+            effective_max_subagents = max(0, int(context.budget["max_subagents"]))
+        else:
+            effective_max_subagents = max(0, int(getattr(context, "max_subagents", 5)))
+        effective_sandbox_mode = (
+            self.sandbox_mode
+            or getattr(context, "sandbox_mode", None)
+            or os.environ.get("MOROS_SANDBOX_MODE", "local")
+        ).strip().lower() or "local"
+        subagent_calls = 0
 
         step = 0
         started_at = time.monotonic()
@@ -268,6 +371,9 @@ class AgentRunner:
             step += 1
             logger.info(f"[{agent_id}] ReAct Step {step}/{max_steps}")
 
+            step_llm, step_provider, step_model = self._resolve_step_llm(current_prompt, step)
+            last_provider, last_model = step_provider, step_model
+
             # Send prompt to LLM (expanded context window)
             max_history_items = context.budget.get("max_history_items", 40)
             max_prompt_chars = context.budget.get("max_prompt_chars", 48000)
@@ -276,7 +382,7 @@ class AgentRunner:
                 for item in history[-max_history_items:]
             )[-max_prompt_chars:]
             llm_t0 = time.monotonic()
-            llm_response = self.llm.complete(
+            llm_response = step_llm.complete(
                 step_prompt,
                 system_prompt=full_system_prompt,
                 temperature=0.1,
@@ -285,11 +391,11 @@ class AgentRunner:
             llm_ms = (time.monotonic() - llm_t0) * 1000
 
             if not llm_response:
-                llm_failure = self.llm.last_error or "empty response"
+                llm_failure = getattr(step_llm, "last_error", None) or "empty response"
                 logger.warning(f"[{agent_id}] LLM request failed on step {step}: {llm_failure}")
                 break
 
-            usage = getattr(self.llm, "last_usage", None) or {
+            usage = getattr(step_llm, "last_usage", None) or {
                 "input_tokens": max(1, (len(step_prompt) + len(full_system_prompt)) // 4),
                 "output_tokens": max(1, len(llm_response) // 4),
             }
@@ -299,8 +405,8 @@ class AgentRunner:
             if self.model_router:
                 step_cost = self.model_router.record_usage(
                     in_tok, out_tok,
-                    provider=getattr(self.llm, "provider", ""),
-                    model=getattr(self.llm, "model", ""),
+                    provider=step_provider,
+                    model=step_model,
                 )
             elif self.cost_tracker:
                 step_cost = (in_tok * 0.5 / 1_000_000) + (out_tok * 1.5 / 1_000_000)
@@ -308,8 +414,8 @@ class AgentRunner:
                 self.cost_tracker.record(
                     skill=context.skill,
                     step=step,
-                    provider=getattr(self.llm, "provider", "auto"),
-                    model=getattr(self.llm, "model", "default"),
+                    provider=step_provider,
+                    model=step_model,
                     input_tokens=in_tok,
                     output_tokens=out_tok,
                     cost_usd=step_cost,
@@ -319,8 +425,8 @@ class AgentRunner:
                 self.tracer.record_llm_call(
                     active_trace_id,
                     parent_id=skill_span.span_id if skill_span else "",
-                    provider=getattr(self.llm, "provider", "auto"),
-                    model=getattr(self.llm, "model", "default"),
+                    provider=step_provider,
+                    model=step_model,
                     input_tokens=in_tok,
                     output_tokens=out_tok,
                     cost_usd=step_cost,
@@ -355,7 +461,7 @@ class AgentRunner:
                     findings=findings_accumulated,
                     artifacts=artifacts_accumulated,
                     next_actions=["review-skill", "report-conglomeration"],
-                    usage={"steps": step, "model": self.llm.model, "provider": self.llm.provider},
+                    usage={"steps": step, "model": last_model, "provider": last_provider},
                     reasoning_steps=reasoning_steps
                 ))
 
@@ -386,7 +492,7 @@ class AgentRunner:
                     findings=findings_accumulated,
                     artifacts=artifacts_accumulated,
                     next_actions=["review-skill", "report-conglomeration"],
-                    usage={"steps": step, "model": self.llm.model, "provider": self.llm.provider},
+                    usage={"steps": step, "model": last_model, "provider": last_provider},
                     reasoning_steps=reasoning_steps
                 ))
 
@@ -416,13 +522,45 @@ class AgentRunner:
                     history.append({"role": "user", "content": f"Observation: {obs_str}"})
                     continue
 
+            if tool_name == "spawn_subagent":
+                if subagent_calls >= effective_max_subagents:
+                    tool_output = {
+                        "status": "error",
+                        "error": f"Maximum subagents limit ({effective_max_subagents}) reached for this session.",
+                    }
+                    obs_str = json.dumps(tool_output, default=str)
+                    record(agent_id, "observation", obs_str, tool=tool_name, run_id=context.run_id)
+                    history.append({"role": "user", "content": f"Observation: {obs_str}"})
+                    continue
+                subagent_calls += 1
+            elif tool_name == "spawn_subagents_parallel":
+                remaining_sub = max(0, effective_max_subagents - subagent_calls)
+                tasks_arg = parsed_args.get("tasks") if isinstance(parsed_args, dict) else None
+                if remaining_sub <= 0:
+                    tool_output = {
+                        "status": "error",
+                        "error": f"Maximum subagents limit ({effective_max_subagents}) reached for this session.",
+                    }
+                    obs_str = json.dumps(tool_output, default=str)
+                    record(agent_id, "observation", obs_str, tool=tool_name, run_id=context.run_id)
+                    history.append({"role": "user", "content": f"Observation: {obs_str}"})
+                    continue
+                if isinstance(tasks_arg, list):
+                    if len(tasks_arg) > remaining_sub:
+                        parsed_args["tasks"] = tasks_arg[:remaining_sub]
+                    subagent_calls += len(parsed_args["tasks"])
+
             print(f"  ⚡ \033[33m[{agent_id.upper()} ACTION]\033[0m \033[1m{tool_name}\033[0m({args_str[:120]})")
             reasoning_steps.append(f"Step {step}: Invoked {tool_name}")
             record(agent_id, "tool_call", f"Calling {tool_name} with args {parsed_args}", tool=tool_name, run_id=context.run_id)
 
             # Execute tool safely via registry
             tool_t0 = time.monotonic()
-            tool_output = tools.execute(tool_name, parsed_args, timeout_seconds=context.budget.get("timeout_seconds", 120))
+            tool_def = tools.get(tool_name)
+            exec_kwargs: Dict[str, Any] = {"timeout_seconds": context.budget.get("timeout_seconds", 120)}
+            if tool_def and getattr(tool_def, "sandboxed", False):
+                exec_kwargs["sandbox_mode"] = effective_sandbox_mode
+            tool_output = tools.execute(tool_name, parsed_args, **exec_kwargs)
             tool_ms = (time.monotonic() - tool_t0) * 1000
             obs_str = json.dumps(tool_output, default=str)
 
@@ -503,9 +641,33 @@ class AgentRunner:
             findings=findings_accumulated,
             artifacts=artifacts_accumulated,
             next_actions=["review-skill"],
-            usage={"steps": step, "model": self.llm.model, "provider": self.llm.provider},
+            usage={"steps": step, "model": last_model, "provider": last_provider},
             reasoning_steps=reasoning_steps
         ))
+
+    def _resolve_step_llm(self, current_prompt: str, step: int):
+        """Resolve (llm_client, provider, model) for a ReAct step using ModelRouter when enabled."""
+        step_llm = self.llm
+        step_provider = getattr(self.llm, "provider", "auto")
+        step_model = getattr(self.llm, "model", "default")
+        if self.per_step_routing and self.model_router is not None:
+            try:
+                decision = self.model_router.select_model(current_prompt)
+                if decision and decision.provider and decision.provider != "auto":
+                    step_provider = decision.provider
+                    step_model = decision.model
+                    if (
+                        isinstance(self.llm, LLMClient)
+                        and type(self.llm).complete is LLMClient.complete
+                        and "complete" not in getattr(self.llm, "__dict__", {})
+                    ):
+                        candidate = LLMClient(provider=decision.provider, model=decision.model)
+                        if candidate.is_available():
+                            step_llm = candidate
+                            step_model = candidate.model or decision.model
+            except Exception as exc:
+                logger.debug("Per-step routing skipped on step %d: %s", step, exc)
+        return step_llm, step_provider, step_model
 
     @staticmethod
     def _format_tools_prompt(schemas: List[Dict[str, Any]]) -> str:
@@ -541,14 +703,32 @@ def build_default_agent_tools(
     context: AgentContext,
     llm_client: Optional[LLMClient] = None,
     allow_subagents: bool = True,
-    max_subagents: int = 5,
+    max_subagents: Optional[int] = None,
     http_client=None,
+    sandbox_mode: Optional[str] = None,
 ) -> ToolRegistry:
     """
     Constructs a full-featured offensive security toolkit for Moros AI agents.
     Provides HTTP, Code Search, Endpoint Discovery, Finding Recording, and
     Dynamic Autonomous Subagent Spawning.
     """
+    if max_subagents is None:
+        raw_max = context.budget.get("max_subagents", getattr(context, "max_subagents", None))
+        if raw_max is None:
+            raw_max = os.environ.get("MOROS_MAX_SUBAGENTS", 5)
+        try:
+            effective_max_subagents = max(0, int(raw_max))
+        except (TypeError, ValueError):
+            effective_max_subagents = 5
+    else:
+        effective_max_subagents = max(0, int(max_subagents))
+
+    effective_sandbox_mode = (
+        sandbox_mode
+        or getattr(context, "sandbox_mode", None)
+        or os.environ.get("MOROS_SANDBOX_MODE", "local")
+    ).strip().lower() or "local"
+
     registry = ToolRegistry()
     if http_client is None:
         from scoped_http import ScopedHttpClient
@@ -696,15 +876,18 @@ def build_default_agent_tools(
     # Tool 5: spawn_subagent (Autonomous dynamic subagent delegation)
     if allow_subagents:
         subagents_spawned = [0]
+        subagent_lock = threading.Lock()
 
         def spawn_subagent(role: str, goal: str, target_url: str = "", context_notes: str = "") -> Dict[str, Any]:
             """Autonomously spawn a specialized subagent to investigate a specific component or endpoint."""
-            if subagents_spawned[0] >= max_subagents:
-                return {"status": "error", "error": f"Maximum subagents limit ({max_subagents}) reached for this session."}
+            with subagent_lock:
+                if subagents_spawned[0] >= effective_max_subagents:
+                    return {"status": "error", "error": f"Maximum subagents limit ({effective_max_subagents}) reached for this session."}
 
-            subagents_spawned[0] += 1
-            sub_id = f"subagent-{safe_agent_name(role)}-{subagents_spawned[0]}"
-            logger.info(f"[{context.skill}] 🤖 Spawning autonomous subagent #{subagents_spawned[0]}: {role} ('{goal}')")
+                subagents_spawned[0] += 1
+                sub_index = subagents_spawned[0]
+            sub_id = f"subagent-{safe_agent_name(role)}-{sub_index}"
+            logger.info(f"[{context.skill}] 🤖 Spawning autonomous subagent #{sub_index}: {role} ('{goal}')")
 
             sub_context = AgentContext(
                 target=context.target,
@@ -712,7 +895,9 @@ def build_default_agent_tools(
                 skill=sub_id,
                 run_id=context.run_id,
                 scope=context.scope,
-                budget={"max_steps": 15, "max_tokens": 8192, "timeout_seconds": 300}
+                budget={"max_steps": 15, "max_tokens": 8192, "timeout_seconds": 300},
+                max_subagents=0,
+                sandbox_mode=effective_sandbox_mode,
             )
 
             # Child gets standard toolkit without recursive subagent spawning
@@ -720,10 +905,16 @@ def build_default_agent_tools(
                 sub_context,
                 llm_client=llm_client,
                 allow_subagents=False,
+                max_subagents=0,
                 http_client=http_client,
+                sandbox_mode=effective_sandbox_mode,
             )
 
-            runner = AgentRunner(llm_client=llm_client)
+            runner = AgentRunner(
+                llm_client=llm_client,
+                max_subagents=0,
+                sandbox_mode=effective_sandbox_mode,
+            )
             system_prompt = (
                 f"Role: {role} security testing module for target '{context.target}'.\n"
                 f"Objective: {goal}\n"
@@ -756,13 +947,14 @@ def build_default_agent_tools(
             if not isinstance(tasks, list) or not tasks:
                 return {"status": "error", "error": "tasks must be a non-empty list of {role, goal, target_url?, context_notes?}"}
 
-            remaining = max(0, max_subagents - subagents_spawned[0])
+            with subagent_lock:
+                remaining = max(0, effective_max_subagents - subagents_spawned[0])
             batch = tasks[:remaining]
             if not batch:
-                return {"status": "error", "error": f"Maximum subagents limit ({max_subagents}) reached."}
+                return {"status": "error", "error": f"Maximum subagents limit ({effective_max_subagents}) reached."}
 
             results = []
-            with ThreadPoolExecutor(max_workers=min(4, len(batch))) as pool:
+            with ThreadPoolExecutor(max_workers=min(max(1, effective_max_subagents), len(batch), 8)) as pool:
                 futures = [
                     pool.submit(
                         spawn_subagent,

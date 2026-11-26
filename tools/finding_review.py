@@ -66,7 +66,7 @@ def review_candidates(target: str, target_dir: Path, findings: List[Dict[str, An
         if not isinstance(evidence_rows, list):
             evidence_rows = []
         source = finding.get("source_artifact", "")
-        if not source and evidence_rows:
+        if not source and evidence_rows and isinstance(evidence_rows[0], dict):
             source = evidence_rows[0].get("source_artifact", "")
         path = _artifact_path(target_dir, source) if source else None
         exists = bool(path and path.is_file())

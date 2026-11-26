@@ -18,7 +18,25 @@ while _project_root != _project_root.parent:
 sys.path.insert(0, str(_project_root / "tools"))
 
 from scope_validator import ScopeValidator
-from scoped_http import ScopedHttpClient
+from scoped_http import ScopedHttpClient, check_checkpoint_approval, is_gated_post_enabled
+from checkpoint_manager import CheckpointManager
+
+
+_RATE_LIMIT_HEADER_KEYS = {
+    "retry-after",
+    "x-ratelimit-limit",
+    "x-ratelimit-remaining",
+    "x-ratelimit-reset",
+    "ratelimit-limit",
+    "ratelimit-remaining",
+    "ratelimit-reset",
+}
+
+
+def _has_rate_limit_headers(headers: dict) -> bool:
+    if not isinstance(headers, dict):
+        return False
+    return any(str(k).lower() in _RATE_LIMIT_HEADER_KEYS for k in headers)
 
 
 def _parse_budget(default: int, cap: int) -> int:
@@ -118,26 +136,99 @@ def main():
                 scope_validator=validator,
             )
             base_url = client.base_url.rstrip("/")
+            cm = CheckpointManager(args.target, Path(args.target_dir)) if is_gated_post_enabled() else None
+            post_client = None
+            post_used = 0
 
             for ep in auth_eps[:2]:
+                if client.request_count + post_used >= req_budget:
+                    break
                 full_url = ep if "://" in ep else f"{base_url}/{ep.lstrip('/')}"
+
+                # Prefer HITL-gated POST burst when explicitly enabled and approved
+                tested_post = False
+                if cm is not None and (req_budget - (client.request_count + post_used)) >= 3:
+                    cp_type = "Rate Limit POST Burst"
+                    reason = f"Send bounded non-destructive POST burst to check rate-limiting on {full_url}"
+                    if check_checkpoint_approval(cm, cp_type, full_url, method="POST", reason=reason, risk_level="LOW"):
+                        tested_post = True
+                        if post_client is None:
+                            remaining = max(1, req_budget - client.request_count)
+                            post_client = ScopedHttpClient(
+                                target=args.target,
+                                max_requests=remaining,
+                                delay_seconds=0.1,
+                                scope_validator=validator,
+                                allow_state_changing=True,
+                                approval_callback=lambda m, u, b: check_checkpoint_approval(
+                                    cm, cp_type, u, method=m, reason=reason, risk_level="LOW"
+                                ),
+                            )
+                        post_codes = []
+                        saw_rl_headers = False
+                        stopped = False
+                        for _ in range(5):
+                            if client.request_count + post_used >= req_budget:
+                                break
+                            resp = post_client.post(
+                                full_url,
+                                json_body={"username": "moros_ratelimit_probe", "password": "moros_invalid_probe"},
+                            )
+                            post_used = post_client.request_count
+                            if resp.get("status") in ("budget_exhausted", "blocked_scope", "blocked"):
+                                stopped = True
+                                break
+                            post_codes.append(resp.get("status_code", 0))
+                            if _has_rate_limit_headers(resp.get("headers", {})):
+                                saw_rl_headers = True
+                        if (
+                            len(post_codes) == 5
+                            and not saw_rl_headers
+                            and all(code in (200, 401, 403) for code in post_codes)
+                        ):
+                            findings.append({
+                                "title": f"Missing Rate Limiting on {ep[:50]}",
+                                "severity": "MEDIUM",
+                                "url": full_url,
+                                "cwe": "CWE-770",
+                                "evidence": f"Bounded POST burst of 5 requests returned status codes {post_codes} without rate-limit headers.",
+                                "notes": "No HTTP 429 Too Many Requests or rate-limiting headers detected on authentication POST endpoint.",
+                                "status": "candidate",
+                                "validation_status": "unverified",
+                                "curl": f"curl -s -i -X POST '{full_url}'",
+                            })
+                        if stopped:
+                            break
+
+                if tested_post:
+                    continue
+
                 responses = []
+                saw_rl_headers = False
                 stopped = False
                 for _ in range(5):
+                    if client.request_count + post_used >= req_budget:
+                        break
                     resp = client.get(full_url)
-                    if resp.get("status") in ("budget_exhausted", "blocked_scope"):
+                    if resp.get("status") in ("budget_exhausted", "blocked_scope", "blocked"):
                         stopped = True
                         break
                     responses.append(resp.get("status_code", 0))
+                    if _has_rate_limit_headers(resp.get("headers", {})):
+                        saw_rl_headers = True
 
-                # If all 5 requests succeeded without 429
-                if len(responses) == 5 and all(code in (200, 401, 403) and code != 429 for code in responses):
+                # Only flag if all 5 requests returned 200/401/403 with no 429 and no rate-limit headers
+                if (
+                    len(responses) == 5
+                    and not saw_rl_headers
+                    and all(code in (200, 401, 403) for code in responses)
+                ):
                     findings.append({
                         "title": f"Missing Rate Limiting on {ep[:50]}",
                         "severity": "LOW",
                         "url": full_url,
                         "cwe": "CWE-770",
-                        "evidence": f"Burst of 5 requests returned status codes: {responses}",
+                        "evidence": f"Burst of 5 GET requests returned status codes {responses} without rate-limit headers.",
                         "notes": "No HTTP 429 Too Many Requests or rate limiting headers detected on authentication endpoint.",
                         "status": "candidate",
                         "validation_status": "unverified",

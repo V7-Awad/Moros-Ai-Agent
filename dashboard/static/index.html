@@ -1087,6 +1087,39 @@
             <small>Conglomerated audit</small>
           </div>
         </div>
+        <div class="nav-group-label">Observability &amp; Security</div>
+        <div class="part" id="tabBtn-costs" onclick="switchTab('costs')">
+          <span class="chip">09</span>
+          <div>
+            <strong>Costs &amp; Receipts</strong>
+            <small>LLM spend &amp; tokens</small>
+          </div>
+          <span class="nav-badge" id="navCostsBadge">$0.00</span>
+        </div>
+        <div class="part" id="tabBtn-traces" onclick="switchTab('traces')">
+          <span class="chip">10</span>
+          <div>
+            <strong>Execution Traces</strong>
+            <small>Show Your Work spans</small>
+          </div>
+          <span class="nav-badge" id="navTracesBadge">0</span>
+        </div>
+        <div class="part" id="tabBtn-memory" onclick="switchTab('memory')">
+          <span class="chip">11</span>
+          <div>
+            <strong>Target Memory</strong>
+            <small>Facts, steps &amp; events</small>
+          </div>
+          <span class="nav-badge" id="navMemoryBadge">0</span>
+        </div>
+        <div class="part" id="tabBtn-posture" onclick="switchTab('posture')">
+          <span class="chip">12</span>
+          <div>
+            <strong>Security Posture</strong>
+            <small>OWASP Agentic Top 10</small>
+          </div>
+          <span class="nav-badge" id="navPostureBadge">0/10</span>
+        </div>
       </nav>
 
       <!-- System Status Widget -->
@@ -1421,6 +1454,232 @@
         </div>
       </section>
 
+      <!-- ==================== TAB 9: COSTS & RECEIPTS ==================== -->
+      <section id="tab-costs" style="display:none;" class="enter">
+        <div class="card" style="margin-bottom: 20px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+            <div>
+              <h1 style="margin:0 0 4px; font:700 20px 'Space Grotesk', system-ui, sans-serif; color:#fff;">LLM Spend &amp; Cost Receipts</h1>
+              <p class="hint" style="margin:0;">Per-call token accounting, budget utilization, and skill cost attribution</p>
+            </div>
+            <button onclick="fetchCosts()" class="ghost" style="padding:6px 14px; font-size:12px;">Refresh Costs</button>
+          </div>
+        </div>
+
+        <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));">
+          <div class="stat-card cyan">
+            <span class="label" style="color:var(--cyan);">Total Spend</span>
+            <div id="costTotalUsd" class="score">$0.0000</div>
+            <span class="sub" id="costBudgetCap">Budget cap: N/A</span>
+          </div>
+          <div class="stat-card blue">
+            <span class="label" style="color:var(--blue);">LLM Calls</span>
+            <div id="costTotalCalls" class="score">0</div>
+            <span class="sub" id="costReceiptTime">No receipt recorded</span>
+          </div>
+          <div class="stat-card">
+            <span class="label">Input Tokens</span>
+            <div id="costInputTokens" class="score">0</div>
+            <span class="sub">Prompt tokens</span>
+          </div>
+          <div class="stat-card">
+            <span class="label">Output Tokens</span>
+            <div id="costOutputTokens" class="score">0</div>
+            <span class="sub">Completion tokens</span>
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom: 20px; padding:0; overflow:hidden;">
+          <div style="padding:16px 20px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center;">
+            <h2 style="font-size:14px; text-transform:uppercase; letter-spacing:.08em; margin:0;">Per-Skill Cost Breakdown</h2>
+          </div>
+          <div class="data-table-wrap" style="border:none;">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Skill</th>
+                  <th>Calls</th>
+                  <th>Input Tokens</th>
+                  <th>Output Tokens</th>
+                  <th style="text-align:right;">Cost (USD)</th>
+                </tr>
+              </thead>
+              <tbody id="costsSkillTableBody">
+                <tr><td colspan="5" style="text-align:center; padding:24px; color:var(--mut);">No cost breakdown recorded yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card" style="padding:0; overflow:hidden;">
+          <div style="padding:16px 20px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center;">
+            <h2 style="font-size:14px; text-transform:uppercase; letter-spacing:.08em; margin:0;">LLM Call Receipts</h2>
+          </div>
+          <div class="data-table-wrap" style="border:none;">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Timestamp</th>
+                  <th>Skill / Step</th>
+                  <th>Provider / Model</th>
+                  <th>Tokens (In / Out)</th>
+                  <th>Duration</th>
+                  <th style="text-align:right;">Cost (USD)</th>
+                </tr>
+              </thead>
+              <tbody id="costsEntriesTableBody">
+                <tr><td colspan="6" style="text-align:center; padding:24px; color:var(--mut);">No LLM cost entries recorded yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== TAB 10: EXECUTION TRACES ==================== -->
+      <section id="tab-traces" style="display:none;" class="enter">
+        <div class="card" style="margin-bottom: 20px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+            <div>
+              <h1 style="margin:0 0 4px; font:700 20px 'Space Grotesk', system-ui, sans-serif; color:#fff;">&ldquo;Show Your Work&rdquo; Execution Timeline</h1>
+              <p class="hint" style="margin:0;">OpenTelemetry-compatible execution spans for scans, skills, tool invocations, and LLM calls</p>
+            </div>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <select id="traceFileSelect" onchange="renderSelectedTrace()" class="mono" style="font-size:12px;">
+                <option value="">No traces available</option>
+              </select>
+              <button onclick="fetchTraces()" class="ghost" style="padding:6px 14px; font-size:12px;">Refresh Traces</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="tracesTimelineContainer" class="card">
+          <p class="hint">No execution traces recorded yet for this target.</p>
+        </div>
+      </section>
+
+      <!-- ==================== TAB 11: TARGET MEMORY ==================== -->
+      <section id="tab-memory" style="display:none;" class="enter">
+        <div class="card" style="margin-bottom: 20px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+            <div>
+              <h1 style="margin:0 0 4px; font:700 20px 'Space Grotesk', system-ui, sans-serif; color:#fff;">Tiered Target Memory Inspector</h1>
+              <p class="hint" style="margin:0;">Persistent semantic facts, procedural methodology outcomes, and episodic scan events</p>
+            </div>
+            <button onclick="fetchMemory()" class="ghost" style="padding:6px 14px; font-size:12px;">Refresh Memory</button>
+          </div>
+        </div>
+
+        <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));">
+          <div class="stat-card cyan">
+            <span class="label" style="color:var(--cyan);">Semantic Facts</span>
+            <div id="memStatFacts" class="score">0</div>
+            <span class="sub">Tech, WAF &amp; posture</span>
+          </div>
+          <div class="stat-card blue">
+            <span class="label" style="color:var(--blue);">Procedural Steps</span>
+            <div id="memStatProcedural" class="score">0</div>
+            <span class="sub">Technique outcomes</span>
+          </div>
+          <div class="stat-card">
+            <span class="label">Episodic Events</span>
+            <div id="memStatEpisodic" class="score">0</div>
+            <span class="sub">Recorded scan activity</span>
+          </div>
+          <div class="stat-card med">
+            <span class="label" style="color:var(--warn);">Resume Checkpoints</span>
+            <div id="memStatCheckpoints" class="score">0</div>
+            <span class="sub">Saved state anchors</span>
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; margin-bottom: 20px;">
+          <div class="card" style="padding:0; overflow:hidden;">
+            <div style="padding:16px 20px; border-bottom:1px solid var(--line);">
+              <h2 style="font-size:14px; text-transform:uppercase; letter-spacing:.08em; margin:0;">Semantic Facts</h2>
+            </div>
+            <div class="data-table-wrap" style="border:none;">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Key</th>
+                    <th>Value</th>
+                    <th>Category</th>
+                    <th>Source</th>
+                  </tr>
+                </thead>
+                <tbody id="memoryFactsTableBody">
+                  <tr><td colspan="4" style="text-align:center; padding:24px; color:var(--mut);">No semantic facts stored yet.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card" style="padding:0; overflow:hidden;">
+            <div style="padding:16px 20px; border-bottom:1px solid var(--line);">
+              <h2 style="font-size:14px; text-transform:uppercase; letter-spacing:.08em; margin:0;">Procedural Steps</h2>
+            </div>
+            <div class="data-table-wrap" style="border:none;">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Technique</th>
+                    <th>Outcome</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody id="memoryTechniquesTableBody">
+                  <tr><td colspan="3" style="text-align:center; padding:24px; color:var(--mut);">No procedural steps recorded yet.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="padding:0; overflow:hidden;">
+          <div style="padding:16px 20px; border-bottom:1px solid var(--line);">
+            <h2 style="font-size:14px; text-transform:uppercase; letter-spacing:.08em; margin:0;">Recent Episodic Events</h2>
+          </div>
+          <div id="memoryEventsList" style="padding:16px 20px; display:flex; flex-direction:column; gap:10px;">
+            <p class="hint" style="margin:0;">No episodic events recorded yet.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== TAB 12: SECURITY POSTURE ==================== -->
+      <section id="tab-posture" style="display:none;" class="enter">
+        <div class="card" style="margin-bottom: 20px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+            <div>
+              <div style="display:flex; align-items:center; gap:10px; margin-bottom:4px;">
+                <h1 id="postureFrameworkTitle" style="margin:0; font:700 20px 'Space Grotesk', system-ui, sans-serif; color:#fff;">OWASP Agentic AI Top 10 Matrix</h1>
+                <span id="postureCoveragePill" class="pill ok"><b>0/10 COVERAGE</b></span>
+              </div>
+              <p class="hint" style="margin:0;">Runtime agentic guardrails mapped to OWASP Agentic AI Top 10 security controls</p>
+            </div>
+            <button onclick="fetchSecurityPosture()" class="ghost" style="padding:6px 14px; font-size:12px;">Refresh Posture</button>
+          </div>
+        </div>
+
+        <div class="card" style="padding:0; overflow:hidden;">
+          <div class="data-table-wrap" style="border:none;">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width:220px;">Control ID</th>
+                  <th>Security Control</th>
+                  <th style="width:160px;">Module</th>
+                  <th>Enforcing Functions / Classes</th>
+                  <th style="width:110px; text-align:right;">Status</th>
+                </tr>
+              </thead>
+              <tbody id="securityPostureTableBody">
+                <tr><td colspan="5" style="text-align:center; padding:24px; color:var(--mut);">Loading OWASP Agentic Top 10 posture...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
     </main>
   </div>
 
@@ -1685,7 +1944,7 @@
 
     // --- Tab Navigation ---
     function switchTab(tabId) {
-      const tabs = ['overview', 'pipeline', 'findings', 'endpoints', 'checkpoints', 'terminal', 'conversations', 'report'];
+      const tabs = ['overview', 'pipeline', 'findings', 'endpoints', 'checkpoints', 'terminal', 'conversations', 'report', 'costs', 'traces', 'memory', 'posture'];
       tabs.forEach(t => {
         const el = document.getElementById(`tab-${t}`);
         const btn = document.getElementById(`tabBtn-${t}`);
@@ -1704,6 +1963,14 @@
 
       if (tabId === 'conversations') {
         fetchConversations();
+      } else if (tabId === 'costs') {
+        fetchCosts();
+      } else if (tabId === 'traces') {
+        fetchTraces();
+      } else if (tabId === 'memory') {
+        fetchMemory();
+      } else if (tabId === 'posture') {
+        fetchSecurityPosture();
       }
 
       // Close mobile sidebar if open
@@ -1873,6 +2140,7 @@
       installDismissibleNotices();
       await refreshLlmStatus();
       await fetchSystemInfo();
+      await fetchSecurityPosture();
       await fetchTargets();
       await populateSkillsDropdown();
 
@@ -2008,6 +2276,12 @@
       await fetchConversations();
       if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
       await fetchReport();
+      if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
+      await fetchCosts();
+      if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
+      await fetchTraces();
+      if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
+      await fetchMemory();
     }
 
     // --- Offline Native Canvas Donut Chart ---
@@ -2911,6 +3185,321 @@
       }
     }
 
+    // --- Observability: Costs & Receipts ---
+    async function fetchCosts() {
+      const reqTarget = currentTarget;
+      const reqEpoch = targetSwitchEpoch;
+      if (!reqTarget) return;
+      try {
+        const res = await fetch(`/api/targets/${encodeURIComponent(reqTarget)}/costs`);
+        const data = await res.json();
+        if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
+
+        const summary = data.summary || {};
+        const entries = Array.isArray(data.entries) ? data.entries : [];
+        const totalCost = Number(summary.total_cost_usd || 0);
+        const totalCalls = Number(summary.total_llm_calls || entries.length || 0);
+        const inTok = Number(summary.total_input_tokens || 0);
+        const outTok = Number(summary.total_output_tokens || 0);
+        const budgetCap = summary.budget_cap_usd;
+
+        document.getElementById('costTotalUsd').textContent = `$${totalCost.toFixed(4)}`;
+        document.getElementById('costTotalCalls').textContent = totalCalls;
+        document.getElementById('costInputTokens').textContent = inTok.toLocaleString();
+        document.getElementById('costOutputTokens').textContent = outTok.toLocaleString();
+        document.getElementById('costBudgetCap').textContent = budgetCap !== undefined && budgetCap !== null
+          ? `Budget cap: $${Number(budgetCap).toFixed(2)}`
+          : 'Budget cap: not set';
+        document.getElementById('costReceiptTime').textContent = data.receipt_generated_at
+          ? `Receipt: ${String(data.receipt_generated_at).slice(0, 19).replace('T', ' ')}`
+          : (entries.length ? 'Live cost log' : 'No receipt recorded');
+
+        const navBadge = document.getElementById('navCostsBadge');
+        if (navBadge) navBadge.textContent = `$${totalCost.toFixed(2)}`;
+
+        // Compute per-skill breakdown if not provided in receipt
+        let breakdown = data.per_skill_breakdown;
+        if (!breakdown || typeof breakdown !== 'object') {
+          breakdown = {};
+          entries.forEach(e => {
+            const sk = e.skill || 'unknown';
+            if (!breakdown[sk]) breakdown[sk] = { calls: 0, input_tokens: 0, output_tokens: 0, cost_usd: 0 };
+            breakdown[sk].calls += 1;
+            breakdown[sk].input_tokens += Number(e.input_tokens || 0);
+            breakdown[sk].output_tokens += Number(e.output_tokens || 0);
+            breakdown[sk].cost_usd += Number(e.cost_usd || 0);
+          });
+        }
+
+        const skillBody = document.getElementById('costsSkillTableBody');
+        const skillRows = Object.entries(breakdown);
+        if (skillRows.length === 0) {
+          skillBody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:24px; color:var(--mut);">No cost breakdown recorded yet.</td></tr>';
+        } else {
+          skillBody.innerHTML = skillRows.map(([skill, info]) => `
+            <tr>
+              <td class="mono" style="color:var(--cyan); font-weight:600;">${escapeHtml(skill)}</td>
+              <td class="mono">${Number(info.calls || 0)}</td>
+              <td class="mono">${Number(info.input_tokens || 0).toLocaleString()}</td>
+              <td class="mono">${Number(info.output_tokens || 0).toLocaleString()}</td>
+              <td class="mono" style="text-align:right; color:var(--ok);">$${Number(info.cost_usd || 0).toFixed(4)}</td>
+            </tr>
+          `).join('');
+        }
+
+        const entriesBody = document.getElementById('costsEntriesTableBody');
+        if (entries.length === 0) {
+          entriesBody.innerHTML = '<tr><td colspan="6" style="text-align:center; padding:24px; color:var(--mut);">No LLM cost entries recorded yet.</td></tr>';
+        } else {
+          entriesBody.innerHTML = entries.slice().reverse().slice(0, 100).map(row => `
+            <tr>
+              <td class="mono" style="font-size:11px; color:var(--mut);">${escapeHtml(String(row.timestamp || '').slice(0, 19).replace('T', ' '))}</td>
+              <td class="mono">${escapeHtml(row.skill || '-')} <span class="hint">#${escapeHtml(String(row.step ?? ''))}</span></td>
+              <td class="mono">${escapeHtml(row.provider || '-')}/${escapeHtml(row.model || '-')}</td>
+              <td class="mono">${Number(row.input_tokens || 0).toLocaleString()} / ${Number(row.output_tokens || 0).toLocaleString()}</td>
+              <td class="mono">${Number(row.duration_ms || 0).toFixed(0)} ms</td>
+              <td class="mono" style="text-align:right; color:var(--cyan);">$${Number(row.cost_usd || 0).toFixed(5)}</td>
+            </tr>
+          `).join('');
+        }
+      } catch (e) {
+        console.error("Costs error:", e);
+      }
+    }
+
+    // --- Observability: Execution Traces ---
+    let loadedTraces = [];
+
+    async function fetchTraces() {
+      const reqTarget = currentTarget;
+      const reqEpoch = targetSwitchEpoch;
+      if (!reqTarget) return;
+      try {
+        const res = await fetch(`/api/targets/${encodeURIComponent(reqTarget)}/traces`);
+        const data = await res.json();
+        if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
+
+        loadedTraces = Array.isArray(data.traces) ? data.traces : [];
+        const sel = document.getElementById('traceFileSelect');
+        if (sel) {
+          if (loadedTraces.length === 0) {
+            sel.innerHTML = '<option value="">No traces available</option>';
+          } else {
+            sel.innerHTML = loadedTraces.map((t, idx) =>
+              `<option value="${idx}">${escapeHtml(t.file || `trace-${idx + 1}.json`)}</option>`
+            ).join('');
+          }
+        }
+
+        const totalSpans = loadedTraces.reduce((acc, t) => {
+          if (Array.isArray(t.spans)) return acc + t.spans.length;
+          if (t.spans && typeof t.spans === 'object') {
+            return acc + Object.values(t.spans).reduce((s, arr) => s + (Array.isArray(arr) ? arr.length : 0), 0);
+          }
+          return acc;
+        }, 0);
+        const navBadge = document.getElementById('navTracesBadge');
+        if (navBadge) navBadge.textContent = totalSpans;
+
+        renderSelectedTrace();
+      } catch (e) {
+        console.error("Traces error:", e);
+      }
+    }
+
+    function renderSelectedTrace() {
+      const container = document.getElementById('tracesTimelineContainer');
+      const sel = document.getElementById('traceFileSelect');
+      if (!container) return;
+
+      if (!loadedTraces || loadedTraces.length === 0) {
+        container.innerHTML = '<p class="hint" style="margin:0;">No execution traces recorded yet for this target.</p>';
+        return;
+      }
+
+      const idx = sel && sel.value !== '' ? Number(sel.value) : 0;
+      const traceObj = loadedTraces[idx] || loadedTraces[0];
+      let spans = [];
+      if (Array.isArray(traceObj.spans)) {
+        spans = traceObj.spans;
+      } else if (traceObj.spans && typeof traceObj.spans === 'object') {
+        Object.values(traceObj.spans).forEach(arr => {
+          if (Array.isArray(arr)) spans = spans.concat(arr);
+        });
+      }
+
+      if (spans.length === 0) {
+        container.innerHTML = '<p class="hint" style="margin:0;">Selected trace contains no spans.</p>';
+        return;
+      }
+
+      const depthMap = {};
+      const byId = {};
+      spans.forEach(s => { if (s && s.span_id) byId[s.span_id] = s; });
+      const getDepth = (s) => {
+        if (!s || !s.parent_id) return 0;
+        if (depthMap[s.span_id] !== undefined) return depthMap[s.span_id];
+        let d = 0;
+        let cur = s;
+        const seen = new Set();
+        while (cur && cur.parent_id && byId[cur.parent_id] && !seen.has(cur.span_id)) {
+          seen.add(cur.span_id);
+          d += 1;
+          cur = byId[cur.parent_id];
+        }
+        depthMap[s.span_id] = Math.min(d, 4);
+        return depthMap[s.span_id];
+      };
+
+      container.innerHTML = spans.map((s, i) => {
+        const status = String(s.status || 'ok').toLowerCase();
+        const secClass = status === 'running' ? 'sec act' : (status === 'ok' ? 'sec done' : 'sec');
+        const statusTag = status === 'error' ? 'bad' : (status === 'running' ? 'med' : 'ok');
+        const spanType = String(s.type || 'generic').toUpperCase();
+        const depth = getDepth(s);
+        const indentPx = depth * 18;
+        const attrs = s.attributes && typeof s.attributes === 'object' ? Object.entries(s.attributes) : [];
+
+        return `
+          <div class="${secClass}" style="margin-left:${indentPx}px;">
+            <div class="dot">${i + 1}</div>
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:8px;">
+              <div>
+                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                  <strong class="mono" style="color:#fff; font-size:13px;">${escapeHtml(s.name || 'span')}</strong>
+                  <span class="tag info" style="font-size:10px; padding:2px 7px;">${escapeHtml(spanType)}</span>
+                  <span class="tag ${statusTag}" style="font-size:10px; padding:2px 7px;">${escapeHtml(status.toUpperCase())}</span>
+                </div>
+                <small class="mono">${escapeHtml(String(s.start_time || '').slice(11, 19))} &bull; ${Number(s.duration_ms || 0).toFixed(1)} ms</small>
+              </div>
+              <span class="hint mono" style="font-size:11px;">${escapeHtml(s.span_id || '')}</span>
+            </div>
+            ${attrs.length > 0 ? `
+              <div class="box" style="margin:8px 0 0; padding:8px 12px; font-size:11px;">
+                ${attrs.map(([k, v]) => `<div class="mono"><span style="color:var(--cyan);">${escapeHtml(k)}:</span> <span style="color:#cbd5e1;">${escapeHtml(typeof v === 'object' ? JSON.stringify(v) : String(v))}</span></div>`).join('')}
+              </div>
+            ` : ''}
+          </div>
+        `;
+      }).join('');
+    }
+
+    // --- Observability: Target Memory ---
+    async function fetchMemory() {
+      const reqTarget = currentTarget;
+      const reqEpoch = targetSwitchEpoch;
+      if (!reqTarget) return;
+      try {
+        const res = await fetch(`/api/targets/${encodeURIComponent(reqTarget)}/memory`);
+        const data = await res.json();
+        if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
+
+        const stats = data.stats || {};
+        const facts = Array.isArray(data.facts) ? data.facts : [];
+        const techniques = Array.isArray(data.techniques) ? data.techniques : [];
+        const events = Array.isArray(data.recent_events) ? data.recent_events : [];
+
+        const semCount = Number(stats.semantic_facts ?? facts.length);
+        const procCount = Number(stats.procedural_steps ?? techniques.length);
+        const epCount = Number(stats.episodic_events ?? events.length);
+        const ckptCount = Number(stats.active_checkpoints ?? 0);
+
+        document.getElementById('memStatFacts').textContent = semCount;
+        document.getElementById('memStatProcedural').textContent = procCount;
+        document.getElementById('memStatEpisodic').textContent = epCount;
+        document.getElementById('memStatCheckpoints').textContent = ckptCount;
+
+        const navBadge = document.getElementById('navMemoryBadge');
+        if (navBadge) navBadge.textContent = semCount + procCount + epCount;
+
+        const factsBody = document.getElementById('memoryFactsTableBody');
+        if (facts.length === 0) {
+          factsBody.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:24px; color:var(--mut);">No semantic facts stored yet.</td></tr>';
+        } else {
+          factsBody.innerHTML = facts.map(f => `
+            <tr>
+              <td class="mono" style="color:var(--cyan);">${escapeHtml(f.key || '')}</td>
+              <td>${escapeHtml(f.value || '')}</td>
+              <td><span class="tag info" style="font-size:10px;">${escapeHtml(f.category || 'general')}</span></td>
+              <td class="mono" style="font-size:11px; color:var(--mut);">${escapeHtml(f.source || '-')}</td>
+            </tr>
+          `).join('');
+        }
+
+        const techBody = document.getElementById('memoryTechniquesTableBody');
+        if (techniques.length === 0) {
+          techBody.innerHTML = '<tr><td colspan="3" style="text-align:center; padding:24px; color:var(--mut);">No procedural steps recorded yet.</td></tr>';
+        } else {
+          techBody.innerHTML = techniques.map(t => `
+            <tr>
+              <td class="mono" style="color:#fff;">${escapeHtml(t.technique || '')}</td>
+              <td>${escapeHtml(t.outcome || '')}</td>
+              <td><span class="tag ${t.success ? 'ok' : 'bad'}" style="font-size:10px;">${t.success ? 'SUCCESS' : 'FAILED'}</span></td>
+            </tr>
+          `).join('');
+        }
+
+        const eventsList = document.getElementById('memoryEventsList');
+        if (events.length === 0) {
+          eventsList.innerHTML = '<p class="hint" style="margin:0;">No episodic events recorded yet.</p>';
+        } else {
+          eventsList.innerHTML = events.map(ev => `
+            <div class="box" style="margin:0; display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">
+              <div>
+                <div style="display:flex; align-items:center; gap:8px; margin-bottom:3px;">
+                  <span class="tag info" style="font-size:10px;">${escapeHtml(ev.event_type || 'event')}</span>
+                  ${ev.skill ? `<code style="color:var(--cyan); font-size:11px;">${escapeHtml(ev.skill)}</code>` : ''}
+                </div>
+                <div style="font-size:13px; color:#e2e8f0;">${escapeHtml(ev.summary || '')}</div>
+              </div>
+              <span class="hint mono" style="font-size:11px;">${escapeHtml(String(ev.timestamp || '').slice(0, 19).replace('T', ' '))}</span>
+            </div>
+          `).join('');
+        }
+      } catch (e) {
+        console.error("Memory error:", e);
+      }
+    }
+
+    // --- Security Posture: OWASP Agentic Top 10 ---
+    async function fetchSecurityPosture() {
+      try {
+        const res = await fetch('/api/security/posture');
+        const data = await res.json();
+
+        const titleEl = document.getElementById('postureFrameworkTitle');
+        const pillEl = document.getElementById('postureCoveragePill');
+        const navBadge = document.getElementById('navPostureBadge');
+        const bodyEl = document.getElementById('securityPostureTableBody');
+
+        if (titleEl && data.framework) titleEl.textContent = data.framework;
+        const coverage = data.coverage || '0/10';
+        if (pillEl) pillEl.innerHTML = `<b>${escapeHtml(coverage)} COVERAGE</b>`;
+        if (navBadge) navBadge.textContent = coverage;
+
+        const controls = data.controls && typeof data.controls === 'object' ? Object.entries(data.controls) : [];
+        if (controls.length === 0) {
+          bodyEl.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:24px; color:var(--mut);">Security posture matrix unavailable.</td></tr>';
+          return;
+        }
+
+        bodyEl.innerHTML = controls.map(([asiId, info]) => {
+          const funcs = Array.isArray(info.functions) ? info.functions : [];
+          return `
+            <tr>
+              <td class="mono" style="color:var(--cyan); font-weight:700;">${escapeHtml(asiId)}</td>
+              <td style="color:#fff;">${escapeHtml(info.control || '')}</td>
+              <td class="mono" style="color:var(--mut);">${escapeHtml(info.module || '')}</td>
+              <td class="mono" style="font-size:12px;">${funcs.map(fn => `<code style="background:#050505; color:var(--cyan); padding:2px 6px; border-radius:4px; margin-right:4px;">${escapeHtml(fn)}</code>`).join('')}</td>
+              <td style="text-align:right;"><span class="tag ok">ACTIVE</span></td>
+            </tr>
+          `;
+        }).join('');
+      } catch (e) {
+        console.error("Security posture error:", e);
+      }
+    }
+
     // Lightweight 100% offline markdown renderer
     function renderOfflineMarkdown(md) {
       if (!md) return '';
@@ -3262,9 +3851,53 @@
       await refreshLlmStatus();
     }
 
+    const DASHBOARD_TOKEN_KEY = 'moros_dashboard_token';
+    const _origFetch = window.fetch.bind(window);
+    window.fetch = async (input, init = {}) => {
+      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      const opts = Object.assign({}, init);
+      const token = sessionStorage.getItem(DASHBOARD_TOKEN_KEY) || '';
+      if (token && url.includes('/api/')) {
+        const headers = new Headers(opts.headers || {});
+        if (!headers.has('Authorization')) {
+          headers.set('Authorization', `Bearer ${token}`);
+        }
+        opts.headers = headers;
+      }
+      const res = await _origFetch(input, opts);
+      if (res.status === 401 && url.includes('/api/')) {
+        const modal = document.getElementById('authTokenModal');
+        if (modal) modal.style.display = 'flex';
+      }
+      return res;
+    };
+
+    function saveDashboardToken() {
+      const input = document.getElementById('dashboardTokenInput');
+      const token = input ? input.value.trim() : '';
+      if (token) {
+        sessionStorage.setItem(DASHBOARD_TOKEN_KEY, token);
+      } else {
+        sessionStorage.removeItem(DASHBOARD_TOKEN_KEY);
+      }
+      const modal = document.getElementById('authTokenModal');
+      if (modal) modal.style.display = 'none';
+      init();
+    }
+
     window.onload = () => {
       init();
     };
   </script>
+  <div id="authTokenModal" class="modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.75); align-items:center; justify-content:center; z-index:9999;">
+    <div style="background:var(--card2); border:1px solid var(--card-border); border-radius:10px; padding:20px; width:min(420px, 92vw);">
+      <h3 style="margin:0 0 8px;">Dashboard Access Token</h3>
+      <p class="hint" style="margin:0 0 12px;">Enter the dashboard runtime token (`MOROS_DASHBOARD_TOKEN`) to authorize API calls in this session.</p>
+      <input id="dashboardTokenInput" type="password" placeholder="Paste bearer token..." style="width:100%; padding:10px; margin-bottom:12px; background:#050505; color:#fff; border:1px solid var(--line); border-radius:6px;" />
+      <div style="display:flex; justify-content:flex-end; gap:8px;">
+        <button class="btn" onclick="saveDashboardToken()">Authenticate</button>
+      </div>
+    </div>
+  </div>
 </body>
 </html>

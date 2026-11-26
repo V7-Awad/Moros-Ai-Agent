@@ -30,6 +30,7 @@ _SENSITIVE_ENV_PREFIXES = (
     "SAMBANOVA_", "FIREWORKS_", "PERPLEXITY_", "COHERE_",
     "AWS_", "AZURE_", "GCP_", "E2B_", "MODAL_",
 )
+_SENSITIVE_ENV_EXACT = {"MOROS_DASHBOARD_TOKEN"}
 
 
 @dataclass
@@ -81,15 +82,22 @@ class BaseSandbox(ABC):
         self.stop()
 
 
+def _is_sensitive_env_var(name: str) -> bool:
+    upper = name.upper()
+    return upper in _SENSITIVE_ENV_EXACT or any(upper.startswith(prefix) for prefix in _SENSITIVE_ENV_PREFIXES)
+
+
 def build_scrubbed_env(extra_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """Return a copy of os.environ with LLM/cloud secrets removed."""
     clean = {}
     for k, v in os.environ.items():
-        if any(k.upper().startswith(prefix) for prefix in _SENSITIVE_ENV_PREFIXES):
+        if _is_sensitive_env_var(k):
             continue
         clean[k] = v
     if extra_env:
-        clean.update(extra_env)
+        for k, v in extra_env.items():
+            if not _is_sensitive_env_var(k):
+                clean[k] = v
     return clean
 
 
@@ -170,11 +178,15 @@ class DockerSandbox(BaseSandbox):
     backend_name = "docker"
 
     def __init__(self, image: str = "python:3.12-slim", network_disabled: bool = True,
-                 memory_limit: str = "512m", cpus: str = "1.0"):
+                 memory_limit: str = "512m", cpus: str = "1.0",
+                 extra_env: Optional[Dict[str, str]] = None,
+                 scrub_secrets: bool = True):
         self.image = image
         self.network_disabled = network_disabled
         self.memory_limit = memory_limit
         self.cpus = cpus
+        self._extra_env = dict(extra_env or {})
+        self._scrub_secrets = scrub_secrets
         self._workspace: Optional[Path] = None
 
     @staticmethod
@@ -201,6 +213,10 @@ class DockerSandbox(BaseSandbox):
             "-v", f"{self._workspace}:/workspace:rw",
             "-w", "/workspace",
         ]
+        for k, v in self._extra_env.items():
+            if self._scrub_secrets and _is_sensitive_env_var(k):
+                continue
+            docker_cmd.extend(["-e", f"{k}={v}"])
         if self.network_disabled:
             docker_cmd.extend(["--network", "none"])
         docker_cmd.append(self.image)

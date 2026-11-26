@@ -64,9 +64,10 @@ class LearningEngine:
         return self.db
 
     def close(self) -> None:
-        if self.db is not None:
-            self.db.close()
-            self.db = None
+        db = self.db
+        self.db = None
+        if db is not None:
+            db.close()
 
     def __enter__(self) -> "LearningEngine":
         self._db()
@@ -141,24 +142,86 @@ class LearningEngine:
         return out[:limit]
 
     # ---- Hook 4: distill -----------------------------------------------
+    def _persist_distilled(self, db: Database, classes: list[dict], fp_patterns: list[dict], now: str) -> None:
+        """Persist distilled per-class lessons and patterns into SQLite via UPSERT."""
+        class_fp_rates = {c["vuln_class"]: float(c.get("fp_rate") or 0.0) for c in classes}
+        for c in classes:
+            lesson_text = (c.get("lessons") or [""])[0]
+            if not lesson_text:
+                continue
+            db.execute(
+                """
+                INSERT INTO lessons (vuln_class, lesson, source, support, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(vuln_class, source) DO UPDATE SET
+                    lesson = excluded.lesson,
+                    support = excluded.support,
+                    created_at = excluded.created_at
+                """,
+                (c["vuln_class"], lesson_text, "distill", int(c["count"]), now),
+            )
+            signals_summary = ", ".join(c["top_signals"][:3]) or "none"
+            targets_count = len(c.get("targets") or [])
+            db.execute(
+                """
+                INSERT INTO patterns (pattern, description, fp_rate, sample_size, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(pattern) DO UPDATE SET
+                    description = excluded.description,
+                    fp_rate = excluded.fp_rate,
+                    sample_size = excluded.sample_size,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    f"class:{c['vuln_class']}",
+                    f"Vuln class {c['vuln_class']} across {targets_count} target(s); top signals: {signals_summary}",
+                    float(c.get("fp_rate") or 0.0),
+                    int(c["count"]),
+                    now,
+                ),
+            )
+        for fp in fp_patterns:
+            db.execute(
+                """
+                INSERT INTO patterns (pattern, description, fp_rate, sample_size, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(pattern) DO UPDATE SET
+                    description = excluded.description,
+                    fp_rate = excluded.fp_rate,
+                    sample_size = excluded.sample_size,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    f"fp:{fp['vuln_class']}:{fp['signal']}",
+                    f"False-positive signal '{fp['signal']}' on {fp['vuln_class']}",
+                    class_fp_rates.get(fp["vuln_class"], 1.0),
+                    int(fp["occurrences"]),
+                    now,
+                ),
+            )
+        db.commit()
+
     def distill(self, min_support: int = 2) -> dict:
         db = self._db()
         classes = per_class_stats(db)
         fp_patterns = fp_pattern_candidates(db, min_occurrences=max(1, min_support))
         out_classes: list[dict] = []
+        now = _now()
         for c in classes:
+            targets_str = ", ".join(c.get("targets") or []) or "none"
             lesson = (
-                f"On {c['vuln_class']}: {c['confirmed']} confirmed / "
+                f"On {c['vuln_class']} ({targets_str}): {c['confirmed']} confirmed / "
                 f"{c['count']} total (fp_rate {c['fp_rate']:.0%}), "
                 f"top signals: {', '.join(c['top_signals'][:3]) or 'none'}"
             )
             out_classes.append({**c, "lessons": [lesson]})
+        self._persist_distilled(db, out_classes, fp_patterns, now)
         return {
             "summary": {
                 "classes": len(out_classes),
                 "findings": sum(c["count"] for c in out_classes),
                 "fp_patterns": len(fp_patterns),
-                "generated_at": _now(),
+                "generated_at": now,
             },
             "classes": out_classes,
             "fp_patterns": fp_patterns,
@@ -199,6 +262,12 @@ class LearningEngine:
         techs = techs or []
         query = " ".join(techs) or target
         lessons = self.recall(query, limit=5, include_findings=False)
+        if not lessons and techs and target:
+            lessons = self.recall(target, limit=5, include_findings=False)
+        if not lessons:
+            db = self._db()
+            rows = db.rows("SELECT * FROM lessons ORDER BY support DESC, id DESC LIMIT 5")
+            lessons = [{"kind": "lesson", **r} for r in rows]
         classes = sorted({r.get("vuln_class") for r in lessons if r.get("vuln_class")})
         return {
             "target": target,
@@ -242,6 +311,21 @@ class LearningEngine:
             source=source_provenance or f"session:{target}",
         )
 
+    @staticmethod
+    def _coerce_float(val) -> float:
+        if val is None:
+            return 0.0
+        if isinstance(val, (int, float)):
+            return float(val)
+        label_map = {"critical": 0.95, "high": 0.85, "medium": 0.5, "low": 0.25, "info": 0.1}
+        text = str(val).strip().lower()
+        if text in label_map:
+            return label_map[text]
+        try:
+            return float(text)
+        except ValueError:
+            return 0.0
+
     def before_summary(self, findings: list[dict] | None) -> dict:
         """Call before writing a summary. Ranks findings by severity, then
         confidence, then score. Never mutates the input list.
@@ -256,8 +340,8 @@ class LearningEngine:
             findings,
             key=lambda f: (
                 rank.get(str(f.get("severity") or "medium").strip().lower(), 3),
-                float(f.get("confidence") or 0.0),
-                float(f.get("score") or 0.0),
+                self._coerce_float(f.get("confidence")),
+                self._coerce_float(f.get("score")),
             ),
             reverse=True,
         )

@@ -12,11 +12,13 @@ Provides a local web server and REST API for:
 - Viewing and exporting conglomerated penetration testing reports
 """
 
+import hmac
 import json
 import logging
 import mimetypes
 import os
 import re
+import secrets
 import subprocess
 import sys
 import threading
@@ -69,6 +71,12 @@ def _has_newline(value) -> bool:
         return False
     text = str(value)
     return "\r" in text or "\n" in text or "\x00" in text
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Return True if the bind host resolves to a loopback interface."""
+    cleaned = (host or "").strip().lower().strip("[]")
+    return cleaned in {"127.0.0.1", "localhost", "::1"}
 
 
 def _close_learning_engine(engine) -> None:
@@ -226,9 +234,51 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_error_json("Cross-origin requests are not supported", status=405)
 
+    def _get_header(self, name: str) -> str:
+        """Case-insensitive header lookup supporting both HTTPMessage and dict mocks."""
+        headers = getattr(self, "headers", None)
+        if not headers:
+            return ""
+        val = headers.get(name)
+        if val is not None:
+            return str(val).strip()
+        target = name.lower()
+        for k, v in headers.items():
+            if str(k).lower() == target:
+                return str(v).strip()
+        return ""
+
+    def _get_required_token(self) -> str:
+        """Return configured dashboard auth token (server runtime token or MOROS_DASHBOARD_TOKEN)."""
+        server_obj = getattr(self, "server", None)
+        server_token = getattr(server_obj, "dashboard_token", None) if server_obj is not None else None
+        if server_token:
+            return str(server_token).strip()
+        return os.environ.get("MOROS_DASHBOARD_TOKEN", "").strip()
+
+    def _extract_request_token(self) -> str:
+        """Extract token from X-Moros-Token or Authorization: Bearer headers."""
+        moros_token = self._get_header("X-Moros-Token")
+        if moros_token:
+            return moros_token
+        auth_header = self._get_header("Authorization")
+        if auth_header.lower().startswith("bearer "):
+            return auth_header[7:].strip()
+        return ""
+
+    def _is_api_authorized(self) -> bool:
+        """Validate token for /api/* routes when authentication is enabled."""
+        required = self._get_required_token()
+        if not required:
+            return True
+        provided = self._extract_request_token()
+        if not provided:
+            return False
+        return hmac.compare_digest(provided.encode("utf-8"), required.encode("utf-8"))
+
     def _is_local_browser_request(self):
         local_names = {"127.0.0.1", "::1", "localhost"}
-        raw_host = (self.headers.get("Host") or "").strip()
+        raw_host = self._get_header("Host")
         if not raw_host or any(ch in raw_host for ch in ("/", "\\", "@", "?", "#")):
             return False
         try:
@@ -239,7 +289,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return False
         if host not in local_names:
             return False
-        origin = self.headers.get("Origin")
+        origin = self._get_header("Origin")
         if origin:
             try:
                 origin_host = (urllib.parse.urlsplit(origin).hostname or "").lower()
@@ -249,16 +299,56 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return False
         return True
 
+    def _is_request_host_allowed(self) -> bool:
+        """Allow loopback browser requests, or matching-origin requests when bound remotely with auth."""
+        server_obj = getattr(self, "server", None)
+        allow_remote = bool(getattr(server_obj, "allow_remote", False)) if server_obj is not None else False
+        if not allow_remote:
+            return self._is_local_browser_request()
+        raw_host = self._get_header("Host")
+        if not raw_host or any(ch in raw_host for ch in ("/", "\\", "@", "?", "#")):
+            return False
+        try:
+            parsed_host = urllib.parse.urlsplit(f"//{raw_host}")
+            host = (parsed_host.hostname or "").lower()
+            _ = parsed_host.port
+        except ValueError:
+            return False
+        if not host:
+            return False
+        origin = self._get_header("Origin")
+        if origin:
+            try:
+                origin_host = (urllib.parse.urlsplit(origin).hostname or "").lower()
+            except ValueError:
+                return False
+            if origin_host != host:
+                return False
+        return True
+
     def do_GET(self):
-        if not self._is_local_browser_request():
+        if not self._is_request_host_allowed():
             self.send_error_json("Dashboard is restricted to local browser requests", status=403)
             return
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
 
+        # A2A AgentCard endpoint
+        if path == "/.well-known/agent.json":
+            try:
+                from tools.a2a_server import build_agent_card
+                host = self._get_header("Host") or "127.0.0.1:8080"
+                self.send_json(build_agent_card(f"http://{host}"))
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=500)
+            return
+
         # REST API Endpoints
         if path.startswith("/api/"):
+            if not self._is_api_authorized():
+                self.send_error_json("Unauthorized: valid dashboard token required", status=401)
+                return
             self.handle_api_get(path, query)
             return
 
@@ -266,11 +356,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.handle_static_get(path)
 
     def do_POST(self):
-        if not self._is_local_browser_request():
+        if not self._is_request_host_allowed():
             self.send_error_json("Dashboard is restricted to local browser requests", status=403)
             return
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+
+        if path.startswith("/api/") and not self._is_api_authorized():
+            self.send_error_json("Unauthorized: valid dashboard token required", status=401)
+            return
 
         try:
             content_length = int(self.headers.get("Content-Length", 0))
@@ -444,6 +538,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif sub == "memory":
                 self.send_json(self.get_target_memory(target_name))
                 return
+            elif sub == "schedules":
+                try:
+                    from tools.scheduler import ScanScheduler
+                    sched = ScanScheduler(target_path)
+                    self.send_json({"target": target_name, "schedules": sched.list_schedules()})
+                except Exception as exc:
+                    self.send_json({"error": str(exc)}, status=500)
+                return
+            elif sub == "skill-proposals":
+                try:
+                    from tools.skill_learner import SkillLearner
+                    learner = SkillLearner(target_dir=target_path)
+                    self.send_json({"target": target_name, "proposals": learner.list_proposals()})
+                except Exception as exc:
+                    self.send_json({"error": str(exc)}, status=500)
+                return
 
         # 5. Scan status
         if path == "/api/scan/status":
@@ -536,6 +646,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_error_json("Unknown API endpoint", status=404)
 
     def handle_api_post(self, path, body):
+        # A2A JSON-RPC Task Handler
+        if path == "/api/a2a":
+            try:
+                from tools.a2a_server import A2ATaskHandler
+                handler = A2ATaskHandler()
+                auth_header = self._get_header("Authorization") or ""
+                resp = handler.handle_request(body, auth_header=auth_header)
+                self.send_json(resp)
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=500)
+            return
+
         # Learning Engine Endpoints
         if path == "/api/learning/finding":
             engine = None
@@ -2549,12 +2671,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 def run_dashboard(host="127.0.0.1", port=8080, open_browser=True, default_target=None):
     """Run the Moros AI Agent dashboard server."""
-    if host.lower() not in {"127.0.0.1", "localhost", "::1"}:
-        raise ValueError("Dashboard binds to loopback only; remote access requires authentication first")
+    is_loopback = _is_loopback_host(host)
+    env_token = os.environ.get("MOROS_DASHBOARD_TOKEN", "").strip()
+    runtime_token = env_token
+    generated_ephemeral = False
+    if not is_loopback and not runtime_token:
+        runtime_token = secrets.token_urlsafe(32)
+        generated_ephemeral = True
+        logger.warning(
+            "Dashboard bound to non-loopback host '%s' without MOROS_DASHBOARD_TOKEN; "
+            "auto-generated a runtime authentication token.",
+            host,
+        )
+
     server_address = (host, port)
     httpd = ThreadedHTTPServer(server_address, DashboardHandler)
+    httpd.dashboard_token = runtime_token or None
+    httpd.allow_remote = not is_loopback
 
-    url = f"http://{host}:{port}"
+    display_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    url = f"http://{display_host}:{port}"
     if default_target:
         url += f"?target={default_target}"
 
@@ -2564,6 +2700,10 @@ def run_dashboard(host="127.0.0.1", port=8080, open_browser=True, default_target
     print(f"📂 Project Root: {PROJECT_ROOT}")
     print("⌨️  Press Ctrl+C to stop the dashboard server")
     print("=" * 60)
+    if generated_ephemeral:
+        print(f"[!] Non-loopback bind ({host}) without MOROS_DASHBOARD_TOKEN. Runtime token: {runtime_token}")
+    elif runtime_token:
+        print("[*] Dashboard API authentication enabled via MOROS_DASHBOARD_TOKEN.")
 
     if open_browser:
         import webbrowser

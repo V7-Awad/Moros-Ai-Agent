@@ -213,8 +213,13 @@ python run.py --target app.example.com --dry-run
 | `--max-http-requests` | `<int>` | Maximum same-host GET/HEAD requests per scan (default: `150`) |
 | `--request-delay` | `<float>` | Minimum seconds between target requests (default: `0.3`) |
 | `--fail-on-candidate` | | Exit with code `2` when unverified candidate findings are present (CI gate) |
-| `--mcp-server` | `<cmd_or_url>` | External MCP tool server URL or stdio command (repeatable) |
+| `--mcp-server` | `<cmd_or_url>` | External MCP tool server URL (HTTP/SSE) or stdio command (repeatable) |
 | `--no-trace` | | Disable OpenTelemetry trace export under `output/traces/` |
+| `--lang` | `en \| ar` | Report output language (`ar` generates an Arabic bilingual sidecar) |
+| `--dialect` | `msa \| egyptian` | Arabic report tone when `--lang ar` is enabled |
+| `--cookie-b` | `<string>` | Secondary session cookie for dual-auth IDOR/BOLA comparison |
+| `--auth-header-b` | `<string>` | Secondary Authorization header for dual-auth IDOR/BOLA comparison |
+| `--oob-url` | `<url>` | External OOB/Interactsh callback URL for blind vulnerability checks |
 | `--cookie` | `<string>` | Session cookie string for authenticated testing |
 | `--auth-header` | `<string>` | Custom Authorization header (e.g. `Authorization: Bearer <token>`) |
 | `--auth-file` | `<path>` | Path to JSON file containing cookies and headers |

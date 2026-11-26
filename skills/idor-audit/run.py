@@ -20,7 +20,17 @@ while _project_root != _project_root.parent:
 sys.path.insert(0, str(_project_root / "tools"))
 
 from scope_validator import ScopeValidator
-from scoped_http import ScopedHttpClient
+from scoped_http import ScopedHttpClient, check_checkpoint_approval, is_gated_post_enabled
+from checkpoint_manager import CheckpointManager
+
+
+_ID_PARAM_NAMES = {"id", "user_id", "account_id", "order_id", "doc_id", "uid", "profile_id", "invoice_id"}
+_DESTRUCTIVE_KEYWORDS = ("delete", "remove", "destroy", "drop", "reset", "pay", "transfer", "charge", "cancel")
+_SENSITIVE_FIELD_KEYWORDS = (
+    "email", "phone", "address", "ssn", "balance", "account",
+    "invoice", "order", "token", "secret", "dob", "birth", "credit", "salary",
+)
+_ERROR_ONLY_KEYS = {"error", "errors", "message", "detail", "details", "status", "code", "ok", "success"}
 
 
 def _parse_budget(default: int, cap: int) -> int:
@@ -33,9 +43,11 @@ def _parse_budget(default: int, cap: int) -> int:
         return min(default, cap)
 
 
-def _load_endpoints(out_dir: Path) -> list[str]:
+def _load_endpoints(out_dir: Path) -> tuple[list[str], list[tuple[str, str]]]:
     endpoints: list[str] = []
+    post_candidates: list[tuple[str, str]] = []
     seen: set[str] = set()
+    seen_post: set[tuple[str, str]] = set()
 
     def _add(ep: str) -> None:
         val = (ep or "").strip()
@@ -54,6 +66,7 @@ def _load_endpoints(out_dir: Path) -> list[str]:
                 url = f"{base}/{path.lstrip('/')}" if base and path else path
             if not url:
                 return
+            method = str(item.get("method") or "GET").upper()
             params = item.get("parameters") or []
             param_names = []
             if isinstance(params, list):
@@ -61,6 +74,13 @@ def _load_endpoints(out_dir: Path) -> list[str]:
                     name = p.get("name") if isinstance(p, dict) else p
                     if name:
                         param_names.append(str(name).strip())
+            if method == "POST":
+                id_param = next((n for n in param_names if n.lower() in _ID_PARAM_NAMES), "")
+                if id_param and not any(bad in url.lower() for bad in _DESTRUCTIVE_KEYWORDS):
+                    key = (url, id_param)
+                    if key not in seen_post:
+                        seen_post.add(key)
+                        post_candidates.append(key)
             if param_names and "?" not in url:
                 qs = "&".join(f"{name}=1" for name in param_names[:4])
                 _add(f"{url}?{qs}")
@@ -98,7 +118,70 @@ def _load_endpoints(out_dir: Path) -> list[str]:
                     _add(line)
         except Exception:
             continue
-    return endpoints
+    return endpoints, post_candidates
+
+
+def _is_valid_json_object(resp: dict) -> tuple[bool, object]:
+    """Return (True, parsed_json) only for non-HTML, non-error structured JSON payloads."""
+    status = resp.get("status_code", 0)
+    if status not in (200, 201):
+        return False, None
+    ct = str(resp.get("headers", {}).get("content-type", "")).lower()
+    if "text/html" in ct:
+        return False, None
+    body = (resp.get("body", "") or "").strip()
+    if len(body) <= 2:
+        return False, None
+    try:
+        parsed = json.loads(body)
+    except Exception:
+        return False, None
+    if isinstance(parsed, dict):
+        if not parsed:
+            return False, None
+        lowered_keys = {str(k).lower() for k in parsed.keys()}
+        if lowered_keys <= _ERROR_ONLY_KEYS:
+            return False, None
+        if parsed.get("error") and len(lowered_keys - _ERROR_ONLY_KEYS) == 0:
+            return False, None
+        return True, parsed
+    if isinstance(parsed, list) and len(parsed) > 0:
+        return True, parsed
+    return False, None
+
+
+def _has_sensitive_fields(payload: object) -> bool:
+    if isinstance(payload, dict):
+        for k, v in payload.items():
+            k_low = str(k).lower()
+            if any(kw in k_low for kw in _SENSITIVE_FIELD_KEYWORDS):
+                return True
+            if _has_sensitive_fields(v):
+                return True
+    elif isinstance(payload, list):
+        return any(_has_sensitive_fields(item) for item in payload[:10])
+    return False
+
+
+def _mutate_id_url(url: str) -> str:
+    """Produce a second URL with an adjacent numeric or mutated UUID object identifier."""
+    def _bump_num(raw_id: str) -> str:
+        if raw_id.isdigit():
+            val = int(raw_id)
+            return str(2 if val == 1 else val + 1)
+        # Flip last hex char for UUID/hex tokens
+        last = raw_id[-1].lower()
+        replacement = "0" if last != "0" else "1"
+        return raw_id[:-1] + replacement
+
+    q_pat = re.compile(r"([?&](?:id|user_id|account_id|order_id|doc_id|uid)=)(\d+|[0-9a-fA-F-]{8,})", re.IGNORECASE)
+    if q_pat.search(url):
+        return q_pat.sub(lambda m: m.group(1) + _bump_num(m.group(2)), url, count=1)
+
+    p_pat = re.compile(r"(/(?:users|accounts|orders|invoices|documents|messages|profiles|items)/)(\d+|[0-9a-fA-F-]{8,})", re.IGNORECASE)
+    if p_pat.search(url):
+        return p_pat.sub(lambda m: m.group(1) + _bump_num(m.group(2)), url, count=1)
+    return ""
 
 
 def main():
@@ -113,7 +196,7 @@ def main():
     findings_dir.mkdir(parents=True, exist_ok=True)
     out_file = findings_dir / "candidates-idor-audit.json"
 
-    endpoints = _load_endpoints(out_dir)
+    endpoints, post_candidates = _load_endpoints(out_dir)
 
     id_patterns = [
         re.compile(r"/(?:users|accounts|orders|invoices|documents|messages|profiles|items)/([0-9a-fA-F-]+|\d+)", re.IGNORECASE),
@@ -130,7 +213,7 @@ def main():
     findings = []
     req_budget = _parse_budget(15, 15)
 
-    if req_budget > 0 and candidate_eps:
+    if req_budget > 0 and (candidate_eps or (is_gated_post_enabled() and post_candidates)):
         try:
             validator = ScopeValidator(args.target, target_dir=Path(args.target_dir))
             client = ScopedHttpClient(
@@ -140,28 +223,105 @@ def main():
                 scope_validator=validator,
             )
             base_url = client.base_url.rstrip("/")
+            unauth = not client.auth_headers and not client.cookies
+            cm = CheckpointManager(args.target, Path(args.target_dir)) if is_gated_post_enabled() else None
+            post_client = None
+            post_used = 0
 
-            for ep in candidate_eps[:10]:
-                full_url = ep if "://" in ep else f"{base_url}/{ep.lstrip('/')}"
-                resp = client.get(full_url)
-                if resp.get("status") in ("budget_exhausted", "blocked_scope"):
+            for ep in candidate_eps[:6]:
+                if client.request_count + post_used + 1 >= req_budget:
                     break
-                status = resp.get("status_code", 0)
-                body = resp.get("body", "")
+                full_url = ep if "://" in ep else f"{base_url}/{ep.lstrip('/')}"
+                alt_url = _mutate_id_url(full_url)
+                if not alt_url or alt_url == full_url:
+                    continue
 
-                # Check if endpoint returned data without authorization
-                if status in (200, 201) and len(body) > 20 and ("json" in resp.get("headers", {}).get("content-type", "") or "{" in body):
+                resp = client.get(full_url)
+                if resp.get("status") in ("budget_exhausted", "blocked_scope", "blocked"):
+                    break
+                ok_base, parsed_base = _is_valid_json_object(resp)
+                if not ok_base:
+                    continue
+
+                alt_resp = client.get(alt_url)
+                if alt_resp.get("status") in ("budget_exhausted", "blocked_scope", "blocked"):
+                    break
+                ok_alt, parsed_alt = _is_valid_json_object(alt_resp)
+                if not ok_alt:
+                    continue
+
+                base_hash = resp.get("body_sha256", "")
+                alt_hash = alt_resp.get("body_sha256", "")
+                # Require distinct object bodies across two different IDs to reduce static/public false positives
+                if base_hash and alt_hash and base_hash != alt_hash:
+                    has_sensitive = _has_sensitive_fields(parsed_base) or _has_sensitive_fields(parsed_alt)
+                    severity = "HIGH" if (unauth and has_sensitive) else "MEDIUM"
                     findings.append({
                         "title": f"Potential IDOR / BOLA on {ep[:60]}",
-                        "severity": "HIGH",
+                        "severity": severity,
                         "url": full_url,
                         "cwe": "CWE-639",
-                        "evidence": body[:200],
-                        "notes": f"Endpoint with object identifier returned HTTP {status} with structured payload without explicit authorization check.",
+                        "evidence": (
+                            f"Differential ID comparison returned distinct JSON payloads: "
+                            f"{full_url} (HTTP {resp.get('status_code')}, sha256={base_hash[:12]}) vs "
+                            f"{alt_url} (HTTP {alt_resp.get('status_code')}, sha256={alt_hash[:12]})."
+                        ),
+                        "notes": "Two different object identifiers returned distinct structured JSON objects without access denial.",
                         "status": "candidate",
                         "validation_status": "unverified",
                         "curl": f"curl -s -i '{full_url}'",
                     })
+
+            if cm is not None and post_candidates:
+                for post_ep, id_param in post_candidates[:3]:
+                    if client.request_count + post_used + 1 >= req_budget:
+                        break
+                    full_url = post_ep if "://" in post_ep else f"{base_url}/{post_ep.lstrip('/')}"
+                    cp_type = "IDOR POST Comparison"
+                    reason = f"Send non-destructive POST ID comparison probes to {full_url}"
+                    if not check_checkpoint_approval(cm, cp_type, full_url, method="POST", reason=reason, risk_level="MEDIUM"):
+                        continue
+                    if post_client is None:
+                        remaining = max(1, req_budget - client.request_count)
+                        post_client = ScopedHttpClient(
+                            target=args.target,
+                            max_requests=remaining,
+                            delay_seconds=0.2,
+                            scope_validator=validator,
+                            allow_state_changing=True,
+                            approval_callback=lambda m, u, b: check_checkpoint_approval(
+                                cm, cp_type, u, method=m, reason=reason, risk_level="MEDIUM"
+                            ),
+                        )
+                    r1 = post_client.post(full_url, json_body={id_param: 1})
+                    post_used = post_client.request_count
+                    if r1.get("status") != "response":
+                        continue
+                    ok1, p1 = _is_valid_json_object(r1)
+                    if not ok1 or (client.request_count + post_used >= req_budget):
+                        continue
+                    r2 = post_client.post(full_url, json_body={id_param: 2})
+                    post_used = post_client.request_count
+                    if r2.get("status") != "response":
+                        continue
+                    ok2, p2 = _is_valid_json_object(r2)
+                    if ok2 and r1.get("body_sha256") != r2.get("body_sha256"):
+                        has_sensitive = _has_sensitive_fields(p1) or _has_sensitive_fields(p2)
+                        severity = "HIGH" if (unauth and has_sensitive) else "MEDIUM"
+                        findings.append({
+                            "title": f"Potential POST IDOR / BOLA on {post_ep[:60]}",
+                            "severity": severity,
+                            "url": full_url,
+                            "cwe": "CWE-639",
+                            "evidence": (
+                                f"POST differential ID comparison ({id_param}=1 vs {id_param}=2) returned distinct "
+                                f"JSON objects (sha256={r1.get('body_sha256', '')[:12]} vs {r2.get('body_sha256', '')[:12]})."
+                            ),
+                            "notes": "HITL-approved non-destructive POST comparison returned distinct objects across IDs.",
+                            "status": "candidate",
+                            "validation_status": "unverified",
+                            "curl": f"curl -s -i -X POST '{full_url}'",
+                        })
         except ValueError as e:
             print(f"IDOR Audit skipped (invalid target/scope): {e}")
         except Exception as e:

@@ -26,8 +26,11 @@ from typing import List
 
 # Import LLM client and Skill execution runner
 tools_dir = Path(__file__).parent.resolve()
+project_root = tools_dir.parent.resolve()
 if str(tools_dir) not in sys.path:
     sys.path.insert(0, str(tools_dir))
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 from llm_client import LLMClient
 from skill_runner import SkillRunner
@@ -39,6 +42,11 @@ from trace_logger import TraceLogger
 from memory_manager import MemoryManager
 from model_router import ModelRouter
 from mcp_client import MCPClient
+
+try:
+    from learning_engine.engine import LearningEngine
+except Exception:
+    LearningEngine = None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -100,7 +108,8 @@ class HackbotOrchestrator:
                  https_only: bool = False, max_http_requests: int = 150,
                  request_delay: float = 0.3, parallel: bool = False,
                  budget_usd: float = 10.0, mcp_servers: list = None,
-                 enable_tracing: bool = True, smart_routing: bool = False):
+                 enable_tracing: bool = True, smart_routing: bool = False,
+                 max_subagents: int = 5):
         self.target = target
         self.target_dir = Path(target_dir)
         self.skills = skills
@@ -114,12 +123,17 @@ class HackbotOrchestrator:
         self.max_http_requests = max(1, max_http_requests)
         self.request_delay = max(0.0, request_delay)
         self.parallel = parallel
+        self.max_subagents = max(1, int(max_subagents))
         self.budget_usd = float(budget_usd)
         self.smart_routing = bool(smart_routing)
         self.scope_authorized = False
         self.scope_blocked_skills: list = []
         self.scope_audit: dict = {}
         self._lock = threading.Lock()
+        self.learning_engine = None
+        self.learning_context: dict = {}
+        self.learning_summary: dict = {}
+        self._candidate_findings: list = []
 
         self.execution_log: list = []
         self.skill_results: dict = {}  # skill -> [run results]
@@ -261,6 +275,109 @@ class HackbotOrchestrator:
                         break
         return blocked
 
+    def _init_learning_engine(self):
+        """Instantiate LearningEngine safely without ever failing a scan."""
+        if LearningEngine is None:
+            return None
+        try:
+            try:
+                return LearningEngine(root=self.target_dir)
+            except TypeError:
+                return LearningEngine()
+        except Exception as exc:
+            logger.debug("LearningEngine initialization error (non-fatal): %s", exc)
+            return None
+
+    def _extract_candidate_findings(self, skill_name: str, result: dict, skill_res: dict | None) -> list[dict]:
+        """Collect candidate finding dicts produced by a skill run."""
+        if isinstance(skill_res, dict) and isinstance(skill_res.get("findings"), list) and skill_res["findings"]:
+            return [f for f in skill_res["findings"] if isinstance(f, dict)]
+
+        findings_count = int(result.get("findings_count", 0) or 0)
+        if findings_count <= 0:
+            return []
+
+        candidate_files = [
+            self.target_dir / "output" / "findings" / skill_name / f"candidates-{skill_name}.json",
+            self.target_dir / "output" / "findings" / f"candidates-{skill_name}.json",
+        ]
+        if skill_name == "js-analyze":
+            candidate_files.append(self.target_dir / "output" / "js" / "secrets-findings.json")
+        elif skill_name == "content-discovery":
+            candidate_files.append(self.target_dir / "output" / "content-discovery" / "interesting-findings.json")
+
+        for path in candidate_files:
+            if not path.is_file():
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                items = data if isinstance(data, list) else data.get("findings", [])
+                parsed = [item for item in items if isinstance(item, dict)]
+                if parsed:
+                    return parsed
+            except (OSError, json.JSONDecodeError):
+                continue
+
+        return [{
+            "title": f"{skill_name} candidate finding",
+            "url": f"https://{self.target}/",
+            "severity": "medium",
+            "notes": result.get("notes", ""),
+        }]
+
+    @staticmethod
+    def _normalize_severity_label(severity_val) -> str:
+        text = str(severity_val or "medium").strip().lower()
+        for level in ("critical", "high", "medium", "low", "info"):
+            if level in text:
+                return level
+        return "medium"
+
+    def _record_learning_findings(self, skill_name: str, result: dict, skill_res: dict | None) -> None:
+        """Record candidate findings into LearningEngine and summary buffer safely."""
+        if skill_name in {"review-skill", "report-conglomeration"}:
+            return
+        if result.get("status") in {"FAILED", "ERROR", "BLOCKED", "BLOCKED_SCOPE", "SKIPPED", "NOT_IMPLEMENTED"}:
+            return
+
+        findings = self._extract_candidate_findings(skill_name, result, skill_res)
+        if not findings:
+            return
+
+        for f in findings:
+            endpoint = str(
+                f.get("url") or f.get("endpoint") or f.get("path")
+                or f.get("source_artifact") or f"/{skill_name}"
+            )
+            vuln_class = str(f.get("vuln_class") or f.get("type") or skill_name or "finding")
+            if not any(ch.isalnum() for ch in vuln_class):
+                vuln_class = skill_name or "finding"
+            signals = f.get("signals") if isinstance(f.get("signals"), dict) else {skill_name: 1}
+            validation_state = str(f.get("validation_status") or f.get("status") or "observation")
+            source_provenance = str(f.get("source_artifact") or f"skill:{skill_name}")
+            summary_item = {
+                "title": f.get("title") or f"{vuln_class} @ {endpoint}",
+                "vuln_class": vuln_class,
+                "severity": self._normalize_severity_label(f.get("severity")),
+                "confidence": f.get("confidence"),
+                "score": f.get("score", 0.0),
+                "endpoint": endpoint,
+            }
+            with self._lock:
+                self._candidate_findings.append(summary_item)
+                if self.learning_engine is not None:
+                    try:
+                        self.learning_engine.after_finding(
+                            target=self.target,
+                            endpoint=endpoint,
+                            vulnerability_class=vuln_class,
+                            signals=signals,
+                            validation_state=validation_state,
+                            source_provenance=source_provenance,
+                        )
+                    except Exception as exc:
+                        logger.debug("LearningEngine after_finding error (non-fatal): %s", exc)
+
     def run(self):
         """Execute the full orchestration pipeline."""
         logger.info("=" * 60)
@@ -288,174 +405,216 @@ class HackbotOrchestrator:
         except (ValueError, AttributeError, KeyError):
             self.runner.run_started_at = datetime.now(timezone.utc)
 
-        # Step 2: Verify scope
-        self.scope_authorized = self.verify_scope()
-        self.runner.scope_authorized = self.scope_authorized
-        policy = getattr(self.scope_validator, "policy", {})
-        if self.scope_authorized and not policy.get("allow_active_vulnerability_checks", True):
-            # Keep reconnaissance and analysis of already collected/local evidence.
-            # A scope note that forbids exploit payloads/state changes cannot be
-            # treated as authorization for vulnerability probes by specialist skills.
-            safe_skills = {"recon-subdomain", "api-spec-discovery", "js-discover", "js-analyze",
-                           "review-skill", "report-conglomeration"}
-            requested = list(self.skills)
-            self.scope_blocked_skills = [s for s in requested if s not in safe_skills]
-            self.skills = [s for s in requested if s in safe_skills]
-            for blocked in self.scope_blocked_skills:
-                reason = "BLOCKED_SCOPE: saved scope profile forbids exploit payloads/state-changing actions; this specialist needs active checks."
-                self.skill_results[blocked] = [{"skill": blocked, "status": "BLOCKED_SCOPE", "notes": reason}]
-                self.run_manager.update_skill_progress(run_id, blocked, status="blocked", summary=reason)
-                self.run_manager.register_agent_session(
-                    run_id, agent_id=f"{blocked}-scope-gate", skill=blocked,
-                    parent_agent_id="coordinator", status="blocked_scope", model="policy-gate")
-                self._log_event(blocked, "BLOCKED_SCOPE", reason)
-            logger.warning("Scope policy blocks active vulnerability skills; allowed stages: %s",
-                           ", ".join(self.skills))
-        if not self.scope_authorized:
-            # Allow only passive recon without scope
-            self.skills = [s for s in self.skills if s == "recon-subdomain"]
-            if not self.skills:
-                logger.error("No skills can run without authorization. Aborting.")
-                self.run_manager.finish_run(run_id, status="failed", error="No authorization scope found")
-                return {"status": "FAILED", "failed_skills": [{"skill": "scope-check", "notes": "No authorization"}]}
-            logger.warning("⚠️  Running in PASSIVE-ONLY mode (no scope-of-work)")
-
-        # Step 2.5: WAF Detection & Adaptive Pacing
-        try:
-            from waf_detector import WafDetector
-            from tech_profiler import TechProfiler
-            probe_resp = self.runner.http.request(f"https://{self.target}/")
-            if probe_resp.get("status") == "response":
-                waf_info = WafDetector().inspect_response(
-                    probe_resp.get("status_code", 0),
-                    probe_resp.get("headers", {}),
-                    probe_resp.get("body", "")
-                )
-                if waf_info.get("waf_detected"):
-                    detected_names = ", ".join(d["waf"] for d in waf_info["detected_wafs"])
-                    logger.warning(f"🛡️  WAF Detected: {detected_names}. Applying adaptive evasion pacing ({waf_info['recommended_delay']}s delay).")
-                    self.runner.http.delay_seconds = max(self.runner.http.delay_seconds, waf_info["recommended_delay"])
-                    self.memory_manager.store_fact("waf", detected_names, category="infrastructure", source="waf_detector")
-
-                tech_info = TechProfiler().profile_target(
-                    probe_resp.get("headers", {}),
-                    probe_resp.get("body", "")
-                )
-                if tech_info.get("technologies"):
-                    logger.info(f"🧩 Target Technologies: {', '.join(tech_info['technologies'])}")
-                    self.memory_manager.store_fact("technologies", ", ".join(tech_info["technologies"]), category="infrastructure", source="tech_profiler")
-                    boosted = tech_info.get("prioritized_skills", [])
-                    if boosted:
-                        elevated = [s for s in self.skills if s in boosted]
-                        remainder = [s for s in self.skills if s not in boosted]
-                        self.skills = elevated + remainder
-        except Exception as e:
-            logger.debug(f"Target profiling non-fatal error: {e}")
-
-        # Step 3: Validate dependencies & mark blocked skills
-        blocked_skills = self.validate_dependencies()
-        for b_skill, reason in blocked_skills.items():
-            self.skill_results[b_skill] = [{"skill": b_skill, "status": "BLOCKED", "notes": reason}]
-            self.run_manager.update_skill_progress(run_id, b_skill, status="blocked", summary=reason)
-            self._log_event(b_skill, "BLOCKED", reason)
-
-        # Step 4: Order skills according to dynamic dependency chain
-        reg_order = SkillRegistry().get_execution_order(self.skills)
-        ordered_skills = [s for s in reg_order if s in self.skills and s not in blocked_skills]
-        for s in self.skills:
-            if s not in ordered_skills and s not in blocked_skills and s not in ("review-skill", "report-conglomeration"):
-                ordered_skills.append(s)
-        if "review-skill" in self.skills and "review-skill" not in ordered_skills and "review-skill" not in blocked_skills:
-            ordered_skills.append("review-skill")
-        if "report-conglomeration" in self.skills and "report-conglomeration" not in ordered_skills and "report-conglomeration" not in blocked_skills:
-            ordered_skills.append("report-conglomeration")
-        logger.info(f"Execution order: {' → '.join(ordered_skills)}")
-
-        # Step 5: Execute each scheduled skill (serial or parallel)
-        serial_prereqs = {"recon-subdomain", "api-spec-discovery", "js-discover", "js-analyze", "content-discovery"}
-        serial_finalizers = {"review-skill", "report-conglomeration"}
-
-        if self.parallel:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-
-            prereq_skills = [s for s in ordered_skills if s in serial_prereqs]
-            finalizer_skills = [s for s in ordered_skills if s in serial_finalizers]
-            parallel_skills = [s for s in ordered_skills if s not in serial_prereqs and s not in serial_finalizers]
-
-            # Phase A: Run prerequisite skills serially
-            for skill_name in prereq_skills:
-                self._execute_skill_with_tracking(skill_name, run_id)
-
-            # Phase B: Run independent vuln skills in parallel
-            if parallel_skills:
-                logger.info(f"\n🔀 Running {len(parallel_skills)} skills in parallel: {', '.join(parallel_skills)}")
-                with ThreadPoolExecutor(max_workers=min(4, len(parallel_skills))) as executor:
-                    futures = {
-                        executor.submit(self._execute_skill_with_tracking, s, run_id): s
-                        for s in parallel_skills
-                    }
-                    for future in as_completed(futures):
-                        skill_name = futures[future]
-                        try:
-                            future.result()
-                        except Exception as exc:
-                            logger.error(f"Parallel skill '{skill_name}' raised: {exc}")
-
-            # Phase C: Run finalizers serially
-            for skill_name in finalizer_skills:
-                self._execute_skill_with_tracking(skill_name, run_id)
-        else:
-            for skill_name in ordered_skills:
-                self._execute_skill_with_tracking(skill_name, run_id)
-
-        # Step 6: Write orchestration log & finalize durable run
-        self._write_scope_audit()
-        self._write_orchestration_log()
-        policy_stop = bool(getattr(self.runner.http, "stop_requested", False))
-        if self.scope_audit.get("deviation_detected"):
-            policy_stop = True
-        final_status = "blocked" if policy_stop else ("failed" if self.failed_skills else "completed")
-        if policy_stop:
-            self._log_event("scope-check", "RUN_STOPPED", "A request or redirect violated the active scope policy; all later target requests were blocked.")
-        self.run_manager.finish_run(run_id, status=final_status)
+        self._candidate_findings = []
+        self.learning_context = {}
+        self.learning_summary = {}
+        self.learning_engine = self._init_learning_engine()
 
         try:
-            self.cost_tracker.save_receipt()
-        except Exception as exc:
-            logger.debug("Cost receipt save error: %s", exc)
+            # Step 2: Verify scope
+            self.scope_authorized = self.verify_scope()
+            self.runner.scope_authorized = self.scope_authorized
+            policy = getattr(self.scope_validator, "policy", {})
+            if self.scope_authorized and not policy.get("allow_active_vulnerability_checks", True):
+                # Keep reconnaissance and analysis of already collected/local evidence.
+                # A scope note that forbids exploit payloads/state changes cannot be
+                # treated as authorization for vulnerability probes by specialist skills.
+                safe_skills = {"recon-subdomain", "api-spec-discovery", "js-discover", "js-analyze",
+                               "review-skill", "report-conglomeration"}
+                requested = list(self.skills)
+                self.scope_blocked_skills = [s for s in requested if s not in safe_skills]
+                self.skills = [s for s in requested if s in safe_skills]
+                for blocked in self.scope_blocked_skills:
+                    reason = "BLOCKED_SCOPE: saved scope profile forbids exploit payloads/state-changing actions; this specialist needs active checks."
+                    self.skill_results[blocked] = [{"skill": blocked, "status": "BLOCKED_SCOPE", "notes": reason}]
+                    self.run_manager.update_skill_progress(run_id, blocked, status="blocked", summary=reason)
+                    self.run_manager.register_agent_session(
+                        run_id, agent_id=f"{blocked}-scope-gate", skill=blocked,
+                        parent_agent_id="coordinator", status="blocked_scope", model="policy-gate")
+                    self._log_event(blocked, "BLOCKED_SCOPE", reason)
+                logger.warning("Scope policy blocks active vulnerability skills; allowed stages: %s",
+                               ", ".join(self.skills))
+            if not self.scope_authorized:
+                # Allow only passive recon without scope
+                self.skills = [s for s in self.skills if s == "recon-subdomain"]
+                if not self.skills:
+                    logger.error("No skills can run without authorization. Aborting.")
+                    self.run_manager.finish_run(run_id, status="failed", error="No authorization scope found")
+                    return {"status": "FAILED", "failed_skills": [{"skill": "scope-check", "notes": "No authorization"}]}
+                logger.warning("⚠️  Running in PASSIVE-ONLY mode (no scope-of-work)")
 
-        if self.tracer and self.current_trace_id:
+            # Step 2.5: WAF Detection & Adaptive Pacing
             try:
-                self.tracer.end_trace(self.current_trace_id)
-                self.tracer.export(self.current_trace_id)
+                from waf_detector import WafDetector
+                from tech_profiler import TechProfiler
+                probe_resp = self.runner.http.request(f"https://{self.target}/")
+                if probe_resp.get("status") == "response":
+                    waf_info = WafDetector().inspect_response(
+                        probe_resp.get("status_code", 0),
+                        probe_resp.get("headers", {}),
+                        probe_resp.get("body", "")
+                    )
+                    if waf_info.get("waf_detected"):
+                        detected_names = ", ".join(d["waf"] for d in waf_info["detected_wafs"])
+                        logger.warning(f"🛡️  WAF Detected: {detected_names}. Applying adaptive evasion pacing ({waf_info['recommended_delay']}s delay).")
+                        self.runner.http.delay_seconds = max(self.runner.http.delay_seconds, waf_info["recommended_delay"])
+                        self.memory_manager.store_fact("waf", detected_names, category="infrastructure", source="waf_detector")
+
+                    tech_info = TechProfiler().profile_target(
+                        probe_resp.get("headers", {}),
+                        probe_resp.get("body", "")
+                    )
+                    if tech_info.get("technologies"):
+                        logger.info(f"🧩 Target Technologies: {', '.join(tech_info['technologies'])}")
+                        self.memory_manager.store_fact("technologies", ", ".join(tech_info["technologies"]), category="infrastructure", source="tech_profiler")
+                        boosted = tech_info.get("prioritized_skills", [])
+                        if boosted:
+                            elevated = [s for s in self.skills if s in boosted]
+                            remainder = [s for s in self.skills if s not in boosted]
+                            self.skills = elevated + remainder
+            except Exception as e:
+                logger.debug(f"Target profiling non-fatal error: {e}")
+
+            # Step 3: Validate dependencies & mark blocked skills
+            blocked_skills = self.validate_dependencies()
+            for b_skill, reason in blocked_skills.items():
+                self.skill_results[b_skill] = [{"skill": b_skill, "status": "BLOCKED", "notes": reason}]
+                self.run_manager.update_skill_progress(run_id, b_skill, status="blocked", summary=reason)
+                self._log_event(b_skill, "BLOCKED", reason)
+
+            # Step 4: Order skills according to dynamic dependency chain
+            reg_order = SkillRegistry().get_execution_order(self.skills)
+            ordered_skills = [s for s in reg_order if s in self.skills and s not in blocked_skills]
+            for s in self.skills:
+                if s not in ordered_skills and s not in blocked_skills and s not in ("review-skill", "report-conglomeration"):
+                    ordered_skills.append(s)
+            if "review-skill" in self.skills and "review-skill" not in ordered_skills and "review-skill" not in blocked_skills:
+                ordered_skills.append("review-skill")
+            if "report-conglomeration" in self.skills and "report-conglomeration" not in ordered_skills and "report-conglomeration" not in blocked_skills:
+                ordered_skills.append("report-conglomeration")
+            logger.info(f"Execution order: {' → '.join(ordered_skills)}")
+
+            if self.learning_engine is not None:
+                try:
+                    with self._lock:
+                        self.learning_context = self.learning_engine.before_recon(self.target) or {}
+                    recalled = self.learning_context.get("relevant_lessons", [])
+                    if recalled:
+                        logger.info("🧠 Recalled %d prior lesson(s) for %s", len(recalled), self.target)
+                except Exception as exc:
+                    logger.debug("LearningEngine before_recon error (non-fatal): %s", exc)
+
+            # Step 5: Execute each scheduled skill (serial or parallel)
+            serial_prereqs = {"recon-subdomain", "api-spec-discovery", "js-discover", "js-analyze", "content-discovery"}
+            serial_finalizers = {"review-skill", "report-conglomeration"}
+
+            if self.parallel:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+
+                prereq_skills = [s for s in ordered_skills if s in serial_prereqs]
+                finalizer_skills = [s for s in ordered_skills if s in serial_finalizers]
+                parallel_skills = [s for s in ordered_skills if s not in serial_prereqs and s not in serial_finalizers]
+
+                # Phase A: Run prerequisite skills serially
+                for skill_name in prereq_skills:
+                    self._execute_skill_with_tracking(skill_name, run_id)
+
+                # Phase B: Run independent vuln skills in parallel
+                if parallel_skills:
+                    logger.info(f"\n🔀 Running {len(parallel_skills)} skills in parallel: {', '.join(parallel_skills)}")
+                    with ThreadPoolExecutor(max_workers=min(self.max_subagents, len(parallel_skills))) as executor:
+                        futures = {
+                            executor.submit(self._execute_skill_with_tracking, s, run_id): s
+                            for s in parallel_skills
+                        }
+                        for future in as_completed(futures):
+                            skill_name = futures[future]
+                            try:
+                                future.result()
+                            except Exception as exc:
+                                logger.error(f"Parallel skill '{skill_name}' raised: {exc}")
+
+                # Phase C: Run finalizers serially
+                for skill_name in finalizer_skills:
+                    self._execute_skill_with_tracking(skill_name, run_id)
+            else:
+                for skill_name in ordered_skills:
+                    self._execute_skill_with_tracking(skill_name, run_id)
+
+            # Step 6: Write orchestration log & finalize durable run
+            self._write_scope_audit()
+            self._write_orchestration_log()
+            policy_stop = bool(getattr(self.runner.http, "stop_requested", False))
+            if self.scope_audit.get("deviation_detected"):
+                policy_stop = True
+            final_status = "blocked" if policy_stop else ("failed" if self.failed_skills else "completed")
+            if policy_stop:
+                self._log_event("scope-check", "RUN_STOPPED", "A request or redirect violated the active scope policy; all later target requests were blocked.")
+            self.run_manager.finish_run(run_id, status=final_status)
+
+            try:
+                self.cost_tracker.save_receipt()
             except Exception as exc:
-                logger.debug("Trace export error: %s", exc)
+                logger.debug("Cost receipt save error: %s", exc)
 
-        for client in self.mcp_clients:
+            if self.tracer and self.current_trace_id:
+                try:
+                    self.tracer.end_trace(self.current_trace_id)
+                    self.tracer.export(self.current_trace_id)
+                except Exception as exc:
+                    logger.debug("Trace export error: %s", exc)
+
+            for client in self.mcp_clients:
+                try:
+                    client.disconnect()
+                except Exception:
+                    pass
+
+            # Step 7: Build Directed Attack Surface Graph
             try:
-                client.disconnect()
-            except Exception:
-                pass
+                from attack_graph import AttackGraphBuilder
+                builder = AttackGraphBuilder(self.target, Path(self.target_dir))
+                builder.build_graph()
+                logger.info("🗺️  Attack Graph generated at output/report/attack-graph.json")
+            except Exception as e:
+                logger.debug(f"Attack graph build non-fatal error: {e}")
 
-        # Step 7: Build Directed Attack Surface Graph
-        try:
-            from attack_graph import AttackGraphBuilder
-            builder = AttackGraphBuilder(self.target, Path(self.target_dir))
-            builder.build_graph()
-            logger.info("🗺️  Attack Graph generated at output/report/attack-graph.json")
-        except Exception as e:
-            logger.debug(f"Attack graph build non-fatal error: {e}")
+            if self.learning_engine is not None:
+                summary_res = {}
+                distill_res = {}
+                try:
+                    with self._lock:
+                        summary_res = self.learning_engine.before_summary(self._candidate_findings) or {}
+                except Exception as exc:
+                    logger.debug("LearningEngine before_summary error (non-fatal): %s", exc)
+                try:
+                    with self._lock:
+                        distill_res = self.learning_engine.distill() or {}
+                except Exception as exc:
+                    logger.debug("LearningEngine distill error (non-fatal): %s", exc)
+                self.learning_summary = {
+                    "recon": self.learning_context,
+                    "summary": summary_res,
+                    "distill": distill_res,
+                }
 
-        if self.failed_skills:
-            logger.error("\n❌ Orchestration finished with %d failed skill run(s).", len(self.failed_skills))
-        else:
-            logger.info("\n✅ Orchestration complete!")
-        return {"status": "BLOCKED_SCOPE" if policy_stop else ("FAILED" if self.failed_skills else "SUCCESS"),
-                "run_id": run_id,
-                "trace_id": self.current_trace_id,
-                "cost_summary": self.cost_tracker.get_running_total(),
-                "failed_skills": self.failed_skills,
-                "scope_violations": getattr(self.runner.http, "policy_violations", [])}
+            if self.failed_skills:
+                logger.error("\n❌ Orchestration finished with %d failed skill run(s).", len(self.failed_skills))
+            else:
+                logger.info("\n✅ Orchestration complete!")
+            return {"status": "BLOCKED_SCOPE" if policy_stop else ("FAILED" if self.failed_skills else "SUCCESS"),
+                    "run_id": run_id,
+                    "trace_id": self.current_trace_id,
+                    "cost_summary": self.cost_tracker.get_running_total(),
+                    "failed_skills": self.failed_skills,
+                    "scope_violations": getattr(self.runner.http, "policy_violations", [])}
+        finally:
+            if self.learning_engine is not None:
+                try:
+                    self.learning_engine.close()
+                except Exception as exc:
+                    logger.debug("LearningEngine close error (non-fatal): %s", exc)
+                self.learning_engine = None
 
     def _execute_skill_with_tracking(self, skill_name: str, run_id: str):
         """Execute a skill across configured models and track progress."""
@@ -570,6 +729,7 @@ class HackbotOrchestrator:
                 )
             return result
 
+        skill_res = None
         try:
             if skill_name == "recon-subdomain":
                 res = self.runner.run_recon_subdomain(
@@ -578,10 +738,12 @@ class HackbotOrchestrator:
                     root_only=self.root_only_active,
                     https_only=self.https_only,
                 )
+                skill_res = res
                 result["status"] = res.get("status", "COMPLETED")
                 result["notes"] = f"Found {res.get('subdomains', 0)} subdomains, {res.get('live_hosts', 0)} live hosts"
             elif skill_name == "deep-recon":
                 res = self.runner.run_deep_recon(active_validation=self.scope_authorized)
+                skill_res = res
                 result["status"] = res.get("status", "COMPLETED")
                 result["notes"] = (
                     f"Parallel deep-recon merged {res.get('subdomains', 0)} subdomains; "
@@ -592,19 +754,24 @@ class HackbotOrchestrator:
                     result.update(self._execute_api_spec())
                 else:
                     res = self.runner.run_api_spec_discovery()
+                    skill_res = res
                     result["status"] = res.get("status", "COMPLETED")
             elif skill_name == "js-discover":
                 res = self.runner.run_js_discover()
+                skill_res = res
                 result["status"] = res.get("status", "COMPLETED")
                 result["notes"] = f"Collected {res.get('files_collected', 0)} JS files"
             elif skill_name == "js-analyze":
                 res = self.runner.run_js_analyze()
+                skill_res = res
                 result["status"] = res.get("status", "COMPLETED")
                 result["notes"] = res.get("summary", "")
                 result["findings_count"] = int(res.get("findings_count", 0))
             elif skill_name == "content-discovery":
                 res = self.runner.run_content_discovery()
+                skill_res = res
                 result["status"] = res.get("status", "COMPLETED")
+                result["findings_count"] = int(res.get("findings_count", 0))
                 result["notes"] = (
                     f"Checked {res.get('paths_checked', 0)} safe paths; "
                     f"{res.get('findings_count', 0)} need manual review; "
@@ -616,6 +783,7 @@ class HackbotOrchestrator:
                 "auth-password-reset-bruteforce"
             ]:
                 res = self.runner.run_vuln_skill(skill_name)
+                skill_res = res
                 result["status"] = res.get("status", "COMPLETED")
                 result["notes"] = res.get(
                     "summary", f"Recorded {res.get('findings_count', 0)} candidate findings"
@@ -624,6 +792,7 @@ class HackbotOrchestrator:
             elif skill_name == "report-conglomeration":
                 self._write_scope_audit()
                 res = self.runner.run_report_conglomeration()
+                skill_res = res
                 result["status"] = res.get("status", "COMPLETED")
                 result["findings_count"] = int(res.get("findings_count", 0))
                 result["notes"] = f"Generated report with {result['findings_count']} unique triage candidates"
@@ -635,12 +804,16 @@ class HackbotOrchestrator:
 
                 # Dynamic custom skill execution
                 res = self.runner.run_custom_skill(skill_name)
+                skill_res = res
                 result["status"] = res.get("status", "COMPLETED")
+                result["findings_count"] = int(res.get("findings_count", 0))
                 result["notes"] = res.get("summary", f"Custom skill {skill_name} completed.")
         except Exception as e:
             logger.error(f"Error executing skill {skill_name}: {e}")
             result["status"] = "FAILED"
             result["notes"] = str(e)
+
+        self._record_learning_findings(skill_name, result, skill_res)
 
         result["end_time"] = datetime.now(timezone.utc).isoformat()
         self._log_event(skill_name, result["status"], result.get("notes", ""))
@@ -866,6 +1039,8 @@ def main():
                         help="Minimum seconds between target requests (default: 0.4)")
     parser.add_argument("--parallel", action="store_true",
                         help="Execute independent skills in parallel using ThreadPoolExecutor")
+    parser.add_argument("--max-subagents", type=int, default=5,
+                        help="Maximum parallel workers/subagents (default: 5)")
 
     args = parser.parse_args()
 
@@ -887,6 +1062,7 @@ def main():
         runs_per_skill=args.runs_per_skill,
         review_model=args.review_model,
         parallel=args.parallel,
+        max_subagents=args.max_subagents,
     )
 
     orchestrator.run()

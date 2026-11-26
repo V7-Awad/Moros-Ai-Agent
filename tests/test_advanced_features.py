@@ -244,3 +244,141 @@ def test_alert_dispatcher_telegram_and_slack():
                 fields={"Target": "target.com", "Param": "id"}
             )
             assert mock_open.call_count == 2
+
+
+class _FakeHttpResponse:
+    def __init__(self, status: int, url: str, body: bytes, headers: dict | None = None):
+        self.status = status
+        self._url = url
+        self._body = body
+        self.headers = headers or {"Content-Type": "application/json"}
+
+    def geturl(self) -> str:
+        return self._url
+
+    def read(self, n: int = -1) -> bytes:
+        return self._body if n < 0 else self._body[:n]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+def test_scoped_http_blocks_state_changing_methods_by_default():
+    for method in ("POST", "PUT", "PATCH", "DELETE"):
+        client = ScopedHttpClient("example.com")
+        res = client.post("/api/items", json_body={"name": "test"}) if method == "POST" else client.request("/api/items", method=method, json_body={"name": "test"})
+        assert res["status"] == "blocked_scope"
+        assert client.stop_requested is True
+        assert client.request_count == 0
+        assert any(v["kind"] == "blocked_method" and v["method"] == method for v in client.policy_violations)
+
+
+def test_scoped_http_requires_explicit_approval_callback_for_state_changing(tmp_path):
+    # 1. Missing approval_callback -> default deny
+    client_no_cb = ScopedHttpClient("example.com", allow_state_changing=True)
+    res_no_cb = client_no_cb.post("/api/items", json_body={"id": 1})
+    assert res_no_cb["status"] == "blocked_scope"
+    assert client_no_cb.request_count == 0
+    assert any(v["kind"] == "unapproved_state_changing" for v in client_no_cb.policy_violations)
+
+    # 2. Callback returning False -> denied
+    client_denied = ScopedHttpClient(
+        "example.com",
+        allow_state_changing=True,
+        approval_callback=lambda m, u, b: False,
+    )
+    res_denied = client_denied.post("/api/items", json_body={"id": 1})
+    assert res_denied["status"] == "blocked_scope"
+    assert client_denied.request_count == 0
+    assert any(v["kind"] == "hitl_rejected" for v in client_denied.policy_violations)
+
+    # 3. Callback raising exception -> fail closed
+    def _boom(m, u, b):
+        raise RuntimeError("callback error")
+
+    client_err = ScopedHttpClient("example.com", allow_state_changing=True, approval_callback=_boom)
+    assert client_err.post("/api/items", data="x=1")["status"] == "blocked_scope"
+    assert client_err.request_count == 0
+
+    # 4. Scope policy forbidding state-changing actions overrides allow_state_changing=True
+    (tmp_path / "scope-of-work.md").write_text(
+        "Target: https://example.com\nTest profile: no state-changing actions.\n",
+        encoding="utf-8",
+    )
+    sv = ScopeValidator("example.com", target_dir=tmp_path)
+    client_policy = ScopedHttpClient(
+        "example.com",
+        scope_validator=sv,
+        allow_state_changing=True,
+        approval_callback=lambda m, u, b: True,
+    )
+    assert client_policy.post("/api/items", json_body={"id": 1})["status"] == "blocked_scope"
+    assert client_policy.request_count == 0
+
+
+def test_scoped_http_approved_post_sends_json_and_redacts_logs():
+    seen_approvals = []
+    captured_requests = []
+
+    def _approve(method: str, url: str, preview: str) -> bool:
+        seen_approvals.append((method, url, preview))
+        return True
+
+    def _fake_open(req, timeout=15.0):
+        captured_requests.append(req)
+        return _FakeHttpResponse(200, req.full_url, b'{"data":{"__typename":"Query"}}')
+
+    client = ScopedHttpClient(
+        "example.com",
+        delay_seconds=0.0,
+        auth_headers={"Authorization": "Bearer super-secret-jwt", "X-Api-Key": "secret-api-key"},
+        cookies="session=super-secret-cookie",
+        allow_state_changing=True,
+        approval_callback=_approve,
+    )
+
+    # Out-of-scope POST must be blocked before invoking approval_callback
+    blocked_oos = client.post("https://evil.com/graphql", json_body={"query": "{}"})
+    assert blocked_oos["status"] == "blocked"
+    assert seen_approvals == []
+
+    # Fresh approved client for valid in-scope JSON POST
+    client2 = ScopedHttpClient(
+        "example.com",
+        delay_seconds=0.0,
+        auth_headers={"Authorization": "Bearer super-secret-jwt", "X-Api-Key": "secret-api-key"},
+        cookies="session=super-secret-cookie",
+        allow_state_changing=True,
+        approval_callback=_approve,
+    )
+    with patch.object(client2._opener, "open", side_effect=_fake_open):
+        resp = client2.post(
+            "/api/graphql",
+            json_body={"query": "{ __typename }"},
+            headers={"Accept": "application/json"},
+        )
+
+    assert resp["status"] == "response"
+    assert resp["status_code"] == 200
+    assert client2.request_count == 1
+    assert len(seen_approvals) == 1
+    assert seen_approvals[0][0] == "POST"
+    assert seen_approvals[0][1] == "https://example.com/api/graphql"
+    assert '"query"' in seen_approvals[0][2]
+
+    sent_req = captured_requests[0]
+    assert sent_req.get_method() == "POST"
+    assert json.loads(sent_req.data.decode("utf-8")) == {"query": "{ __typename }"}
+    assert sent_req.get_header("Content-type") == "application/json"
+
+    assert len(client2.request_logs) == 1
+    log_entry = client2.request_logs[0]
+    assert log_entry["method"] == "POST"
+    assert log_entry["has_body"] is True
+    assert log_entry["headers"]["Authorization"] == "[REDACTED]"
+    assert log_entry["headers"]["X-Api-Key"] == "[REDACTED]"
+    assert log_entry["headers"]["Cookie"] == "[REDACTED]"
+    assert log_entry["headers"]["Accept"] == "application/json"

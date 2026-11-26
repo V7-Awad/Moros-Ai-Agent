@@ -201,3 +201,286 @@ def test_learning_engine_fts_skip_rebuild_and_like_fallback(tmp_path):
         rows = search_findings(db, "fetch")
         assert len(rows) == 1
         assert rows[0]["vuln_class"] == "ssrf"
+
+
+def test_distill_persists_lessons_and_patterns_across_instances(tmp_path):
+    from learning_engine.retrieval.search import search_lessons
+
+    with LearningEngine(root=tmp_path) as engine1:
+        f1 = engine1.record_finding(
+            target="example.com",
+            vuln_class="xss",
+            title="Reflected XSS on /search",
+            severity="high",
+            confidence=0.8,
+            signals={"reflection": 0.2, "no_output_encoding": 0.2},
+        )
+        engine1.record_triage(
+            finding_id=f1["finding_id"],
+            verdict="confirmed",
+            reason="Verified reflection",
+        )
+        f2 = engine1.record_finding(
+            target="example.com",
+            vuln_class="sqli",
+            title="SQLi heuristic on /items",
+            severity="medium",
+            confidence=0.4,
+            signals={"sql_error": 0.25},
+        )
+        engine1.record_triage(
+            finding_id=f2["finding_id"],
+            verdict="false_positive",
+            reason="Benign 500 error",
+        )
+
+        res1 = engine1.distill(min_support=1)
+        assert res1["summary"]["classes"] == 2
+        assert res1["summary"]["fp_patterns"] == 1
+
+        # Add another finding and distill again; UPSERT must update in place without duplicates
+        engine1.record_finding(
+            target="example.com",
+            vuln_class="xss",
+            title="Reflected XSS on /profile",
+            severity="high",
+            confidence=0.85,
+            signals={"reflection": 0.2},
+        )
+        engine1.distill(min_support=1)
+
+        db1 = engine1._db()
+        lesson_rows = db1.rows("SELECT * FROM lessons ORDER BY vuln_class")
+        assert len(lesson_rows) == 2
+        xss_lesson = next(r for r in lesson_rows if r["vuln_class"] == "xss")
+        assert xss_lesson["support"] == 2
+        assert "2 total" in xss_lesson["lesson"]
+
+        pattern_rows = db1.rows("SELECT * FROM patterns ORDER BY pattern")
+        pattern_names = {r["pattern"] for r in pattern_rows}
+        assert {"class:xss", "class:sqli", "fp:sqli:sql_error"}.issubset(pattern_names)
+        assert len(pattern_rows) == 3
+
+    assert engine1.db is None
+
+    # Open a brand-new instance against the same DB and verify persistence + recall
+    with LearningEngine(root=tmp_path) as engine2:
+        stats = engine2.stats()
+        assert stats["lessons"] == 2
+        assert stats["patterns"] == 3
+
+        by_class = search_lessons(engine2._db(), "xss")
+        assert len(by_class) == 1
+        assert by_class[0]["support"] == 2
+
+        by_target = search_lessons(engine2._db(), "example.com")
+        assert len(by_target) == 2
+
+        recon_target = engine2.before_recon("example.com")
+        assert recon_target["ok"] is True
+        assert len(recon_target["relevant_lessons"]) == 2
+        assert set(recon_target["suggested_classes"]) == {"sqli", "xss"}
+
+        # Tech stack miss still falls back to target/top lessons
+        recon_techs = engine2.before_recon("example.com", ["nginx", "react"])
+        assert len(recon_techs["relevant_lessons"]) == 2
+    assert engine2.db is None
+
+
+def test_hackbot_orchestrator_max_subagents_and_parallel_workers(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+    import concurrent.futures
+    from tools.hackbot_orchestrator import HackbotOrchestrator
+
+    (tmp_path / "scope-of-work.md").write_text(
+        "Authorized testing for example.com. In scope of work.", encoding="utf-8"
+    )
+    js_dir = tmp_path / "output" / "js"
+    js_dir.mkdir(parents=True, exist_ok=True)
+    (js_dir / "endpoints.json").write_text('{"endpoints": []}', encoding="utf-8")
+
+    default_orch = HackbotOrchestrator(
+        target="example.com", target_dir=str(tmp_path), skills=["xss-reflected"]
+    )
+    assert default_orch.max_subagents == 5
+
+    clamped_orch = HackbotOrchestrator(
+        target="example.com", target_dir=str(tmp_path), skills=["xss-reflected"], max_subagents=0
+    )
+    assert clamped_orch.max_subagents == 1
+
+    orch = HackbotOrchestrator(
+        target="example.com",
+        target_dir=str(tmp_path),
+        skills=["xss-reflected", "xss-dom", "ssrf-identify"],
+        parallel=True,
+        max_subagents=2,
+        enable_tracing=False,
+    )
+    assert orch.max_subagents == 2
+
+    monkeypatch.setattr(orch.runner.http, "request", lambda *a, **kw: {"status": "error"})
+    monkeypatch.setattr(
+        orch.runner,
+        "run_vuln_skill",
+        lambda skill: {"status": "COMPLETED", "findings_count": 0, "summary": f"ok {skill}"},
+    )
+    monkeypatch.setattr(
+        orch.runner,
+        "run_review_skill",
+        lambda skill: {"overall_status": "PASS", "non_zero_logs_count": 1},
+    )
+
+    observed_max_workers = []
+    real_executor = concurrent.futures.ThreadPoolExecutor
+
+    class SpyExecutor(real_executor):
+        def __init__(self, max_workers=None, *args, **kwargs):
+            observed_max_workers.append(max_workers)
+            super().__init__(max_workers=max_workers, *args, **kwargs)
+
+    monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", SpyExecutor)
+    res = orch.run()
+    assert res["status"] == "SUCCESS"
+    assert observed_max_workers == [2]
+    assert orch.learning_engine is None
+
+
+def test_hackbot_orchestrator_learning_engine_hooks_and_persistence(tmp_path, monkeypatch):
+    from tools.hackbot_orchestrator import HackbotOrchestrator
+
+    (tmp_path / "scope-of-work.md").write_text(
+        "Authorized testing for example.com. In scope of work.", encoding="utf-8"
+    )
+    js_dir = tmp_path / "output" / "js"
+    js_dir.mkdir(parents=True, exist_ok=True)
+    (js_dir / "endpoints.json").write_text('{"endpoints": []}', encoding="utf-8")
+
+    orch = HackbotOrchestrator(
+        target="example.com",
+        target_dir=str(tmp_path),
+        skills=["xss-reflected"],
+        enable_tracing=False,
+    )
+
+    monkeypatch.setattr(orch.runner.http, "request", lambda *a, **kw: {"status": "error"})
+    monkeypatch.setattr(
+        orch.runner,
+        "run_vuln_skill",
+        lambda skill: {
+            "status": "COMPLETED",
+            "findings_count": 1,
+            "summary": "Found 1 candidate",
+            "findings": [
+                {
+                    "title": "Reflected XSS on /search",
+                    "url": "https://example.com/search?q=test",
+                    "type": "xss",
+                    "severity": "high",
+                    "confidence": "medium",
+                    "validation_status": "unverified",
+                    "signals": {"reflection": 0.2},
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        orch.runner,
+        "run_review_skill",
+        lambda skill: {"overall_status": "PASS", "non_zero_logs_count": 1},
+    )
+
+    res = orch.run()
+    assert res["status"] == "SUCCESS"
+    # LearningEngine must be closed and cleared in finally
+    assert orch.learning_engine is None
+    assert orch.learning_summary["summary"]["count"] == 1
+    assert orch.learning_summary["distill"]["summary"]["classes"] == 1
+
+    # A subsequent LearningEngine instance sees the persisted finding + distilled lesson + pattern
+    with LearningEngine(root=tmp_path) as next_engine:
+        stats = next_engine.stats()
+        assert stats["findings"] == 1
+        assert stats["lessons"] == 1
+        assert stats["patterns"] >= 1
+        recon = next_engine.before_recon("example.com")
+        assert "xss" in recon["suggested_classes"]
+        assert len(recon["relevant_lessons"]) == 1
+
+
+def test_hackbot_orchestrator_learning_engine_failure_resilience_and_early_abort_close(tmp_path, monkeypatch):
+    import tools.hackbot_orchestrator as orch_mod
+    from tools.hackbot_orchestrator import HackbotOrchestrator
+
+    close_calls = []
+
+    class FailingLearningEngine:
+        def __init__(self, root=None):
+            self.root = root
+
+        def before_recon(self, target, techs=None):
+            raise RuntimeError("before_recon failed")
+
+        def after_finding(self, **kwargs):
+            raise RuntimeError("after_finding failed")
+
+        def before_summary(self, findings):
+            raise RuntimeError("before_summary failed")
+
+        def distill(self, min_support=2):
+            raise RuntimeError("distill failed")
+
+        def close(self):
+            close_calls.append("closed")
+            raise RuntimeError("close failed")
+
+    monkeypatch.setattr(orch_mod, "LearningEngine", FailingLearningEngine)
+
+    # 1. Early abort (no scope file) still closes LearningEngine in finally
+    abort_orch = HackbotOrchestrator(
+        target="example.com",
+        target_dir=str(tmp_path / "no_scope"),
+        skills=["xss-reflected"],
+        enable_tracing=False,
+    )
+    abort_res = abort_orch.run()
+    assert abort_res["status"] == "FAILED"
+    assert len(close_calls) == 1
+    assert abort_orch.learning_engine is None
+
+    # 2. Normal scan with every LearningEngine hook raising still succeeds
+    scan_dir = tmp_path / "with_scope"
+    scan_dir.mkdir(parents=True, exist_ok=True)
+    (scan_dir / "scope-of-work.md").write_text(
+        "Authorized testing for example.com. In scope of work.", encoding="utf-8"
+    )
+    js_dir = scan_dir / "output" / "js"
+    js_dir.mkdir(parents=True, exist_ok=True)
+    (js_dir / "endpoints.json").write_text('{"endpoints": []}', encoding="utf-8")
+
+    orch = HackbotOrchestrator(
+        target="example.com",
+        target_dir=str(scan_dir),
+        skills=["xss-reflected"],
+        enable_tracing=False,
+    )
+    monkeypatch.setattr(orch.runner.http, "request", lambda *a, **kw: {"status": "error"})
+    monkeypatch.setattr(
+        orch.runner,
+        "run_vuln_skill",
+        lambda skill: {
+            "status": "COMPLETED",
+            "findings_count": 1,
+            "findings": [{"title": "XSS", "url": "https://example.com/", "type": "xss"}],
+        },
+    )
+    monkeypatch.setattr(
+        orch.runner,
+        "run_review_skill",
+        lambda skill: {"overall_status": "PASS", "non_zero_logs_count": 1},
+    )
+
+    res = orch.run()
+    assert res["status"] == "SUCCESS"
+    assert len(close_calls) == 2
+    assert orch.learning_engine is None

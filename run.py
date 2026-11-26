@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import inspect
 import json
 import os
 import sys
@@ -128,6 +129,8 @@ Examples:
                         help="List all dynamically installed skills in skills/ and exit")
     parser.add_argument("--max-subagents", type=int, default=10,
                         help="Maximum autonomous child subagents the agent can spawn (default: 10)")
+    parser.add_argument("--sandbox", choices=["none", "local", "docker"], default="local",
+                        help="Execution sandbox mode for custom skills (default: local)")
     parser.add_argument("--cookie", default=None,
                         help="Session cookie string for authenticated testing (e.g. 'session=xyz; user_id=123')")
     parser.add_argument("--auth-header", default=None,
@@ -158,6 +161,16 @@ Examples:
                         help="Enable complexity-based cost-aware model routing")
     parser.add_argument("--deep-recon", action="store_true",
                         help="Include parallel deep-recon fan-out skill in scan")
+    parser.add_argument("--lang", choices=["en", "ar"], default="en",
+                        help="Report output language: en (English) or ar (Arabic bilingual)")
+    parser.add_argument("--dialect", choices=["msa", "egyptian"], default="msa",
+                        help="Arabic report tone when --lang ar: msa or egyptian")
+    parser.add_argument("--cookie-b", default=None,
+                        help="Secondary session cookie for dual-auth IDOR/BOLA diffing")
+    parser.add_argument("--auth-header-b", default=None,
+                        help="Secondary authorization header for dual-auth IDOR/BOLA diffing")
+    parser.add_argument("--oob-url", default=None,
+                        help="External OOB/Interactsh callback URL for blind vulnerability checks")
     parser.add_argument("--dashboard", action="store_true",
                         help="Launch local web dashboard viewer")
     parser.add_argument("--port", type=int, default=8080,
@@ -194,6 +207,14 @@ Examples:
         os.environ["MOROS_AUTH_COOKIE"] = args.cookie
     if args.auth_header:
         os.environ["MOROS_AUTH_HEADER"] = args.auth_header
+    if args.cookie_b:
+        os.environ["MOROS_AUTH_COOKIE_B"] = args.cookie_b
+    if args.auth_header_b:
+        os.environ["MOROS_AUTH_HEADER_B"] = args.auth_header_b
+    if args.oob_url:
+        os.environ["MOROS_OOB_URL"] = args.oob_url
+    os.environ["MOROS_REPORT_LANG"] = args.lang
+    os.environ["MOROS_REPORT_DIALECT"] = args.dialect
     if args.bug_bounty_id:
         os.environ["MOROS_BUG_BOUNTY_ID"] = args.bug_bounty_id
     if args.auth_file:
@@ -220,6 +241,10 @@ Examples:
         os.environ["MOROS_IN_SCOPE"] = args.in_scope
     if args.out_of_scope:
         os.environ["MOROS_OUT_OF_SCOPE"] = args.out_of_scope
+
+    # Configure Sandbox Isolation & Subagent Cap
+    os.environ["MOROS_SANDBOX_MODE"] = args.sandbox
+    os.environ["MOROS_MAX_SUBAGENTS"] = str(args.max_subagents)
 
     registry = SkillRegistry()
     installed_skills = registry.list_skills()
@@ -314,6 +339,7 @@ Examples:
         print(f"   Skills ({len(skills)}): {' → '.join(skills)}")
         print(f"   Scan mode: {args.scan_mode}")
         print(f"   Models: {', '.join(models)} (smart-route: {args.smart_route})")
+        print(f"   Sandbox: {args.sandbox} | Max subagents: {args.max_subagents}")
         print(f"   Budget Cap: ${args.budget:.2f} | Est. LLM Cost: ${cost_est['cost_low_usd']:.4f}–${cost_est['cost_high_usd']:.4f}")
         print(f"   Runs per skill: {args.runs_per_skill}")
         print(f"   Review model: {args.review_model or 'same as skill'}")
@@ -339,7 +365,7 @@ Examples:
     print(f"   Models: {', '.join(models)} | Budget Cap: ${args.budget:.2f}")
     print()
 
-    orchestrator = HackbotOrchestrator(
+    orchestrator_kwargs = dict(
         target=args.target,
         target_dir=target_dir,
         skills=skills,
@@ -358,6 +384,19 @@ Examples:
         enable_tracing=not args.no_trace,
         smart_routing=args.smart_route,
     )
+    try:
+        orch_params = inspect.signature(HackbotOrchestrator).parameters
+        if "max_subagents" in orch_params or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in orch_params.values()
+        ):
+            orchestrator_kwargs["max_subagents"] = args.max_subagents
+    except (TypeError, ValueError):
+        orchestrator_kwargs["max_subagents"] = args.max_subagents
+
+    orchestrator = HackbotOrchestrator(**orchestrator_kwargs)
+    if getattr(orchestrator, "runner", None) is not None:
+        orchestrator.runner.sandbox_mode = args.sandbox
+        orchestrator.runner.max_subagents = args.max_subagents
 
     scan_started_at = time.time()
     try:
