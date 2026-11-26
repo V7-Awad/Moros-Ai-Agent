@@ -24,15 +24,17 @@ def is_in_target_scope(host: str, target: str) -> bool:
 
 
 class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Follow redirects safely within the authorized target domain."""
+    """Follow redirects only when they remain on the exact configured host."""
 
-    def __init__(self, target_host: str):
+    def __init__(self, target_host: str, on_blocked_redirect=None):
         super().__init__()
         self.target_host = target_host
+        self.on_blocked_redirect = on_blocked_redirect
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         parsed = urllib.parse.urlparse(newurl)
-        if parsed.scheme in {"http", "https"} and is_in_target_scope(parsed.hostname, self.target_host):
+        redirect_host = (parsed.hostname or "").lower().rstrip(".")
+        if parsed.scheme in {"http", "https"} and redirect_host == self.target_host:
             return urllib.request.Request(
                 newurl,
                 headers=dict(req.headers),
@@ -40,6 +42,12 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
                 unverifiable=req.unverifiable,
                 method=req.get_method(),
             )
+        if self.on_blocked_redirect:
+            self.on_blocked_redirect({
+                "from": urllib.parse.urlparse(req.full_url).hostname,
+                "to": redirect_host,
+                "status_code": code,
+            })
         return None
 
 
@@ -63,7 +71,12 @@ class ScopedHttpClient:
         self.request_count = 0
         self._last_request_at = 0.0
         self._lock = threading.Lock()
-        self._opener = urllib.request.build_opener(_SafeRedirectHandler(self.target))
+        self._network_lock = threading.Lock()
+        self.policy_violations: List[Dict[str, Any]] = []
+        self.stop_requested = False
+        self._opener = urllib.request.build_opener(
+            _SafeRedirectHandler(self.target, self._record_policy_violation)
+        )
 
         # Authentication & Session support
         self.auth_headers = dict(auth_headers or {})
@@ -74,11 +87,24 @@ class ScopedHttpClient:
 
         self.cookies = cookies or os.environ.get("MOROS_AUTH_COOKIE", "").strip()
         self.scope_validator = scope_validator or ScopeValidator(self.target)
+        policy = getattr(self.scope_validator, "policy", {})
+        if policy.get("max_requests"):
+            self.max_requests = min(self.max_requests, int(policy["max_requests"]))
+        if policy.get("minimum_delay_seconds") is not None:
+            self.delay_seconds = max(self.delay_seconds, float(policy["minimum_delay_seconds"]))
+        if not policy.get("allow_authentication", True):
+            # Respect scope restrictions even when credentials are present in the
+            # user's environment; do not silently attach them to target requests.
+            self.auth_headers.clear()
+            self.cookies = ""
 
     def get(self, url_or_path: str, headers: Optional[Dict[str, str]] = None,
             params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Convenience GET wrapper with optional extra headers."""
         if headers:
+            if not getattr(self.scope_validator, "policy", {}).get("allow_authentication", True):
+                self._record_policy_violation({"kind": "blocked_custom_headers", "reason": "Custom headers disabled by saved scope policy."})
+                return {"status": "blocked_scope", "reason": "Custom headers are disabled by the saved scope policy."}
             saved = dict(self.auth_headers)
             self.auth_headers.update(headers)
             result = self.request(url_or_path, method="GET", params=params)
@@ -86,14 +112,23 @@ class ScopedHttpClient:
             return result
         return self.request(url_or_path, method="GET", params=params)
 
+    def _record_policy_violation(self, details: Dict[str, Any]) -> None:
+        with self._lock:
+            self.policy_violations.append({"kind": "blocked_redirect", **details})
+            self.stop_requested = True
+
     def head(self, url_or_path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Convenience HEAD wrapper."""
         return self.request(url_or_path, method="HEAD", params=params)
 
     def request(self, url_or_path: str, method: str = "GET", params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         method = method.upper()
+        if self.stop_requested:
+            return {"status": "blocked_scope", "reason": "The run stopped after a scope-policy violation."}
         if method not in {"GET", "HEAD"}:
-            return {"status": "blocked", "reason": "Only GET and HEAD are allowed by the default policy."}
+            reason = "Only GET and HEAD are allowed by the default policy."
+            self._record_policy_violation({"kind": "blocked_method", "method": method, "reason": reason})
+            return {"status": "blocked_scope", "reason": reason}
 
         raw = str(url_or_path or "")
         url = urllib.parse.urljoin(self.base_url + "/", raw)
@@ -101,11 +136,14 @@ class ScopedHttpClient:
 
         # Check host and port
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.port not in {None, 80, 443}:
-            return {"status": "blocked", "reason": "Disallowed port or invalid URL scheme"}
+            reason = "Disallowed port or invalid URL scheme"
+            self._record_policy_violation({"kind": "invalid_target_url", "url": url, "reason": reason})
+            return {"status": "blocked_scope", "reason": reason}
 
         # Check strict scope rules
         allowed, reason = self.scope_validator.is_allowed(parsed.hostname)
         if not allowed:
+            self._record_policy_violation({"kind": "blocked_host", "host": parsed.hostname, "reason": reason})
             return {"status": "blocked", "reason": reason}
 
         if params:
@@ -113,15 +151,6 @@ class ScopedHttpClient:
             query.extend((str(key), str(value)) for key, value in params.items())
             parsed = parsed._replace(query=urllib.parse.urlencode(query, doseq=True))
             url = urllib.parse.urlunparse(parsed)
-
-        with self._lock:
-            if self.request_count >= self.max_requests:
-                return {"status": "budget_exhausted", "reason": f"Request budget ({self.max_requests}) exhausted."}
-            wait_for = self.delay_seconds - (time.monotonic() - self._last_request_at)
-            if wait_for > 0:
-                time.sleep(wait_for)
-            self.request_count += 1
-            self._last_request_at = time.monotonic()
 
         headers = {"User-Agent": "MorosAI/1.0 (authorized assessment; non-destructive checks)"}
         bug_bounty_id = os.environ.get("MOROS_BUG_BOUNTY_ID", "").strip()
@@ -136,38 +165,34 @@ class ScopedHttpClient:
         if self.cookies:
             headers["Cookie"] = self.cookies
         request = urllib.request.Request(url, headers=headers, method=method)
-        started = time.monotonic()
-        try:
-            with self._opener.open(request, timeout=self.timeout_seconds) as response:
-                body = b"" if method == "HEAD" else response.read(self.max_body_bytes + 1)
-                return self._response_result(response.status, response.geturl(), response.headers, body, started)
-        except urllib.error.HTTPError as response:
+        with self._network_lock:
+            if self.stop_requested:
+                return {"status": "blocked_scope", "reason": "The run stopped after a scope-policy violation."}
+            with self._lock:
+                if self.request_count >= self.max_requests:
+                    return {"status": "budget_exhausted", "reason": f"Request budget ({self.max_requests}) exhausted."}
+                wait_for = self.delay_seconds - (time.monotonic() - self._last_request_at)
+                if wait_for > 0:
+                    time.sleep(wait_for)
+                self.request_count += 1
+                self._last_request_at = time.monotonic()
+            started = time.monotonic()
             try:
-                body = b"" if method == "HEAD" else response.read(self.max_body_bytes + 1)
-            except Exception:
-                body = b""
-            return self._response_result(response.code, response.geturl(), response.headers, body, started)
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            return {
-                "status": "network_error", "url": url, "method": method,
-                "error": str(getattr(exc, "reason", exc))[:300],
-                "duration_s": round(time.monotonic() - started, 3),
-            }
-
-    def get(self, url_or_path: str, headers: Optional[Dict[str, str]] = None,
-            params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Convenience GET wrapper with optional extra headers."""
-        if headers:
-            saved = dict(self.auth_headers)
-            self.auth_headers.update(headers)
-            result = self.request(url_or_path, method="GET", params=params)
-            self.auth_headers = saved
-            return result
-        return self.request(url_or_path, method="GET", params=params)
-
-    def head(self, url_or_path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Convenience HEAD wrapper."""
-        return self.request(url_or_path, method="HEAD", params=params)
+                with self._opener.open(request, timeout=self.timeout_seconds) as response:
+                    body = b"" if method == "HEAD" else response.read(self.max_body_bytes + 1)
+                    return self._response_result(response.status, response.geturl(), response.headers, body, started)
+            except urllib.error.HTTPError as response:
+                try:
+                    body = b"" if method == "HEAD" else response.read(self.max_body_bytes + 1)
+                except Exception:
+                    body = b""
+                return self._response_result(response.code, response.geturl(), response.headers, body, started)
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                return {
+                    "status": "network_error", "url": url, "method": method,
+                    "error": str(getattr(exc, "reason", exc))[:300],
+                    "duration_s": round(time.monotonic() - started, 3),
+                }
 
     def record_external_requests(self, count: int) -> None:
         """Account for requests made by an equally scoped browser worker."""

@@ -1,0 +1,148 @@
+"""Evidence integrity and adversarial review for generated candidate findings.
+
+These stages are deliberately non-invasive: they inspect saved artifacts only.
+They never promote a candidate to a validated vulnerability; that requires an
+authorized, reproducible verification step.
+"""
+
+import hashlib
+import json
+from pathlib import Path
+from typing import Any, Dict, List
+from urllib.parse import urlparse
+
+try:
+    from scope_validator import ScopeValidator
+except ImportError:
+    from tools.scope_validator import ScopeValidator
+
+
+def _artifact_path(target_dir: Path, value: str) -> Path:
+    candidate = Path(str(value or ""))
+    if candidate.is_absolute():
+        return candidate
+    normalized = str(value or "").replace("\\", "/")
+    if normalized.startswith("targets/"):
+        # Project-root relative artifacts are resolved from the target directory's
+        # parent (targets/<name> -> project root).
+        return target_dir.parent.parent / Path(normalized)
+    if normalized.startswith("output/"):
+        return target_dir / Path(normalized)
+    return target_dir / "output" / candidate
+
+
+def review_candidates(target: str, target_dir: Path, findings: List[Dict[str, Any]],
+                      active_checks_allowed: bool) -> Dict[str, Any]:
+    """Attach evidence-integrity results and skeptical objections to candidates."""
+    policy = ScopeValidator(target, target_dir=target_dir).policy
+    out_of_host_requests = {}
+    audit_file = target_dir / "output" / "logs" / "scope-audit-latest.json"
+    audit_data = {}
+    if audit_file.is_file():
+        try:
+            audit_data = json.loads(audit_file.read_text(encoding="utf-8"))
+            out_of_host_requests.update(audit_data.get("out_of_scope_hosts", {}))
+        except (OSError, json.JSONDecodeError, AttributeError):
+            pass
+    traffic_log = target_dir / "output" / "js" / "traffic-log.json"
+    if not audit_data and policy.get("same_host_only") and traffic_log.is_file():
+        try:
+            traffic = json.loads(traffic_log.read_text(encoding="utf-8"))
+            for request in traffic if isinstance(traffic, list) else []:
+                host = (urlparse(str(request.get("url", ""))).hostname or "").lower().rstrip(".")
+                if host and host != target.lower().rstrip("."):
+                    out_of_host_requests[host] = out_of_host_requests.get(host, 0) + 1
+        except (OSError, json.JSONDecodeError):
+            pass
+    for item in audit_data.get("policy_violations", []):
+        if item.get("kind") == "blocked_redirect":
+            blocked_host = str(item.get("to", "unknown-host"))
+            out_of_host_requests[blocked_host] = out_of_host_requests.get(blocked_host, 0) + 1
+    scope_deviation = bool(out_of_host_requests or audit_data.get("policy_violations"))
+    reviewed = []
+    for index, item in enumerate(findings, 1):
+        finding = dict(item)
+        evidence_rows = finding.get("evidence", [])
+        if not isinstance(evidence_rows, list):
+            evidence_rows = []
+        source = finding.get("source_artifact", "")
+        if not source and evidence_rows:
+            source = evidence_rows[0].get("source_artifact", "")
+        path = _artifact_path(target_dir, source) if source else None
+        exists = bool(path and path.is_file())
+        expected_hash = ""
+        if evidence_rows and isinstance(evidence_rows[0], dict):
+            expected_hash = str(evidence_rows[0].get("source_sha256", ""))
+        actual_hash = ""
+        if exists:
+            try:
+                actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                exists = False
+        hash_matches = bool(expected_hash and actual_hash and expected_hash == actual_hash)
+
+        kind = str(finding.get("type", finding.get("category", ""))).casefold()
+        title = str(finding.get("title", "Candidate finding"))
+        if "xss" in kind or "xss" in title.casefold():
+            objection = (
+                "Static sink evidence alone does not show attacker-controlled input reaching an executable context; "
+                "source-to-sink flow and runtime reproduction are missing."
+            )
+        elif "secret" in kind or "secret" in title.casefold() or "credential" in title.casefold():
+            objection = (
+                "A pattern match or fingerprint does not establish that a value is a live credential, "
+                "privileged, or accepted by the service. Do not expose or test the value automatically."
+            )
+        else:
+            objection = (
+                "The saved artifact is a lead, not proof of security impact; a reproducible impact chain "
+                "and program-safe verification evidence are still required."
+            )
+
+        finding["validation_status"] = "unverified"
+        finding["status"] = "candidate"
+        finding["scope_attribution"] = (
+            "unreliable_due_to_scope_deviation" if scope_deviation else "not_independently_verified"
+        )
+        finding["evidence_review"] = {
+            "source_artifact": str(source) if source else None,
+            "source_exists": exists,
+            "expected_sha256_present": bool(expected_hash),
+            "sha256_matches": hash_matches if expected_hash else None,
+            "result": "integrity_pass" if exists and (not expected_hash or hash_matches) else "integrity_incomplete",
+        }
+        finding["skeptical_review"] = {
+            "disposition": "not_proven",
+            "objection": objection,
+            "required_next_step": "authorized reproducible verification" if active_checks_allowed else "blocked by saved scope policy",
+        }
+        item.update({
+            "validation_status": finding["validation_status"],
+            "status": finding["status"],
+            "scope_attribution": finding["scope_attribution"],
+            "evidence_review": finding["evidence_review"],
+            "skeptical_review": finding["skeptical_review"],
+        })
+        reviewed.append({
+            "finding_index": index,
+            "title": title,
+            "type": finding.get("type", finding.get("category", "unknown")),
+            "validation_status": "unverified",
+            "evidence_review": finding["evidence_review"],
+            "skeptical_review": finding["skeptical_review"],
+        })
+
+    return {
+        "target": target,
+        "review_type": "saved_artifact_integrity_and_adversarial_triage",
+        "network_requests": 0,
+        "validated_findings": 0,
+        "unverified_candidates": len(reviewed),
+        "scope_blocks_reproduction": not active_checks_allowed,
+        "scope_execution_audit": {
+            "deviation_detected": scope_deviation,
+            "out_of_host_request_counts": out_of_host_requests,
+            "finding_attribution": "unreliable_due_to_scope_deviation" if scope_deviation else "not_independently_verified",
+        },
+        "findings": reviewed,
+    }

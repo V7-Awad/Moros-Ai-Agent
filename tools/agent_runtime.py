@@ -123,19 +123,21 @@ class AgentRunner:
         self.llm = llm_client or LLMClient(provider="auto")
 
     def run(self, context: AgentContext, tools: ToolRegistry, system_prompt: str, user_goal: str,
-            fallback_fn: Optional[Callable[[AgentContext], AgentResult]] = None) -> AgentResult:
+            fallback_fn: Optional[Callable[[AgentContext], AgentResult]] = None,
+            persist_conversation: bool = True) -> AgentResult:
         """Execute the agent loop for a skill."""
         store = ConversationStore(context.target_dir)
         agent_id = safe_agent_name(context.skill)
+        record = store.append if persist_conversation else lambda *args, **kwargs: None
 
         # 1. Record System & User Prompts in Persistent Conversation
-        store.append(agent_id, "system", system_prompt, run_id=context.run_id)
-        store.append(agent_id, "user", user_goal, run_id=context.run_id)
+        record(agent_id, "system", system_prompt, run_id=context.run_id)
+        record(agent_id, "user", user_goal, run_id=context.run_id)
 
         # 2. Check if LLM Backend is Available
         if not self.llm.is_available():
             logger.info(f"[{agent_id}] No LLM provider configured. Operating in LLM_UNAVAILABLE mode.")
-            store.append(
+            record(
                 agent_id,
                 "assistant",
                 f"[{agent_id.upper()}] No external LLM provider configured (OPENAI_API_KEY / ANTHROPIC_API_KEY / Ollama). "
@@ -148,7 +150,7 @@ class AgentRunner:
                 result = fallback_fn(context)
                 result.status = "llm_unavailable"
                 result.reasoning_steps.append("Executed deterministic tool pipeline (LLM_UNAVAILABLE).")
-                store.append(agent_id, "assistant", f"Pipeline completed: {result.summary}", run_id=context.run_id)
+                record(agent_id, "assistant", f"Pipeline completed: {result.summary}", run_id=context.run_id)
                 return result
             else:
                 return AgentResult(
@@ -216,11 +218,11 @@ class AgentRunner:
                 break
 
             # Record Assistant Thought
-            store.append(agent_id, "assistant", llm_response, step=step, run_id=context.run_id)
+            record(agent_id, "assistant", llm_response, step=step, run_id=context.run_id)
             history.append({"role": "assistant", "content": llm_response})
 
             # Live Terminal Visualizer: Display Thought
-            thought_match = re.search(r"Thought:\s*(.+?)(?=\nAction:|\nFinal Answer:|\Z)", llm_response, re.DOTALL | re.IGNORECASE)
+            thought_match = re.search(r"Thought:\s*(.+?)(?=\nAction:|\nFinal Answer:|\nAnswer:|\n\n|\Z)", llm_response, re.DOTALL | re.IGNORECASE)
             if thought_match:
                 t_str = thought_match.group(1).strip().replace("\n", " ")
                 print(f"  🧠 \033[36m[{agent_id.upper()} THOUGHT]\033[0m {t_str[:160]}...")
@@ -244,11 +246,31 @@ class AgentRunner:
             # Extract Action: tool_name(...)
             action_match = re.search(r"Action:\s*([a-zA-Z0-9_-]+)\s*\((.*?)\)", llm_response, re.DOTALL)
             if not action_match:
-                thought_text = thought_match.group(1).strip() if thought_match else llm_response.strip()
-                reasoning_steps.append(f"Step {step}: {thought_text[:120]}...")
-                current_prompt = "Observation: No tool action was specified. If you are finished, output 'Final Answer: <summary>'. Otherwise, call a valid Action."
-                history.append({"role": "user", "content": current_prompt})
-                continue
+                # Direct conversational response (e.g. "PONG", greeting, direct answer without ReAct syntax)
+                raw_text = llm_response.strip()
+                thought_prefix_match = re.match(r"^Thought:\s*(.+?)(?:\n+(.*))?$", raw_text, re.DOTALL | re.IGNORECASE)
+                if thought_prefix_match:
+                    t_content = (thought_prefix_match.group(1) or "").strip()
+                    remainder = (thought_prefix_match.group(2) or "").strip()
+                    answer_text = remainder if remainder else t_content
+                else:
+                    answer_text = raw_text
+
+                answer_text = re.sub(r"^(?:Answer|Response):\s*", "", answer_text, flags=re.IGNORECASE).strip()
+                if not answer_text:
+                    answer_text = raw_text
+
+                print(f"  🎯 \033[35m[{agent_id.upper()} DIRECT ANSWER]\033[0m {answer_text[:200]}")
+                reasoning_steps.append(f"Step {step}: Direct response without tool invocation.")
+                return AgentResult(
+                    status="completed",
+                    summary=answer_text,
+                    findings=findings_accumulated,
+                    artifacts=artifacts_accumulated,
+                    next_actions=["review-skill", "report-conglomeration"],
+                    usage={"steps": step, "model": self.llm.model, "provider": self.llm.provider},
+                    reasoning_steps=reasoning_steps
+                )
 
             tool_name = action_match.group(1).strip()
             args_str = action_match.group(2).strip()
@@ -256,7 +278,7 @@ class AgentRunner:
 
             print(f"  ⚡ \033[33m[{agent_id.upper()} ACTION]\033[0m \033[1m{tool_name}\033[0m({args_str[:120]})")
             reasoning_steps.append(f"Step {step}: Invoked {tool_name}")
-            store.append(agent_id, "tool_call", f"Calling {tool_name} with args {parsed_args}", tool=tool_name, run_id=context.run_id)
+            record(agent_id, "tool_call", f"Calling {tool_name} with args {parsed_args}", tool=tool_name, run_id=context.run_id)
 
             # Execute tool safely via registry
             tool_output = tools.execute(tool_name, parsed_args, timeout_seconds=context.budget.get("timeout_seconds", 120))
@@ -275,7 +297,7 @@ class AgentRunner:
                     if "artifact" in res:
                         artifacts_accumulated.append(str(res["artifact"]))
 
-            store.append(agent_id, "observation", obs_str[:8000], tool=tool_name, run_id=context.run_id)
+            record(agent_id, "observation", obs_str[:8000], tool=tool_name, run_id=context.run_id)
             history.append({"role": "user", "content": f"Observation: {obs_str[:12000]}"})
             current_prompt = f"Observation: {obs_str[:12000]}\nWhat is your next Thought and Action?"
 
@@ -286,7 +308,7 @@ class AgentRunner:
                 result = fallback_fn(context)
                 result.status = "completed"
                 result.reasoning_steps.append(f"Fallback triggered due to LLM error ({llm_failure}); deterministic pipeline completed.")
-                store.append(agent_id, "assistant", f"Fallback completed: {result.summary}", run_id=context.run_id)
+                record(agent_id, "assistant", f"Fallback completed: {result.summary}", run_id=context.run_id)
                 return result
             status = "llm_error"
             summary = f"{agent_id} stopped because {self.llm.provider}/{self.llm.model} failed: {llm_failure}"
@@ -341,6 +363,7 @@ def build_default_agent_tools(
     llm_client: Optional[LLMClient] = None,
     allow_subagents: bool = True,
     max_subagents: int = 5,
+    http_client=None,
 ) -> ToolRegistry:
     """
     Constructs a full-featured offensive security toolkit for Moros AI agents.
@@ -348,20 +371,31 @@ def build_default_agent_tools(
     Dynamic Autonomous Subagent Spawning.
     """
     registry = ToolRegistry()
+    if http_client is None:
+        from scoped_http import ScopedHttpClient
+        from scope_validator import ScopeValidator
+        request_budget = int(context.budget.get("request_budget", 100))
+        request_delay = float(context.budget.get("request_delay", 0.3))
+        http_client = ScopedHttpClient(
+            context.target,
+            max_requests=request_budget,
+            delay_seconds=request_delay,
+            scope_validator=ScopeValidator(context.target, target_dir=context.target_dir),
+        )
 
     # Tool 1: http_get
     def http_get(url: str, headers: Dict[str, str] = None) -> Dict[str, Any]:
         """Perform a scoped GET request against a target URL."""
-        from scoped_http import ScopedHttpClient, is_in_target_scope
-        import urllib.parse
-        parsed = urllib.parse.urlparse(url if "://" in url else f"https://{url}")
-        host = (parsed.hostname or "").lower()
-        if not is_in_target_scope(host, context.target):
-            return {"status": "error", "error": f"URL host '{host}' is outside authorized target scope '{context.target}'"}
-
         try:
-            client = ScopedHttpClient(target=context.target, max_requests=100, delay_seconds=0.2)
-            resp = client.get(url, headers=headers or {})
+            resp = http_client.get(url, headers=headers) if headers else http_client.get(url)
+            if resp.get("status") != "response":
+                return {
+                    "status": resp.get("status", "error"),
+                    "reason": resp.get("reason", resp.get("error", "Request was blocked by scope policy.")),
+                    "url": resp.get("url", url),
+                    "method": "GET",
+                    "request_count": http_client.request_count,
+                }
             return {
                 "status": "success",
                 "status_code": resp.get("status_code"),
@@ -507,6 +541,7 @@ def build_default_agent_tools(
                 sub_context,
                 llm_client=llm_client,
                 allow_subagents=False,
+                http_client=http_client,
             )
 
             runner = AgentRunner(llm_client=llm_client)

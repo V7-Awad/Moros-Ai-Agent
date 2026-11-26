@@ -20,6 +20,7 @@ import os
 import sys
 import threading
 import time
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
@@ -108,6 +109,8 @@ class HackbotOrchestrator:
         self.request_delay = max(0.0, request_delay)
         self.parallel = parallel
         self.scope_authorized = False
+        self.scope_blocked_skills: list = []
+        self.scope_audit: dict = {}
         self._lock = threading.Lock()
 
         self.execution_log: list = []
@@ -243,10 +246,36 @@ class HackbotOrchestrator:
             models=",".join(self.models)
         )
         run_id = self.current_run["run_id"]
+        try:
+            self.runner.run_started_at = datetime.fromisoformat(
+                self.current_run["started_at"].replace("Z", "+00:00")
+            )
+        except (ValueError, AttributeError, KeyError):
+            self.runner.run_started_at = datetime.now(timezone.utc)
 
         # Step 2: Verify scope
         self.scope_authorized = self.verify_scope()
         self.runner.scope_authorized = self.scope_authorized
+        policy = getattr(self.scope_validator, "policy", {})
+        if self.scope_authorized and not policy.get("allow_active_vulnerability_checks", True):
+            # Keep reconnaissance and analysis of already collected/local evidence.
+            # A scope note that forbids exploit payloads/state changes cannot be
+            # treated as authorization for vulnerability probes by specialist skills.
+            safe_skills = {"recon-subdomain", "api-spec-discovery", "js-discover", "js-analyze",
+                           "review-skill", "report-conglomeration"}
+            requested = list(self.skills)
+            self.scope_blocked_skills = [s for s in requested if s not in safe_skills]
+            self.skills = [s for s in requested if s in safe_skills]
+            for blocked in self.scope_blocked_skills:
+                reason = "BLOCKED_SCOPE: saved scope profile forbids exploit payloads/state-changing actions; this specialist needs active checks."
+                self.skill_results[blocked] = [{"skill": blocked, "status": "BLOCKED_SCOPE", "notes": reason}]
+                self.run_manager.update_skill_progress(run_id, blocked, status="blocked", summary=reason)
+                self.run_manager.register_agent_session(
+                    run_id, agent_id=f"{blocked}-scope-gate", skill=blocked,
+                    parent_agent_id="coordinator", status="blocked_scope", model="policy-gate")
+                self._log_event(blocked, "BLOCKED_SCOPE", reason)
+            logger.warning("Scope policy blocks active vulnerability skills; allowed stages: %s",
+                           ", ".join(self.skills))
         if not self.scope_authorized:
             # Allow only passive recon without scope
             self.skills = [s for s in self.skills if s == "recon-subdomain"]
@@ -343,8 +372,14 @@ class HackbotOrchestrator:
                 self._execute_skill_with_tracking(skill_name, run_id)
 
         # Step 6: Write orchestration log & finalize durable run
+        self._write_scope_audit()
         self._write_orchestration_log()
-        final_status = "failed" if self.failed_skills else "completed"
+        policy_stop = bool(getattr(self.runner.http, "stop_requested", False))
+        if self.scope_audit.get("deviation_detected"):
+            policy_stop = True
+        final_status = "blocked" if policy_stop else ("failed" if self.failed_skills else "completed")
+        if policy_stop:
+            self._log_event("scope-check", "RUN_STOPPED", "A request or redirect violated the active scope policy; all later target requests were blocked.")
         self.run_manager.finish_run(run_id, status=final_status)
 
         # Step 7: Build Directed Attack Surface Graph
@@ -360,9 +395,10 @@ class HackbotOrchestrator:
             logger.error("\n❌ Orchestration finished with %d failed skill run(s).", len(self.failed_skills))
         else:
             logger.info("\n✅ Orchestration complete!")
-        return {"status": "FAILED" if self.failed_skills else "SUCCESS",
+        return {"status": "BLOCKED_SCOPE" if policy_stop else ("FAILED" if self.failed_skills else "SUCCESS"),
                 "run_id": run_id,
-                "failed_skills": self.failed_skills}
+                "failed_skills": self.failed_skills,
+                "scope_violations": getattr(self.runner.http, "policy_violations", [])}
 
     def _execute_skill_with_tracking(self, skill_name: str, run_id: str):
         """Execute a skill across configured models and track progress."""
@@ -409,13 +445,17 @@ class HackbotOrchestrator:
                             summary=result.get("notes", "")
                         )
                     else:
+                        durable_status = "completed"
+                        if res_status in {"BLOCKED", "BLOCKED_SCOPE"}:
+                            durable_status = "blocked"
                         self.run_manager.update_skill_progress(
-                            run_id, skill_name, status=res_status.lower(),
+                            run_id, skill_name, status=durable_status,
                             summary=result.get("notes", "")
                         )
 
                 # Run review-skill after each primary skill
-                if skill_name != "review-skill" and skill_name != "report-conglomeration":
+                if (skill_name != "review-skill" and skill_name != "report-conglomeration"
+                        and result.get("status") != "BLOCKED_SCOPE"):
                     self._run_review(skill_name, model, run_num)
 
     def _execute_skill(self, skill_name: str, model: str, run_num: int) -> dict:
@@ -432,6 +472,16 @@ class HackbotOrchestrator:
                 status="running",
                 model=model
             )
+        review_agent_ids = []
+        if self.current_run and skill_name == "report-conglomeration":
+            for review_skill in ("evidence-integrity-review", "skeptical-false-positive-review"):
+                review_id = f"{review_skill}-{model}-r{run_num}"
+                review_agent_ids.append(review_id)
+                self.run_manager.register_agent_session(
+                    self.current_run["run_id"], agent_id=review_id,
+                    skill=review_skill, parent_agent_id=agent_id,
+                    status="running", model="deterministic-artifact-review",
+                )
 
         result = {
             "skill": skill_name,
@@ -445,6 +495,19 @@ class HackbotOrchestrator:
 
         self._log_event(skill_name, "STARTED",
                         f"Model: {model}, Run: {run_num}")
+
+        if (getattr(self.runner.http, "stop_requested", False)
+                and skill_name not in {"review-skill", "report-conglomeration"}):
+            result["status"] = "BLOCKED_SCOPE"
+            result["notes"] = "Skipped after the shared HTTP client stopped on a scope-policy violation."
+            result["end_time"] = datetime.now(timezone.utc).isoformat()
+            self._log_event(skill_name, result["status"], result["notes"])
+            if self.current_run:
+                self.run_manager.update_agent_session(
+                    self.current_run["run_id"], agent_id=agent_id,
+                    status="blocked_scope", summary=result["notes"],
+                )
+            return result
 
         try:
             if skill_name == "recon-subdomain":
@@ -469,6 +532,8 @@ class HackbotOrchestrator:
             elif skill_name == "js-analyze":
                 res = self.runner.run_js_analyze()
                 result["status"] = res.get("status", "COMPLETED")
+                result["notes"] = res.get("summary", "")
+                result["findings_count"] = int(res.get("findings_count", 0))
             elif skill_name == "content-discovery":
                 res = self.runner.run_content_discovery()
                 result["status"] = res.get("status", "COMPLETED")
@@ -487,10 +552,13 @@ class HackbotOrchestrator:
                 result["notes"] = res.get(
                     "summary", f"Recorded {res.get('findings_count', 0)} candidate findings"
                 )
+                result["findings_count"] = int(res.get("findings_count", 0))
             elif skill_name == "report-conglomeration":
+                self._write_scope_audit()
                 res = self.runner.run_report_conglomeration()
                 result["status"] = res.get("status", "COMPLETED")
-                result["notes"] = f"Generated report with {res.get('findings_count', 0)} findings"
+                result["findings_count"] = int(res.get("findings_count", 0))
+                result["notes"] = f"Generated report with {result['findings_count']} unique triage candidates"
             else:
                 # Share remaining HTTP budget with custom skill runner if available
                 if hasattr(self.runner, "http") and hasattr(self.runner.http, "max_requests"):
@@ -510,6 +578,36 @@ class HackbotOrchestrator:
         self._log_event(skill_name, result["status"], result.get("notes", ""))
 
         if self.current_run:
+            review_summary = "Review stage did not produce a readable artifact."
+            review_status = "failed"
+            review_path = self.target_dir / "output" / "report" / "finding-review.json"
+            if review_path.is_file():
+                try:
+                    review_data = json.loads(review_path.read_text(encoding="utf-8"))
+                    count = int(review_data.get("unverified_candidates", 0))
+                    review_status = "completed"
+                    review_rows = review_data.get("findings", [])
+                    hash_matches = sum(
+                        1 for row in review_rows
+                        if row.get("evidence_review", {}).get("sha256_matches") is True
+                    )
+                    for review_id in review_agent_ids:
+                        if review_id.startswith("evidence-integrity-review-"):
+                            summary = f"Checked source artifact integrity for {count} candidates; {hash_matches} supplied hashes matched."
+                        else:
+                            summary = f"Recorded skeptical objections for {count} candidates; none was proven false or promoted to validated."
+                        self.run_manager.update_agent_session(
+                            self.current_run["run_id"], agent_id=review_id,
+                            status=review_status, summary=summary,
+                        )
+                except (OSError, ValueError, json.JSONDecodeError):
+                    pass
+            if review_status == "failed":
+                for review_id in review_agent_ids:
+                    self.run_manager.update_agent_session(
+                        self.current_run["run_id"], agent_id=review_id,
+                        status=review_status, summary=review_summary,
+                    )
             self.run_manager.update_agent_session(
                 self.current_run["run_id"],
                 agent_id=agent_id,
@@ -602,6 +700,7 @@ class HackbotOrchestrator:
 
     def _write_orchestration_log(self):
         """Write the full orchestration log to disk."""
+        self._write_scope_audit()
         log_path = self.target_dir / "output" / "logs" / "orchestration-log.json"
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -613,12 +712,63 @@ class HackbotOrchestrator:
             "runs_per_skill": self.runs_per_skill,
             "status": "FAILED" if self.failed_skills else "SUCCESS",
             "failed_skills": self.failed_skills,
+            "scope_blocked_skills": self.scope_blocked_skills,
+            "scope_violations": getattr(self.runner.http, "policy_violations", []),
+            "scope_audit": self.scope_audit,
             "events": self.execution_log,
             "skill_results": self.skill_results,
         }
 
         log_path.write_text(json.dumps(log_data, indent=2, default=str), encoding="utf-8")
         logger.info(f"Orchestration log written to {log_path}")
+
+    def _write_scope_audit(self):
+        """Persist a run-specific view of observed hosts and enforced scope gates."""
+        policy = getattr(self.scope_validator, "policy", {})
+        host_counts = {}
+        method_counts = {}
+        traffic_path = self.target_dir / "output" / "js" / "traffic-log.json"
+        started_at = (self.current_run or {}).get("started_at")
+        try:
+            run_started_epoch = datetime.fromisoformat(started_at.replace("Z", "+00:00")).timestamp() if started_at else 0
+        except (ValueError, AttributeError):
+            run_started_epoch = 0
+        if traffic_path.is_file() and traffic_path.stat().st_mtime >= run_started_epoch:
+            try:
+                traffic = json.loads(traffic_path.read_text(encoding="utf-8"))
+                for row in traffic if isinstance(traffic, list) else []:
+                    parsed = urllib.parse.urlparse(str(row.get("url", "")))
+                    host = (parsed.hostname or "").lower().rstrip(".")
+                    method = str(row.get("method", "UNKNOWN")).upper()
+                    if host:
+                        host_counts[host] = host_counts.get(host, 0) + 1
+                    method_counts[method] = method_counts.get(method, 0) + 1
+            except (OSError, json.JSONDecodeError):
+                pass
+        out_of_scope_hosts = {
+            host: count for host, count in host_counts.items()
+            if not self.scope_validator.is_allowed(host)[0]
+        }
+        violations = list(getattr(self.runner.http, "policy_violations", []))
+        audit = {
+            "run_id": (self.current_run or {}).get("run_id"),
+            "target": self.target,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "request_count": getattr(self.runner.http, "request_count", 0),
+            "request_limit": getattr(self.runner.http, "max_requests", None),
+            "minimum_delay_seconds": getattr(self.runner.http, "delay_seconds", None),
+            "same_host_only": bool(policy.get("same_host_only")),
+            "methods_observed": method_counts,
+            "hosts_observed": host_counts,
+            "out_of_scope_hosts": out_of_scope_hosts,
+            "policy_violations": violations,
+            "deviation_detected": bool(out_of_scope_hosts or violations),
+        }
+        self.scope_audit = audit
+        audit_path = self.target_dir / "output" / "logs" / "scope-audit-latest.json"
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        audit_path.write_text(json.dumps(audit, indent=2), encoding="utf-8")
+        return audit
 
 
 def main():

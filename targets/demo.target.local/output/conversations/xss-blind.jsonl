@@ -1,3 +1,0 @@
-{"timestamp": "2026-11-22T14:15:33.629979+00:00", "agent": "xss-blind", "role": "tool", "content": "[CHECKPOINT] Awaiting human approval", "source": "orchestrator"}
-{"timestamp": "2026-11-22T14:15:33.630798+00:00", "agent": "xss-blind", "role": "tool", "content": "[STARTED] Model: default, Run: 1", "source": "orchestrator"}
-{"timestamp": "2026-11-22T14:15:33.636723+00:00", "agent": "xss-blind", "role": "tool", "content": "[SUCCESS] Identified 0 candidate findings", "source": "orchestrator"}

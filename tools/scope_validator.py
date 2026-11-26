@@ -27,6 +27,15 @@ class ScopeValidator:
         self.target = (target or "").lower().rstrip(".")
         self.in_scope: List[str] = [s.lower().strip() for s in (in_scope or []) if s.strip()]
         self.out_of_scope: List[str] = [s.lower().strip() for s in (out_of_scope or []) if s.strip()]
+        self.policy: Dict[str, Any] = {
+            "same_host_only": False,
+            "allowed_methods": ["GET", "HEAD"],
+            "allow_authentication": True,
+            "allow_cross_host_sources": True,
+            "allow_active_vulnerability_checks": True,
+            "max_requests": None,
+            "minimum_delay_seconds": None,
+        }
 
         if target_dir:
             self._load_from_target_dir(Path(target_dir))
@@ -63,7 +72,6 @@ class ScopeValidator:
                 for s in data.get("out_of_scope", []):
                     if s.lower().strip() not in self.out_of_scope:
                         self.out_of_scope.append(s.lower().strip())
-                return
             except Exception:
                 pass
 
@@ -71,6 +79,29 @@ class ScopeValidator:
         for md_file in target_dir.glob("scope-of-work.*"):
             try:
                 text = md_file.read_text(encoding="utf-8", errors="ignore")
+                lowered = text.lower()
+                # Read explicit operational restrictions from the program note as well
+                # as its host list. These restrictions are enforced by the HTTP client
+                # and orchestrator, not treated as descriptive text only.
+                if re.search(r"same[- ]host\s+get\s*/\s*head\s+only", lowered):
+                    self.policy["same_host_only"] = True
+                    self.policy["allowed_methods"] = ["GET", "HEAD"]
+                if re.search(r"no\s+[^.\n]*cross[- ]host\s+(?:navigation|requests?)", lowered):
+                    self.policy["allow_cross_host_sources"] = False
+                if re.search(r"no\s+[^.\n]*\bauthentication\b", lowered):
+                    self.policy["allow_authentication"] = False
+                if re.search(r"no\s+[^.\n]*(?:exploit\s+payloads?|state[- ]changing\s+actions?)", lowered):
+                    self.policy["allow_active_vulnerability_checks"] = False
+                max_match = re.search(r"maximum\s+(\d+)\s+target\s+requests?", lowered)
+                if max_match:
+                    limit = int(max_match.group(1))
+                    prior = self.policy["max_requests"]
+                    self.policy["max_requests"] = min(prior, limit) if prior else limit
+                delay_match = re.search(r"minimum\s+(\d+(?:\.\d+)?)\s+seconds?\s+between\s+requests?", lowered)
+                if delay_match:
+                    delay = float(delay_match.group(1))
+                    prior = self.policy["minimum_delay_seconds"]
+                    self.policy["minimum_delay_seconds"] = max(prior or 0.0, delay)
                 in_section = re.search(r"##\s*In\s*Scope(.*?)(?=\n##|\Z)", text, re.DOTALL | re.IGNORECASE)
                 if in_section:
                     items = re.findall(r"-\s*`?([a-zA-Z0-9_\-\.\*]+)`?", in_section.group(1))
@@ -101,6 +132,9 @@ class ScopeValidator:
         h = h.rstrip(".")
         if not h:
             return False, "Could not extract valid hostname"
+
+        if self.policy.get("same_host_only") and h != self.target:
+            return False, f"Blocked: host '{h}' is outside the exact same-host-only policy for '{self.target}'"
 
         # 1. Out-of-scope check (highest priority: prevent accidental out-of-bounds hits)
         for out_rule in self.out_of_scope:

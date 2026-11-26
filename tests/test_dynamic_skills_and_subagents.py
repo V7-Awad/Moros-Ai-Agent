@@ -86,3 +86,13 @@ def test_custom_skill_execution_via_script(tmp_path):
     assert res["status"] == "COMPLETED"
     assert res["skill"] == "jwt-analysis"
     assert (out_dir / "findings" / "candidates-jwt-analysis.json").exists()
+
+
+def test_custom_script_with_direct_network_calls_is_blocked(tmp_path):
+    from tools.skill_runner import SkillRunner
+
+    runner = SkillRunner("example.com", tmp_path)
+    result = runner.run_custom_skill("path-traversal")
+
+    assert result["status"] == "BLOCKED_SCOPE"
+    assert "shared scope-enforced HTTP client" in result["summary"]

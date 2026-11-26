@@ -14,7 +14,6 @@ except ImportError:
     sys.exit(0)
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
-OUTPUT_PDF_ROOT = PROJECT_ROOT / "MOROS_AI_OPERATOR_GUIDE.pdf"
 OUTPUT_PDF_DOCS = PROJECT_ROOT / "docs" / "MOROS_AI_OPERATOR_GUIDE.pdf"
 
 HTML_CONTENT = """<!DOCTYPE html>
@@ -1010,10 +1009,6 @@ def generate_pdf():
             }
         )
         browser.close()
-
-    # Save to Root Directory
-    OUTPUT_PDF_ROOT.write_bytes(pdf_bytes)
-    print(f"Generated Root PDF: {OUTPUT_PDF_ROOT} ({len(pdf_bytes)} bytes)")
 
     # Save to Docs Directory
     OUTPUT_PDF_DOCS.parent.mkdir(parents=True, exist_ok=True)

@@ -973,7 +973,7 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
           <span id="llmStatusIndicator">LLM Settings</span>
         </button>
-        <span id="scopeBadge" class="pill warn hide-sm"><b>SCOPE NOTE FOUND</b></span>
+        <span id="scopeBadge" class="pill warn hide-sm" title="A scope file is present. Its presence does not independently verify authorization; confirm the current program rules before launching."><b>SCOPE FILE PRESENT</b></span>
         <span id="scanStatusBadge" class="pill"><b>IDLE</b></span>
         <button onclick="openModal('newScanModal')" class="btn">
           <span>Launch Scan</span>
@@ -1014,14 +1014,14 @@
             <strong>Skills Graph</strong>
             <small>Orchestration chain</small>
           </div>
-          <span class="nav-badge" id="navSkillsCount">15</span>
+          <span class="nav-badge" id="navSkillsCount">0</span>
         </div>
         <div class="nav-group-label">Evidence</div>
         <div class="part" id="tabBtn-findings" onclick="switchTab('findings')">
           <span class="chip">04</span>
           <div>
             <strong>Findings & Triage</strong>
-            <small>Validated findings</small>
+            <small>Candidate findings</small>
           </div>
           <span class="nav-badge bad" id="navFindingsCount">0</span>
         </div>
@@ -1097,9 +1097,9 @@
             <div>
               <div style="display:flex; align-items:center; gap:10px; margin-bottom:4px;">
                 <h1 id="overviewTargetName" style="margin:0; font:700 24px 'Space Grotesk', system-ui, sans-serif; color:#fff;" class="mono">Select a target</h1>
-                <span id="overviewScopeTag" class="pill warn">SCOPE NOTE FOUND</span>
+                <span id="overviewScopeTag" class="pill warn" title="A local scope file is present. This does not verify authorization; scan rules come from the file contents.">SCOPE FILE PRESENT</span>
               </div>
-              <p class="hint" style="margin:0;">Scoped same-host checks, JavaScript analysis, and evidence-linked triage.</p>
+              <p class="hint" style="margin:0;">The local scope file configures allowed checks; it does not prove program authorization. Automated results remain candidates until reviewed.</p>
             </div>
             <div style="display:flex; gap:8px;">
               <button onclick="refreshTargetData()" class="ghost">Refresh</button>
@@ -1111,9 +1111,9 @@
         <!-- Metric Score Cards -->
         <div class="stats-grid">
           <div class="stat-card">
-            <span class="label">Triage Items</span>
+            <span class="label">Unique Triage Groups</span>
             <div id="statTotalFindings" class="score">0</div>
-            <span class="sub">Candidates and validated results</span>
+            <span class="sub" id="statFindingsNote">Candidates and validated results</span>
           </div>
           <div class="stat-card crit">
             <span class="label" style="color:var(--bad);">Critical</span>
@@ -1198,8 +1198,8 @@
       <section id="tab-pipeline" style="display:none;" class="enter">
         <div class="card" style="margin-bottom: 20px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
           <div>
-            <h1 style="margin:0 0 4px; font:700 20px 'Space Grotesk', system-ui, sans-serif; color:#fff;">Extensible Multi-Skill Orchestration Graph</h1>
-            <p class="hint" style="margin:0;">Dynamic security micro-skills orchestrated with ReAct loop & completion verification (Review-Skill)</p>
+            <h1 style="margin:0 0 4px; font:700 20px 'Space Grotesk', system-ui, sans-serif; color:#fff;">Skill Library & Latest Run Status</h1>
+            <p class="hint" style="margin:0;">The library lists available skills. Statuses show what ran in the latest assessment; older logs are historical evidence only.</p>
           </div>
           <button onclick="openNewSkillModal()" class="cta" style="padding:8px 16px; font-size:13px; display:inline-flex; align-items:center; gap:8px;">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
@@ -1217,7 +1217,7 @@
           <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
             <div>
               <h1 style="margin:0 0 4px; font:700 20px 'Space Grotesk', system-ui, sans-serif; color:#fff;">Triage Candidates & Evidence</h1>
-              <p class="hint" style="margin:0;">Candidates are unverified until behavior is reproduced and reviewed</p>
+              <p class="hint" style="margin:0;">Grouped by likely underlying issue. Automated signals are candidates, not confirmed vulnerabilities.</p>
             </div>
             <!-- Severity Filter Buttons -->
             <div style="display:flex; gap:6px; flex-wrap:wrap;">
@@ -1308,7 +1308,7 @@
                 <h1 style="margin:0; font:700 22px 'Space Grotesk', system-ui, sans-serif; color:#fff;">AI Multi-Agent Command Console</h1>
                 <span class="pill warn"><b>MODEL-DRIVEN WHEN CONFIGURED</b></span>
               </div>
-              <p class="hint" style="margin:0;">Skill execution and conversation history. Live model reasoning requires a configured provider; specialist entries are not independent parallel agents yet.</p>
+              <p class="hint" style="margin:0;">Specialist entries are on-demand skills, not independent parallel agents. Review-Skill runs only when selected in an assessment; existing findings remain unverified until a current review completes.</p>
             </div>
             <div style="display:flex; gap:8px; align-items:center;">
               <button onclick="fetchConversations()" class="ghost" style="padding:6px 14px; font-size:12px;">Refresh Stream</button>
@@ -1322,8 +1322,8 @@
           <!-- Left: Sub-Agents Roster Card -->
           <div class="card agent-roster" style="padding:16px;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; padding-bottom:8px; border-bottom:1px solid var(--line);">
-              <h2 style="font-size:12px; text-transform:uppercase; letter-spacing:.08em; margin:0; color:var(--mut);">Sub-Agent Roster</h2>
-              <span class="hint mono" id="rosterCountBadge">8 Agents</span>
+              <h2 style="font-size:12px; text-transform:uppercase; letter-spacing:.08em; margin:0; color:var(--mut);">Agent & Skill Roles</h2>
+              <span class="hint mono" id="rosterCountBadge">1 Coordinator &bull; 7 Specialist Skills</span>
             </div>
             <div id="subagentsList" class="parts" style="gap:8px;">
               <!-- Dynamically populated roster items -->
@@ -1604,6 +1604,8 @@
     let activeFilter = "ALL";
     let pollInterval = null;
     let autoScrollTerminal = true;
+    const lastObservedScanState = {};
+    const scanRefreshInProgress = new Set();
 
     // --- Tab Navigation ---
     function switchTab(tabId) {
@@ -1806,7 +1808,7 @@
         targetsList.forEach(t => {
           const opt = document.createElement('option');
           opt.value = t.name;
-          opt.textContent = `${t.name} (${t.findings_total} findings)`;
+          opt.textContent = `${t.name} (${t.findings_total} unique groups)`;
           sel.appendChild(opt);
         });
       } catch (e) {
@@ -1818,6 +1820,7 @@
       currentTarget = document.getElementById('targetSelect').value;
       document.getElementById('scanTargetInput').value = currentTarget;
       await refreshTargetData();
+      await pollScanStatus();
     }
 
     async function refreshTargetData() {
@@ -1834,17 +1837,26 @@
         const overviewScopeTag = document.getElementById('overviewScopeTag');
         if (summary.has_scope) {
           scopeBadge.className = "pill warn hide-sm";
-          scopeBadge.innerHTML = "<b>SCOPE NOTE FOUND</b>";
+          scopeBadge.textContent = "SCOPE FILE PRESENT";
+          scopeBadge.title = "A scope file is present. Its presence does not independently verify authorization; confirm the current program rules before launching.";
           overviewScopeTag.className = "pill warn";
-          overviewScopeTag.textContent = "SCOPE NOTE FOUND";
+          overviewScopeTag.textContent = "SCOPE FILE PRESENT";
+          overviewScopeTag.title = scopeBadge.title;
         } else {
           scopeBadge.className = "pill warn hide-sm";
-          scopeBadge.innerHTML = "<b>PASSIVE RECON ONLY</b>";
+          scopeBadge.textContent = "PASSIVE RECON ONLY";
+          scopeBadge.title = "No scope file is present. Active target checks are disabled.";
           overviewScopeTag.className = "pill warn";
           overviewScopeTag.textContent = "NO SCOPE FILE — PASSIVE RECON ONLY";
+          overviewScopeTag.title = scopeBadge.title;
         }
 
         document.getElementById('statTotalFindings').textContent = summary.total_findings || 0;
+        const evidenceNote = document.getElementById('statFindingsNote');
+        const rawRecords = summary.raw_findings_count || summary.total_findings || 0;
+        evidenceNote.textContent = rawRecords > summary.total_findings
+          ? `Deduplicated from ${rawRecords} raw evidence records`
+          : 'Candidates and validated findings';
         document.getElementById('statCritical').textContent = summary.severities.CRITICAL || 0;
         document.getElementById('statHigh').textContent = summary.severities.HIGH || 0;
         document.getElementById('statMedium').textContent = summary.severities.MEDIUM || 0;
@@ -1881,6 +1893,7 @@
         { label: 'Medium', val: severities.MEDIUM || 0, color: '#f1c26b' },
         { label: 'Low', val: severities.LOW || 0, color: '#0277ff' },
         { label: 'Info', val: severities.INFO || 0, color: '#9aa7b8' },
+        { label: 'Unassessed', val: severities.UNASSESSED || 0, color: '#64748b' },
       ];
 
       const total = items.reduce((acc, cur) => acc + cur.val, 0);
@@ -1937,7 +1950,7 @@
         ctx.fillStyle = '#9aa7b8';
         ctx.textAlign = 'left';
         ctx.fillText(`${item.label[0]}:${item.val}`, lx + 11, ly);
-        lx += 42;
+        lx += item.label === 'Unassessed' ? 76 : 42;
       });
     }
 
@@ -2007,6 +2020,9 @@
         else if (f.severity_level === "LOW") tagClass = "tag low";
 
         const findingId = `finding-${idx}`;
+        const sourceRef = f.source_file ? `${f.source_file}${f.line ? `:L${f.line}` : ''}` : '';
+        const occurrenceCount = Number(f.raw_record_count || 1);
+        const sourceCount = (f.occurrences || []).length;
 
         return `
           <div class="card" style="margin-bottom:6px;">
@@ -2016,10 +2032,13 @@
                   <span class="${tagClass}">${f.severity_level}</span>
                   <strong style="font:600 16px 'Space Grotesk', system-ui, sans-serif; color:#fff;">${escapeHtml(f.title)}</strong>
                 </div>
-                <div class="mono" style="font-size:12px; color:var(--mut);">${escapeHtml(f.endpoint || 'Global Scope')}</div>
+                <div class="mono" style="font-size:12px; color:var(--mut);">${escapeHtml(f.endpoint || sourceRef || 'Global Scope')}</div>
+                ${sourceRef && f.endpoint ? `<small class="mono" style="display:block; margin-top:3px; color:var(--mut);">Source: ${escapeHtml(sourceRef)}</small>` : ''}
               </div>
               <span class="pill" style="font-size:11px;">${escapeHtml((f.validation_status || 'unverified').toUpperCase())} · ${escapeHtml((f.confidence || 'not-scored').toUpperCase())}</span>
             </div>
+
+            ${occurrenceCount > 1 ? `<small class="hint" style="display:block; margin-top:6px;">Grouped ${occurrenceCount} raw records across ${sourceCount || 1} source locations.</small>` : ''}
 
             ${f.payload ? `
               <div class="box" style="margin:12px 0 6px; padding:10px 14px;">
@@ -2206,10 +2225,12 @@
 
         container.innerHTML = skills.map((s, idx) => {
           let secClass = "sec";
-          let badge = `<span class="tag info">PENDING</span>`;
+          let badge = `<span class="tag info">NOT IN LATEST RUN</span>`;
           if (s.state === "completed") {
             secClass = "sec done";
-            badge = `<span class="tag ok">PASSED</span>`;
+            badge = s.review_status === "PASS"
+              ? `<span class="tag ok">COMPLETED · REVIEW PASS</span>`
+              : `<span class="tag info">COMPLETED · REVIEW NOT CONFIRMED</span>`;
           } else if (s.state === "running") {
             secClass = "sec act";
             badge = `<span class="tag" style="background:var(--blue); color:#fff;">RUNNING</span>`;
@@ -2222,6 +2243,8 @@
             badge = `<span class="tag low">NOT IMPLEMENTED</span>`;
           } else if (s.state === "blocked" || s.state === "blocked_scope") {
             badge = `<span class="tag warn">BLOCKED</span>`;
+          } else if (s.state === "no_result") {
+            badge = `<span class="tag warn">REQUESTED · NO RESULT</span>`;
           }
 
           const isCustom = s.is_custom;
@@ -2246,7 +2269,7 @@
                     ${deleteBtn}
                   </div>
                   ${s.description ? `<p style="margin:4px 0 6px; font-size:12px; color:var(--mut); line-height:1.4;">${escapeHtml(s.description)}</p>` : ''}
-                  <small style="color:var(--mut);">Logs: ${s.logs_count || 0} files &bull; Review: ${escapeHtml(s.review_status || 'unreviewed')}</small>
+                  <small style="color:var(--mut);">Historical logs: ${s.logs_count || 0} files &bull; Latest-run review: ${escapeHtml(s.review_status || 'not recorded')}</small>
                 </div>
                 <div>
                   ${badge}
@@ -2409,6 +2432,9 @@
       try {
         const res = await fetch(`/api/scan/status?target=${encodeURIComponent(currentTarget)}`);
         const data = await res.json();
+        const previousStatus = lastObservedScanState[currentTarget];
+        const currentStatus = String(data.status || 'idle').toLowerCase();
+        lastObservedScanState[currentTarget] = currentStatus;
         const badge = document.getElementById('scanStatusBadge');
 
         if (data.status === "running") {
@@ -2426,6 +2452,18 @@
           if (autoScrollTerminal) {
             const box = document.getElementById('terminalBox');
             box.scrollTop = box.scrollHeight;
+          }
+        }
+
+        const justFinished = ['running', 'starting'].includes(previousStatus)
+          && ['completed', 'failed', 'error', 'stopped'].includes(currentStatus);
+        if (justFinished && !scanRefreshInProgress.has(currentTarget)) {
+          const finishedTarget = currentTarget;
+          scanRefreshInProgress.add(finishedTarget);
+          try {
+            await refreshTargetData();
+          } finally {
+            scanRefreshInProgress.delete(finishedTarget);
           }
         }
       } catch (e) {
@@ -2458,7 +2496,7 @@
           activeRoster = data.roster;
           renderRoster(data.roster);
           const badge = document.getElementById('rosterCountBadge');
-          if (badge) badge.textContent = `${data.roster.length} Agents`;
+          if (badge) badge.textContent = `1 Coordinator · ${Math.max(0, data.roster.length - 1)} Specialist Agents`;
         }
 
         // Update active agent header
@@ -2500,7 +2538,8 @@
       if (agentId === "xss-specialist") return "🎯";
       if (agentId === "ssrf-specialist") return "☁️";
       if (agentId === "auth-race-specialist") return "🔑";
-      if (agentId === "review-verifier") return "🔍";
+      if (agentId === "evidence-integrity-review") return "🔍";
+      if (agentId === "skeptical-false-positive-review") return "🛡️";
       if (agentId === "report-specialist") return "📄";
       return "🤖";
     }
@@ -2513,7 +2552,7 @@
         const isSelected = a.id === currentAgent;
         const emoji = getAgentEmoji(a.id);
         const statusValue = String(a.status || '').toUpperCase();
-        const statusColor = (statusValue === "RUNNING" || statusValue === "STARTING") ? "var(--ok)" : ((statusValue === "FAILED" || statusValue === "STOPPED") ? "var(--bad)" : ((statusValue === "LLM OFFLINE" || statusValue === "QUEUED") ? "var(--warn)" : "var(--mut)"));
+        const statusColor = (statusValue === "RUNNING" || statusValue === "STARTING") ? "var(--ok)" : ((statusValue === "FAILED" || statusValue === "STOPPED") ? "var(--bad)" : ((statusValue === "LLM OFFLINE" || statusValue === "QUEUED" || statusValue.includes("BLOCKED BY SCOPE")) ? "var(--warn)" : "var(--mut)"));
 
         return `
           <div class="part ${isSelected ? 'active' : ''}" onclick="selectAgent('${escapeJs(a.id)}')" style="padding:10px 12px; cursor:pointer;">
@@ -2579,12 +2618,19 @@
           `;
         } else {
           const emoji = getAgentEmoji(m.agent || currentAgent);
+          const isFallback = m.source === 'deterministic_fallback' || m.model === 'deterministic-fallback';
+          const cardBorder = isFallback ? '1px solid rgba(241, 194, 107, 0.45)' : '1px solid var(--line)';
+          const cardBg = isFallback ? 'rgba(241, 194, 107, 0.06)' : 'rgba(11, 11, 11, .9)';
+          const badgeLabel = isFallback ? 'FALLBACK (Deterministic)' : escapeHtml(provider);
+          const badgeColor = isFallback ? 'var(--warn)' : 'var(--mut)';
+          const headerTitle = isFallback ? `${escapeHtml(label)} &bull; <span class="mono" style="color:${badgeColor}; font-weight:700;">[${badgeLabel}]</span>` : `${escapeHtml(label)} &bull; <span class="mono" style="color:var(--mut);">${escapeHtml(provider)}</span>`;
+
           return `
             <div style="display:flex; justify-content:flex-start; gap:10px; margin-right:60px;">
-              <div style="width:32px; height:32px; border-radius:50%; background:linear-gradient(135deg,var(--blue),var(--cyan)); display:grid; place-items:center; font-size:14px; flex-shrink:0; box-shadow:0 0 10px var(--blue-glow);">${emoji}</div>
-              <div style="background:rgba(11, 11, 11, .9); border:1px solid var(--line); border-radius:12px; padding:14px 18px; color:#cbd5e1; font-size:13px; line-height:1.6; flex:1;">
+              <div style="width:32px; height:32px; border-radius:50%; background:${isFallback ? 'rgba(241,194,107,.2)' : 'linear-gradient(135deg,var(--blue),var(--cyan))'}; border:${isFallback ? '1px solid var(--warn)' : 'none'}; display:grid; place-items:center; font-size:14px; flex-shrink:0; box-shadow:0 0 10px ${isFallback ? 'rgba(241,194,107,.25)' : 'var(--blue-glow)'};">${emoji}</div>
+              <div style="background:${cardBg}; border:${cardBorder}; border-radius:12px; padding:14px 18px; color:#cbd5e1; font-size:13px; line-height:1.6; flex:1;">
                 <div style="display:flex; justify-content:space-between; gap:12px; margin-bottom:6px; font-size:11px;">
-                  <strong style="color:${roleColor}; letter-spacing:.04em;">${escapeHtml(label)} &bull; <span class="mono" style="color:var(--mut);">${escapeHtml(provider)}</span></strong>
+                  <strong style="color:${isFallback ? 'var(--warn)' : roleColor}; letter-spacing:.04em;">${headerTitle}</strong>
                   <span class="hint mono">${escapeHtml(m.timestamp ? m.timestamp.slice(11, 19) : '')}</span>
                 </div>
                 <div>${renderOfflineMarkdown(m.content)}</div>
@@ -2973,8 +3019,24 @@
       if (badge && cfg) {
         const p = (cfg.provider || 'none').toUpperCase();
         const m = cfg.model ? ` (${cfg.model.split('/').pop()})` : '';
-        badge.textContent = cfg.is_available ? `LLM CONFIGURED: ${p}${m}` : 'LLM OFFLINE';
-        badge.style.color = cfg.is_available ? 'var(--ok)' : 'var(--warn)';
+
+        if (cfg.model_responding || cfg.connection_state === 'connected') {
+          badge.textContent = `LLM CONNECTED: ${p}${m}`;
+          badge.style.color = 'var(--ok)';
+          badge.title = 'Model responding to queries successfully.';
+        } else if (cfg.connection_state === 'error' || cfg.status === 'error') {
+          badge.textContent = `LLM ERROR: ${p}${m}`;
+          badge.style.color = 'var(--bad)';
+          badge.title = cfg.last_error || 'LLM connection error';
+        } else if (cfg.is_available || cfg.connection_state === 'configured' || cfg.connection_state === 'tested') {
+          badge.textContent = `LLM CONFIGURED (Untested): ${p}${m}`;
+          badge.style.color = 'var(--warn)';
+          badge.title = 'API key configured; connectivity not yet verified.';
+        } else {
+          badge.textContent = 'LLM OFFLINE';
+          badge.style.color = 'var(--mut)';
+          badge.title = 'No LLM API key configured.';
+        }
       }
     }
 

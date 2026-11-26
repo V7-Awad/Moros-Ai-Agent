@@ -336,6 +336,9 @@ Examples:
     scan_started_at = time.time()
     try:
         result = orchestrator.run()
+        if result and result.get("status") == "BLOCKED_SCOPE":
+            print("\n🛑 Scan stopped because a request or redirect violated the saved scope policy.")
+            sys.exit(3)
         if result and result.get("status") == "FAILED":
             sys.exit(1)
         if args.fail_on_candidate and result:

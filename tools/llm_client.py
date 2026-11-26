@@ -13,6 +13,7 @@ Uses standard urllib for zero-dependency HTTP requests.
 import json
 import logging
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -22,6 +23,30 @@ from typing import Dict, Any, Optional
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("llm-client")
+
+
+def redact_secrets(text: Optional[str]) -> str:
+    """Redact sensitive API keys, tokens, and authorization headers from text."""
+    if not text:
+        return ""
+    text = str(text)
+    # Redact Google API keys (AIzaSy...)
+    text = re.sub(r"AIza[0-9A-Za-z-_]{30,45}", "[REDACTED_API_KEY]", text)
+    # Redact OpenAI / Anthropic / general secret keys
+    text = re.sub(r"\b(sk-[a-zA-Z0-9_\-\.]{20,})\b", "[REDACTED_API_KEY]", text)
+    # Redact query string API keys: ?key=... or &api_key=...
+    text = re.sub(r"([?&](?:key|api_key|token|auth)=)[^&\s'\"]+", r"\g<1>[REDACTED]", text, flags=re.IGNORECASE)
+    # Redact Bearer tokens in headers or text
+    text = re.sub(r"\bBearer\s+[A-Za-z0-9_\-\.]{10,}\b", "Bearer [REDACTED]", text, flags=re.IGNORECASE)
+    # Redact authorization / API key headers
+    text = re.sub(r"((?:x-goog-api-key|x-api-key):\s*)[^\r\n,;'\"]+", r"\g<1>[REDACTED]", text, flags=re.IGNORECASE)
+    text = re.sub(r"(authorization:\s*)(?:Basic|Token)\s+[^\r\n,;'\"]+", r"\g<1>[REDACTED]", text, flags=re.IGNORECASE)
+    # Check loaded environment variables for any other configured keys
+    for var in ("GEMINI_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "XAI_API_KEY"):
+        val = os.environ.get(var, "").strip()
+        if val and len(val) >= 8 and val in text:
+            text = text.replace(val, "[REDACTED_API_KEY]")
+    return text
 
 
 def load_dotenv_if_present():
@@ -206,7 +231,7 @@ class LLMClient:
             self.model = self.model or os.environ.get("ANTHROPIC_MODEL") or "claude-3-5-sonnet-20241022"
         elif selected == "gemini":
             self.api_key = self.api_key or os.environ.get("GEMINI_API_KEY")
-            self.model = self.model or os.environ.get("GEMINI_MODEL") or "gemini-3.8-flash"
+            self.model = self.model or os.environ.get("GEMINI_MODEL") or "gemini-3-flash-preview"
         elif selected == "ollama":
             self.base_url = self.base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
             self.model = self.model or os.environ.get("OLLAMA_MODEL") or "llama3"
@@ -248,30 +273,36 @@ class LLMClient:
         """Return True if an LLM backend is configured and ready."""
         return self.provider != "none" and bool(self.api_key or self.provider == "ollama")
 
-    def complete(self, prompt: str, system_prompt: str = "", temperature: float = 0.2, max_tokens: int = 8192) -> Optional[str]:
+    def complete(self, prompt: str, system_prompt: str = "", temperature: float = 0.2, max_tokens: int = 8192, timeout: Optional[int] = None) -> Optional[str]:
         """Generate text completion from the configured LLM backend."""
         if not self.is_available():
             logger.debug("No LLM API key configured — skipping model inference.")
             return None
 
+        call_timeout = timeout or getattr(self, "timeout", None) or 20
+
         try:
             if self.provider in ["openai", "openrouter"]:
-                return self._call_openai_compatible(prompt, system_prompt, temperature, max_tokens)
+                res = self._call_openai_compatible(prompt, system_prompt, temperature, max_tokens, timeout=call_timeout)
             elif self.provider == "anthropic":
-                return self._call_anthropic(prompt, system_prompt, temperature, max_tokens)
+                res = self._call_anthropic(prompt, system_prompt, temperature, max_tokens, timeout=call_timeout)
             elif self.provider == "gemini":
-                return self._call_gemini(prompt, system_prompt, temperature, max_tokens)
+                res = self._call_gemini(prompt, system_prompt, temperature, max_tokens, timeout=call_timeout)
             elif self.provider == "ollama":
-                return self._call_ollama(prompt, system_prompt, temperature, max_tokens)
+                res = self._call_ollama(prompt, system_prompt, temperature, max_tokens, timeout=call_timeout)
+            else:
+                res = None
+            if res:
+                self.last_error = None
+                return redact_secrets(res)
+            return None
         except Exception as e:
-            error_text = str(e)
-            if self.api_key:
-                error_text = error_text.replace(self.api_key, "[redacted]")
+            error_text = redact_secrets(str(e))
             self.last_error = error_text[:500]
             logger.warning(f"LLM completion failed ({self.provider}/{self.model}): {self.last_error}")
             return None
 
-    def _call_openai_compatible(self, prompt: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
+    def _call_openai_compatible(self, prompt: str, system_prompt: str, temperature: float, max_tokens: int, timeout: int = 60) -> str:
         base = self.base_url or ("https://openrouter.ai/api/v1" if self.provider == "openrouter" else "https://api.openai.com/v1")
         url = f"{base.rstrip('/')}/chat/completions"
 
@@ -298,7 +329,7 @@ class LLMClient:
         for attempt in range(3):
             try:
                 req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-                with urllib.request.urlopen(req, timeout=60) as resp:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
                 return data["choices"][0]["message"]["content"]
             except urllib.error.HTTPError as exc:
@@ -309,7 +340,7 @@ class LLMClient:
                     continue
                 raise
 
-    def _call_anthropic(self, prompt: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
+    def _call_anthropic(self, prompt: str, system_prompt: str, temperature: float, max_tokens: int, timeout: int = 60) -> str:
         url = "https://api.anthropic.com/v1/messages"
         payload = {
             "model": self.model or "claude-3-5-sonnet-20241022",
@@ -327,18 +358,17 @@ class LLMClient:
         }
 
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             return data["content"][0]["text"]
 
-    def _call_gemini(self, prompt: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
+    def _call_gemini(self, prompt: str, system_prompt: str, temperature: float, max_tokens: int, timeout: int = 15) -> str:
         primary_model = self.model or "gemini-3.8-flash"
         # Candidate models to try in order on capacity spikes / deprecation
         candidate_models = [primary_model]
-        if "3.8" in primary_model and "gemini-3.5-flash" not in candidate_models:
-            candidate_models.append("gemini-3.5-flash")
-        elif "3.5" in primary_model and "gemini-3.8-flash" not in candidate_models:
-            candidate_models.append("gemini-3.8-flash")
+        for fallback in ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-flash-latest"]:
+            if fallback not in candidate_models:
+                candidate_models.append(fallback)
 
         url = "https://generativelanguage.googleapis.com/v1beta/interactions"
         last_exc = None
@@ -368,7 +398,7 @@ class LLMClient:
                     method="POST",
                 )
                 try:
-                    with urllib.request.urlopen(req, timeout=60) as resp:
+                    with urllib.request.urlopen(req, timeout=timeout) as resp:
                         data = json.loads(resp.read().decode("utf-8"))
                 except urllib.error.HTTPError as exc:
                     raw_error = exc.read(4096).decode("utf-8", errors="replace")
@@ -378,28 +408,30 @@ class LLMClient:
                         details = error.get("message", raw_error) if isinstance(error, dict) else str(error)
                     except json.JSONDecodeError:
                         details = raw_error or exc.reason
-                    if exc.code == 503 and attempt == 0:
-                        logger.warning(f"Gemini {model_name} HTTP 503 spike; backing off 1.5s for retry...")
-                        time.sleep(1.5)
-                        continue
-                    if exc.code in {503, 404} and model_name != candidate_models[-1]:
-                        logger.warning(f"Gemini {model_name} HTTP {exc.code} ({str(details)[:150]}); trying fallback model {candidate_models[-1]}...")
-                        last_exc = RuntimeError(f"Gemini API HTTP {exc.code}: {str(details)[:400]}")
+                    details = redact_secrets(details)
+                    if exc.code == 503:
+                        logger.warning(f"Gemini {model_name} HTTP 503 spike ({details[:120]}); checking next candidate...")
+                        last_exc = RuntimeError(f"Gemini API HTTP {exc.code} on {model_name}: {details[:300]}")
                         break
-                    raise RuntimeError(f"Gemini API HTTP {exc.code}: {str(details)[:400]}") from None
+                    if exc.code == 404:
+                        logger.warning(f"Gemini {model_name} HTTP 404 ({details[:120]}); checking next candidate...")
+                        last_exc = RuntimeError(f"Gemini API HTTP {exc.code} on {model_name}: {details[:300]}")
+                        break
+                    raise RuntimeError(f"Gemini API HTTP {exc.code}: {details[:300]}") from None
                 except (TimeoutError, urllib.error.URLError) as exc:
-                    if attempt == 0:
-                        time.sleep(1.0)
+                    exc_msg = redact_secrets(str(exc))
+                    if attempt == 0 and model_name == candidate_models[-1]:
+                        time.sleep(0.5)
                         continue
                     if model_name != candidate_models[-1]:
-                        logger.warning(f"Gemini {model_name} network/timeout issue; trying fallback model {candidate_models[-1]}...")
-                        last_exc = exc
+                        logger.warning(f"Gemini {model_name} network/timeout ({exc_msg[:120]}); trying next candidate model...")
+                        last_exc = RuntimeError(f"Gemini {model_name} request error: {exc_msg[:200]}")
                         break
-                    raise
+                    raise RuntimeError(f"Gemini connection error: {exc_msg[:200]}") from None
 
                 if data.get("status") != "completed":
                     details = data.get("errors") or data.get("status") or "no completed response"
-                    raise RuntimeError(f"Gemini interaction did not complete: {details}")
+                    raise RuntimeError(f"Gemini interaction did not complete: {redact_secrets(str(details))}")
 
                 output = []
                 for step in data.get("steps", []):
@@ -408,13 +440,16 @@ class LLMClient:
                             if part.get("type") == "text" and part.get("text"):
                                 output.append(part["text"])
                 if output:
-                    return "\n".join(output)
+                    if self.model != model_name:
+                        logger.info(f"Switched active Gemini model from '{self.model}' to working candidate '{model_name}'")
+                        self.model = model_name
+                    return redact_secrets("\n".join(output))
 
         if last_exc:
             raise last_exc
         raise RuntimeError("Gemini returned no text output")
 
-    def _call_ollama(self, prompt: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
+    def _call_ollama(self, prompt: str, system_prompt: str, temperature: float, max_tokens: int, timeout: int = 90) -> str:
         url = f"{(self.base_url or 'http://localhost:11434').rstrip('/')}/api/generate"
         payload = {
             "model": self.model or "llama3",
@@ -424,6 +459,6 @@ class LLMClient:
             "options": {"temperature": temperature, "num_predict": max_tokens}
         }
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=90) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             return data.get("response", "")

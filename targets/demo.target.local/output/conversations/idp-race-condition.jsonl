@@ -1,3 +1,0 @@
-{"timestamp": "2026-11-22T14:15:33.659405+00:00", "agent": "idp-race-condition", "role": "tool", "content": "[CHECKPOINT] Awaiting human approval", "source": "orchestrator"}
-{"timestamp": "2026-11-22T14:15:33.660103+00:00", "agent": "idp-race-condition", "role": "tool", "content": "[STARTED] Model: default, Run: 1", "source": "orchestrator"}
-{"timestamp": "2026-11-22T14:15:33.666267+00:00", "agent": "idp-race-condition", "role": "tool", "content": "[SUCCESS] Identified 0 candidate findings", "source": "orchestrator"}

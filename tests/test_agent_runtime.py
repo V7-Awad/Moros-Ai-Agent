@@ -124,3 +124,81 @@ def test_agent_runner_llm_unavailable_fallback(tmp_path):
     assert result.status == "llm_unavailable"
     assert "Fallback executed" in result.summary
     assert len(result.findings) == 1
+
+
+def test_agent_runner_plain_text_conversational_reply(tmp_path):
+    """Test that ordinary plain-text responses like PONG complete in 1 step without ReAct loop."""
+    registry = ToolRegistry()
+    mock_llm = MockLLM(["PONG"])
+
+    runner = AgentRunner(llm_client=mock_llm)
+    ctx = AgentContext(
+        target="test.local",
+        target_dir=tmp_path,
+        skill="test-plain-chat",
+        run_id="run-plain"
+    )
+
+    result = runner.run(
+        context=ctx,
+        tools=registry,
+        system_prompt="You are a helpful assistant.",
+        user_goal="Reply exactly PONG if you can answer."
+    )
+
+    assert result.status == "completed"
+    assert result.summary == "PONG"
+    assert result.usage.get("steps") == 1
+
+
+def test_agent_runner_conversational_reply_with_thought(tmp_path):
+    """Test that responses containing Thought: but no Action complete cleanly with the answer text."""
+    registry = ToolRegistry()
+    mock_llm = MockLLM(["Thought: The user is asking for a ping check.\nPONG"])
+
+    runner = AgentRunner(llm_client=mock_llm)
+    ctx = AgentContext(
+        target="test.local",
+        target_dir=tmp_path,
+        skill="test-thought-chat",
+        run_id="run-thought"
+    )
+
+    result = runner.run(
+        context=ctx,
+        tools=registry,
+        system_prompt="You are a helpful assistant.",
+        user_goal="Reply exactly PONG if you can answer."
+    )
+
+    assert result.status == "completed"
+    assert result.summary == "PONG"
+    assert result.usage.get("steps") == 1
+
+
+def test_redact_secrets():
+    from tools.llm_client import redact_secrets
+
+    # Google API key
+    text1 = "Error connecting with key AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q"
+    assert "[REDACTED_API_KEY]" in redact_secrets(text1)
+    assert "AIzaSy" not in redact_secrets(text1)
+
+    # OpenAI API key
+    text2 = "Using key sk-abcdef12345678901234567890abcdef for authorization"
+    assert "[REDACTED_API_KEY]" in redact_secrets(text2)
+    assert "sk-abcdef" not in redact_secrets(text2)
+
+    # Query string key
+    text3 = "Failed request to https://api.example.com/v1?key=secret_value_12345&other=ok"
+    redacted3 = redact_secrets(text3)
+    assert "key=[REDACTED]" in redacted3
+    assert "secret_value_12345" not in redacted3
+
+    # Header key
+    text4 = "Headers: {'x-goog-api-key': 'AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q'}"
+    assert "AIzaSy" not in redact_secrets(text4)
+
+    # Bearer token
+    text5 = "Authorization: Bearer my_secret_bearer_token_123456789"
+    assert "Bearer [REDACTED]" in redact_secrets(text5)

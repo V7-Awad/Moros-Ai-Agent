@@ -1,2 +1,0 @@
-{"timestamp": "2026-11-22T14:15:07.268476+00:00", "agent": "recon-subdomain", "role": "tool", "content": "[STARTED] Model: default, Run: 1", "source": "orchestrator"}
-{"timestamp": "2026-11-22T14:15:23.579627+00:00", "agent": "recon-subdomain", "role": "tool", "content": "[SUCCESS] Found 1 subdomains, 0 live hosts", "source": "orchestrator"}

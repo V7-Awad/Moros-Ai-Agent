@@ -22,12 +22,9 @@ env/
 Thumbs.db
 desktop.ini
 
-# Target output (never commit real engagement data, except demo)
+# Target workspaces and engagement outputs (never commit target data)
 targets/*
-!targets/demo.target.local/
-!targets/demo.target.local/**
-targets/demo.target.local/output/runs/
-targets/demo.target.local/output/conversations/
+!targets/.gitkeep
 
 # Reference materials
 _ref/

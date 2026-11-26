@@ -47,12 +47,16 @@ class BrowserCrawler:
                  user_agent: str = None, capture_traffic: bool = True,
                  click_interactive: bool = True, follow_links: bool = True,
                  timeout_ms: int = 30000, safe_mode: bool = False,
+                 exact_host_only: bool = False,
                  max_requests: int = 100, request_delay: float = 0.4,
                  max_pages: int = 20):
         self.target = target
         self.target_domain = urlparse(target).netloc
         self.target_hostname = (urlparse(target).hostname or "").lower().rstrip(".")
         self.safe_mode = safe_mode
+        # Safe mode defaults to the exact configured hostname. Broader scope
+        # must be an explicit caller decision rather than implicit subdomain access.
+        self.exact_host_only = bool(exact_host_only or safe_mode)
         self.max_requests = max(1, int(max_requests))
         self.max_pages = max(1, int(max_pages))
         self.request_count = 0
@@ -134,9 +138,11 @@ class BrowserCrawler:
             t = self.target_hostname.lower().rstrip(".")
             t_bare = t.removeprefix("www.")
             h_bare = h.removeprefix("www.")
-            is_target = (h == t or h_bare == t_bare or h.endswith("." + t_bare))
-            is_script_asset = (request.resource_type in {"script", "stylesheet"} or parsed.path.endswith((".js", ".css")))
-            if not is_target and not is_script_asset:
+            if self.exact_host_only:
+                is_target = h == t
+            else:
+                is_target = (h == t or h_bare == t_bare or h.endswith("." + t_bare))
+            if not is_target:
                 await route.abort()
                 return
             if request.method not in {"GET", "HEAD"}:
@@ -412,6 +418,8 @@ def main():
                         help="Page load timeout in ms (default: 30000)")
     parser.add_argument("--safe-mode", action="store_true",
                         help="Restrict browser traffic to the exact target host and GET/HEAD; disable all clicks")
+    parser.add_argument("--exact-host-only", action="store_true",
+                        help="Block subdomains and all third-party assets in safe mode")
     parser.add_argument("--max-requests", type=int, default=100,
                         help="Maximum browser requests in safe mode (default: 100)")
     parser.add_argument("--request-delay", type=float, default=0.4,
@@ -431,6 +439,7 @@ def main():
         follow_links=args.follow_all_links,
         timeout_ms=args.timeout,
         safe_mode=args.safe_mode,
+        exact_host_only=args.exact_host_only,
         max_requests=args.max_requests,
         request_delay=args.request_delay,
         max_pages=args.max_pages,

@@ -21,6 +21,7 @@ import socket
 import subprocess
 import sys
 import time
+import shutil
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -34,6 +35,8 @@ if str(tools_dir) not in sys.path:
 
 from agent_runtime import AgentRunner, AgentContext, AgentResult, ToolRegistry
 from scoped_http import ScopedHttpClient
+from finding_review import review_candidates
+from finding_dedupe import deduplicate_findings
 
 logger = logging.getLogger("skill-runner")
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
@@ -49,6 +52,7 @@ class SkillRunner:
         self.llm = llm_client
         self._recorded_evidence_ids = None
         self.scope_authorized = False
+        self.run_started_at = None
         self.http = ScopedHttpClient(target, max_requests=max_http_requests, delay_seconds=request_delay)
 
     @staticmethod
@@ -142,38 +146,44 @@ class SkillRunner:
                       f"Scope note matched configured target {self.target}; this is not independent proof of authorization.")
         subdomains = set([self.target])
 
-        # Step 2: Certificate Transparency Logs (crt.sh)
-        self.log_step(skill, "step-02-ct-logs.log", f"Querying crt.sh for %{self.target}...")
-        try:
-            url = f"https://crt.sh/?q=%25.{self.target}&output=json"
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 Moros-AI-Recon"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read().decode("utf-8", errors="ignore"))
-                for item in data:
-                    name = item.get("name_value", "")
-                    for sub in name.split("\n"):
-                        sub = sub.strip().lower().lstrip("*.")
-                        if self._host_is_in_root_scope(sub, self.target):
-                            subdomains.add(sub)
-            self.log_step(skill, "step-02-ct-logs.log", f"crt.sh returned {len(subdomains)} unique subdomains.")
-        except Exception as e:
-            self.log_step(skill, "step-02-ct-logs.log", f"crt.sh query completed/fallback: {e}")
+        policy = getattr(getattr(self.http, "scope_validator", None), "policy", {})
+        external_sources_allowed = policy.get("allow_cross_host_sources", True)
+        if external_sources_allowed:
+            # Certificate transparency and archives are queried only when the
+            # assessment policy permits contacting third-party data sources.
+            self.log_step(skill, "step-02-ct-logs.log", f"Querying crt.sh for %{self.target}...")
+            try:
+                url = f"https://crt.sh/?q=%25.{self.target}&output=json"
+                req = urllib.request.Request(url, headers={"User-Agent": "MorosAI/1.0 (authorized passive reconnaissance)"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+                    for item in data:
+                        name = item.get("name_value", "")
+                        for sub in name.split("\n"):
+                            sub = sub.strip().lower().lstrip("*.")
+                            if self._host_is_in_root_scope(sub, self.target):
+                                subdomains.add(sub)
+                self.log_step(skill, "step-02-ct-logs.log", f"crt.sh returned {len(subdomains)} unique subdomains.")
+            except Exception as e:
+                self.log_step(skill, "step-02-ct-logs.log", f"crt.sh query completed/fallback: {e}")
 
-        # Step 3: Wayback Machine CDX API subdomains
-        self.log_step(skill, "step-03-web-archives.log", f"Querying Wayback CDX for *.{self.target}/*...")
-        try:
-            cdx_url = f"https://web.archive.org/cdx/search/cdx?url=*.{self.target}/*&output=json&fl=original&collapse=urlkey&limit=3000"
-            req = urllib.request.Request(cdx_url, headers={"User-Agent": "Mozilla/5.0 Moros-AI-Recon"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                rows = json.loads(resp.read().decode("utf-8", errors="ignore"))
-                for row in rows[1:]:
-                    parsed = urllib.parse.urlparse(row[0])
-                    host = parsed.netloc.split(":")[0].lower()
-                    if self._host_is_in_root_scope(host, self.target):
-                        subdomains.add(host)
-            self.log_step(skill, "step-03-web-archives.log", f"Total subdomains after archives: {len(subdomains)}")
-        except Exception as e:
-            self.log_step(skill, "step-03-web-archives.log", f"Archive query fallback: {e}")
+            self.log_step(skill, "step-03-web-archives.log", f"Querying Wayback CDX for *.{self.target}/*...")
+            try:
+                cdx_url = f"https://web.archive.org/cdx/search/cdx?url=*.{self.target}/*&output=json&fl=original&collapse=urlkey&limit=3000"
+                req = urllib.request.Request(cdx_url, headers={"User-Agent": "MorosAI/1.0 (authorized passive reconnaissance)"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    rows = json.loads(resp.read().decode("utf-8", errors="ignore"))
+                    for row in rows[1:]:
+                        parsed = urllib.parse.urlparse(row[0])
+                        host = parsed.netloc.split(":")[0].lower()
+                        if self._host_is_in_root_scope(host, self.target):
+                            subdomains.add(host)
+                self.log_step(skill, "step-03-web-archives.log", f"Total subdomains after archives: {len(subdomains)}")
+            except Exception as e:
+                self.log_step(skill, "step-03-web-archives.log", f"Archive query fallback: {e}")
+        else:
+            self.log_step(skill, "step-02-ct-logs.log", "Skipped: scope policy forbids cross-host navigation/data-source requests.")
+            self.log_step(skill, "step-03-web-archives.log", "Skipped: scope policy forbids cross-host navigation/data-source requests.")
 
         # Save subdomains
         passive_file = recon_dir / "subdomains-passive.txt"
@@ -186,7 +196,22 @@ class SkillRunner:
 
         # Step 7: Active reachability checks require an authorization document.
         live_hosts = []
-        if active_validation:
+        if active_validation and policy.get("same_host_only"):
+            # A same-host-only scope note does not authorize probing discovered
+            # subdomains; the root host is the sole permitted destination.
+            hosts_to_check = [self.target]
+            protocols = ["https"] if https_only else ["https", "http"]
+            self.log_step(skill, "step-07-live-validation.log",
+                          f"Active HEAD checks restricted to exact target host by scope policy; protocols={','.join(protocols)}.")
+            for proto in protocols:
+                response = self.http.request(f"{proto}://{self.target}", method="HEAD")
+                if response.get("status") == "response" and response.get("status_code", 0) < 500:
+                    live_hosts.append({"host": self.target, "url": response.get("url"),
+                                       "status": response["status_code"],
+                                       "server": response.get("headers", {}).get("server", "Unknown"),
+                                       "content_type": response.get("headers", {}).get("content-type", "")})
+                    break
+        elif active_validation:
             # Until an explicit machine-readable multi-host scope is loaded, only
             # the exact configured hostname is eligible for active checks.
             hosts_to_check = [self.target]
@@ -297,9 +322,27 @@ class SkillRunner:
         self.log_step(skill, "step-01-auth-check.log", "Scope note matched the exact configured target; network policy is same-host GET/HEAD only.")
         self.log_step(skill, "step-02-browser-crawl.log", f"Starting bounded same-host browser crawl for {self.http.base_url}")
 
+        traffic_log = js_dir / "traffic-log.json"
+        if traffic_log.is_file():
+            history_dir = js_dir / "traffic-history"
+            history_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.fromtimestamp(traffic_log.stat().st_mtime, timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            archived = history_dir / f"traffic-log-{stamp}.json"
+            if not archived.exists():
+                shutil.copy2(traffic_log, archived)
+        traffic_log.write_text("[]", encoding="utf-8")
+
         remaining = self.http.max_requests - self.http.request_count
         browser_budget = min(50, remaining)
-        if browser_budget > 0:
+        policy = getattr(getattr(self.http, "scope_validator", None), "policy", {})
+        browser_redirect_risk = policy.get("same_host_only") and not policy.get("allow_cross_host_sources", True)
+        if browser_redirect_risk:
+            # Browser navigation can follow a cross-host HTTP redirect before a
+            # request route is re-applied. Use ScopedHttpClient below, whose
+            # redirect handler rejects hosts outside the exact target.
+            self.log_step(skill, "step-02-browser-crawl.log",
+                          "Browser crawl skipped: strict same-host policy cannot safely constrain automatic cross-host redirects; using scoped HTTP fallback.")
+        elif browser_budget > 0:
             browser_summary = js_dir / "crawl-summary.json"
             try:
                 crawl = subprocess.run(
@@ -307,6 +350,7 @@ class SkillRunner:
                      "--target", self.http.base_url, "--output-dir", str(js_dir / "raw"),
                      "--safe-mode", "--max-requests", str(browser_budget),
                      "--request-delay", str(self.http.delay_seconds),
+                     *( ["--exact-host-only"] if not policy.get("allow_cross_host_sources", True) else [] ),
                      "--max-depth", "3", "--max-pages", "10", "--timeout", "20000"],
                     capture_output=True, text=True, timeout=120,
                 )
@@ -1121,6 +1165,20 @@ class SkillRunner:
         summary = ""
 
         if exec_script:
+            script_source = exec_script.read_text(encoding="utf-8", errors="ignore")
+            unscoped_network_patterns = (
+                r"\brequests\b", r"\burllib\.request\b", r"\burllib3\b",
+                r"\bhttpx\b", r"\bhttpcore\b", r"\baiohttp\b", r"\bsocket\b",
+                r"\bhttp\.client\b", r"\bplaywright\b", r"\bselenium\b",
+                r"\bsubprocess\b", r"\bos\.system\s*\(", r"\bScopedHttpClient\s*\(",
+            )
+            if any(re.search(pattern, script_source, re.IGNORECASE) for pattern in unscoped_network_patterns):
+                reason = (
+                    f"Custom script '{exec_script.name}' contains direct network/process APIs and does not use "
+                    "the shared scope-enforced HTTP client. Execution blocked until it is migrated to the shared client."
+                )
+                self.log_step(skill_name, "step-custom-audit.log", f"BLOCKED_SCOPE: {reason}")
+                return {"status": "BLOCKED_SCOPE", "findings_count": 0, "summary": reason}
             self.log_step(skill_name, "step-custom-audit.log", f"Executing custom skill script: {exec_script.name}")
             cmd = [
                 sys.executable,
@@ -1165,9 +1223,19 @@ class SkillRunner:
                     target_dir=self.target_dir,
                     skill=skill_name,
                     run_id=f"run-{skill_name}",
-                    budget={"max_steps": 6, "max_tokens": 4000, "timeout_seconds": 120}
+                    scope={
+                        "allowed_hosts": [self.http.target],
+                        "methods": getattr(self.http.scope_validator, "policy", {}).get("allowed_methods", ["GET", "HEAD"]),
+                        "request_budget": max(0, self.http.max_requests - self.http.request_count),
+                        "request_delay": self.http.delay_seconds,
+                    },
+                    budget={"max_steps": 6, "max_tokens": 4000, "timeout_seconds": 120,
+                            "request_budget": max(0, self.http.max_requests - self.http.request_count),
+                            "request_delay": self.http.delay_seconds}
                 )
-                tools = build_default_agent_tools(ctx, llm_client=self.llm, allow_subagents=True)
+                tools = build_default_agent_tools(
+                    ctx, llm_client=self.llm, allow_subagents=True, http_client=self.http
+                )
                 system_prompt = (
                     f"You are an expert security researcher executing the custom skill: '{title}'.\n"
                     f"Target: {self.target}\n"
@@ -1286,9 +1354,18 @@ class SkillRunner:
 
         all_findings = []
         findings_dir = self.output_dir / "findings"
+
+        def generated_this_run(path: Path) -> bool:
+            if self.run_started_at is None:
+                return True
+            try:
+                return path.stat().st_mtime >= self.run_started_at.timestamp()
+            except OSError:
+                return False
+
         if findings_dir.exists():
             for p in findings_dir.rglob("*.json"):
-                if p.name.startswith(("confirmed-", "candidates-")):
+                if p.name.startswith(("confirmed-", "candidates-")) and generated_this_run(p):
                     try:
                         data = json.loads(p.read_text(encoding="utf-8"))
                         items = data if isinstance(data, list) else data.get("findings", [data])
@@ -1316,7 +1393,7 @@ class SkillRunner:
 
         # Also pull secrets
         sec_file = self.output_dir / "js" / "secrets-findings.json"
-        if sec_file.exists():
+        if sec_file.exists() and generated_this_run(sec_file):
             try:
                 s_data = json.loads(sec_file.read_text(encoding="utf-8"))
                 for s in s_data.get("findings", []):
@@ -1336,7 +1413,7 @@ class SkillRunner:
 
         # Pull interesting content discovery findings
         cd_file = self.output_dir / "content-discovery" / "interesting-findings.json"
-        if cd_file.exists():
+        if cd_file.exists() and generated_this_run(cd_file):
             try:
                 cd_data = json.loads(cd_file.read_text(encoding="utf-8"))
                 cd_items = cd_data if isinstance(cd_data, list) else cd_data.get("findings", [])
@@ -1358,7 +1435,7 @@ class SkillRunner:
 
         # Pull DOM sink gadgets
         gad_file = self.output_dir / "js" / "gadgets.json"
-        if gad_file.exists():
+        if gad_file.exists() and generated_this_run(gad_file):
             try:
                 g_data = json.loads(gad_file.read_text(encoding="utf-8"))
                 for g in g_data.get("gadgets", []):
@@ -1377,6 +1454,16 @@ class SkillRunner:
                 pass
 
         # Generate Automated Reproducible PoC scripts for all actionable findings
+        raw_findings_count = len(all_findings)
+        all_findings = deduplicate_findings(all_findings)
+        policy = getattr(self.http.scope_validator, "policy", {})
+        finding_review = review_candidates(
+            self.target, self.target_dir, all_findings,
+            active_checks_allowed=policy.get("allow_active_vulnerability_checks", True),
+        )
+        review_path = report_dir / "finding-review.json"
+        review_path.write_text(json.dumps(finding_review, indent=2), encoding="utf-8")
+
         try:
             try:
                 from poc_generator import PoCGenerator
@@ -1385,7 +1472,7 @@ class SkillRunner:
 
             poc_gen = PoCGenerator(self.target, self.output_dir)
             for f in all_findings:
-                if f.get("url"):
+                if f.get("validation_status") == "validated" and f.get("url"):
                     try:
                         pocs = poc_gen.generate_poc(f, custom_headers=getattr(self.http, "auth_headers", None))
                         f["poc_sh"] = pocs["poc_sh"]
@@ -1398,6 +1485,16 @@ class SkillRunner:
         date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
         report_md_file = report_dir / f"hackbot-report-{self.target}-{date_str}.md"
         report_json_file = report_dir / f"hackbot-report-{self.target}-{date_str}.json"
+        report_sources = list(findings_dir.rglob("*.json")) if findings_dir.exists() else []
+        report_sources.extend([
+            self.output_dir / "js" / "secrets-findings.json",
+            self.output_dir / "js" / "gadgets.json",
+            self.output_dir / "content-discovery" / "interesting-findings.json",
+        ])
+        source_artifact_mtimes = {
+            str(path.relative_to(self.target_dir)).replace("\\", "/"): path.stat().st_mtime
+            for path in report_sources if path.is_file()
+        }
 
         # Generate Full Markdown Report
         md = f"# Penetration Testing Assessment Report — {self.target}\n\n"
@@ -1407,13 +1504,14 @@ class SkillRunner:
         candidate_count = sum(f.get("validation_status") != "validated" for f in all_findings)
         validated_count = len(all_findings) - candidate_count
         md += "## Executive Summary\n\n"
-        md += f"Moros AI processed artifacts for `{self.target}` and recorded **{len(all_findings)} triage items**: **{candidate_count} unverified candidates** and **{validated_count} validated findings**. An empty result means insufficient observed evidence, not proof of absence.\n\n"
+        raw_record_count = sum(int(f.get("raw_record_count", 1)) for f in all_findings)
+        md += f"Moros AI processed artifacts for `{self.target}` and recorded **{len(all_findings)} unique triage items** from **{raw_findings_count} generated records** ({raw_record_count} raw occurrences): **{candidate_count} unverified candidates** and **{validated_count} validated findings**. An empty result means insufficient observed evidence, not proof of absence.\n\n"
         md += "| Finding Title | Validation | Severity | Affected URL | PoC Script |\n|---|---|---|---|---|\n"
         for f in all_findings:
             poc_link = f"`{f.get('poc_sh')}`" if f.get('poc_sh') else "-"
             md += f"| {f.get('title')} | {f.get('validation_status', 'unverified')} | {f.get('severity', 'Unassessed')} | `{f.get('url', '-')}` | {poc_link} |\n"
 
-        md += "\n## Evidence, Reproduction PoCs & Triage Items\n\n"
+        md += "\n## Evidence & Triage Items\n\n"
         for idx, f in enumerate(all_findings, 1):
             md += f"### {idx}. {f.get('title')}\n"
             md += f"- **Validation:** `{f.get('validation_status', 'unverified')}`\n"
@@ -1432,13 +1530,24 @@ class SkillRunner:
                 md += f"- **Reproduction cURL:**\n```bash\n{f.get('curl')}\n```\n"
             if f.get("notes"):
                 md += f"- **Details:** {f.get('notes')}\n"
+            evidence_review = f.get("evidence_review", {})
+            skeptical_review = f.get("skeptical_review", {})
+            if evidence_review:
+                md += (f"- **Evidence integrity:** `{evidence_review.get('result')}`; source exists: "
+                       f"`{evidence_review.get('source_exists')}`; hash matches: `{evidence_review.get('sha256_matches')}`\n")
+            if skeptical_review:
+                md += f"- **Adversarial review:** {skeptical_review.get('objection')}\n"
+                md += f"- **Next step:** `{skeptical_review.get('required_next_step')}`\n"
             md += "\n"
 
         report_md_file.write_text(md, encoding="utf-8")
         report_json_file.write_text(json.dumps({"target": self.target, "summary": {
-            "triage_items": len(all_findings), "unverified_candidates": candidate_count,
+            "triage_items": len(all_findings), "raw_records": raw_findings_count,
+            "raw_occurrences": raw_record_count, "unverified_candidates": candidate_count,
             "validated_findings": validated_count,
-        }, "findings": all_findings}, indent=2), encoding="utf-8")
+            "evidence_integrity_review": str(review_path.relative_to(self.target_dir)),
+        }, "source_artifact_mtimes": source_artifact_mtimes,
+            "finding_review": finding_review, "findings": all_findings}, indent=2), encoding="utf-8")
 
         # Generate SARIF 2.1.0 sidecar for GitHub Code Scanning and CI/CD
         sarif_file = report_dir / "findings.sarif"

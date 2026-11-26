@@ -38,15 +38,27 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from tools.conversation_store import ConversationStore, safe_agent_name
-from tools.llm_client import LLMClient
+from tools.llm_client import LLMClient, redact_secrets
 from tools.checkpoint_manager import CheckpointManager
 from tools.run_manager import RunManager
 from tools.skill_registry import SkillRegistry, CORE_SKILLS
+from tools.finding_dedupe import deduplicate_findings, finding_identity
 
 logger = logging.getLogger(__name__)
 
 # In-memory scan manager
 active_scans = {}  # target -> {thread, status, logs, start_time, pid}
+
+# In-memory runtime state for LLM connectivity
+llm_runtime_state = {
+    "configured": False,
+    "tested": False,
+    "model_responding": False,
+    "status": "offline",  # "offline", "configured", "tested", "connected", "error"
+    "last_tested": None,
+    "last_error": None,
+    "active_model": None,
+}
 
 
 def is_valid_discord_webhook_url(value):
@@ -64,6 +76,20 @@ def is_valid_discord_webhook_url(value):
         )
     except (TypeError, ValueError):
         return False
+
+
+def _safe_source_reference(value, target_name):
+    """Return an artifact path without exposing the operator's local workspace path."""
+    raw = str(value or "").strip().replace("\\", "/")
+    if not raw:
+        return ""
+    marker = f"/targets/{target_name}/output/"
+    offset = raw.casefold().find(marker.casefold())
+    if offset >= 0:
+        return raw[offset + len(marker):]
+    if re.match(r"^[A-Za-z]:/", raw) or raw.startswith("/"):
+        return Path(raw).name
+    return raw.removeprefix("./").lstrip("/")
 
 
 def send_discord_scan_summary(target, status):
@@ -313,6 +339,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     limit = 200
                 store = ConversationStore(target_path)
                 messages = store.read(agent, limit)
+                messages = self._dashboard_conversation_messages(messages)
                 agent_safe = safe_agent_name(agent)
                 if not messages:
                     welcome_text = self.get_agent_greeting(target_name, agent_safe)
@@ -617,12 +644,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def get_llm_config(self):
         client = LLMClient(provider="auto")
         key = client.api_key or ""
+        configured = client.is_available()
+
+        if not configured:
+            conn_state = "offline"
+            responding = False
+        elif llm_runtime_state.get("model_responding"):
+            conn_state = "connected"
+            responding = True
+        elif llm_runtime_state.get("status") == "error":
+            conn_state = "error"
+            responding = False
+        elif llm_runtime_state.get("tested"):
+            conn_state = "tested"
+            responding = False
+        else:
+            conn_state = "configured"
+            responding = False
+
         return {
             "provider": client.provider,
-            "model": client.model,
+            "model": llm_runtime_state.get("active_model") or client.model,
             "base_url": client.base_url or "",
-            "is_available": client.is_available(),
+            "is_available": configured,
             "has_api_key": bool(key),
+            "connection_state": conn_state,
+            "model_responding": responding,
+            "last_error": redact_secrets(llm_runtime_state.get("last_error")),
+            "last_tested": llm_runtime_state.get("last_tested"),
         }
 
     def get_notification_config(self):
@@ -775,6 +824,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             out_content += f"{k}={v}\n"
         env_file.write_text(out_content, encoding="utf-8")
 
+        # Reset runtime state to reflect newly configured credentials
+        has_key = bool(api_key or (provider == "ollama"))
+        llm_runtime_state["configured"] = has_key
+        llm_runtime_state["model_responding"] = False
+        llm_runtime_state["tested"] = False
+        llm_runtime_state["status"] = "configured" if has_key else "offline"
+        llm_runtime_state["last_error"] = None
+        llm_runtime_state["active_model"] = model
+
         return {
             "status": "success",
             "message": "LLM configuration saved to .env and activated successfully",
@@ -782,23 +840,64 @@ class DashboardHandler(BaseHTTPRequestHandler):
         }
 
     def test_llm_config(self, body):
-        provider = str(body.get("provider", "openai")).strip().lower()
+        provider = str(body.get("provider", "")).strip().lower() or None
         model = str(body.get("model", "")).strip() or None
         api_key = str(body.get("api_key", "")).strip() or None
         base_url = str(body.get("base_url", "")).strip() or None
 
         try:
-            client = LLMClient(provider=provider, model=model, api_key=api_key, base_url=base_url)
+            client = LLMClient(provider=provider or "auto", model=model, api_key=api_key, base_url=base_url)
             if not client.is_available():
-                return {"status": "error", "message": "LLM credentials missing or incomplete"}
-            resp = client.complete("Ping. Respond with 'PONG' only.", max_tokens=15)
+                llm_runtime_state["status"] = "offline"
+                llm_runtime_state["model_responding"] = False
+                llm_runtime_state["last_error"] = "LLM credentials missing or incomplete"
+                return {
+                    "status": "error",
+                    "message": "LLM credentials missing or incomplete",
+                    "connection_state": "offline",
+                    "model_responding": False,
+                }
+            resp = client.complete("Ping. Respond with 'PONG' only.", max_tokens=256, timeout=12)
+            llm_runtime_state["last_tested"] = datetime.now(timezone.utc).isoformat()
             if resp:
-                return {"status": "success", "message": f"Connected to {client.provider}/{client.model}! Response: {resp.strip()}"}
+                clean_resp = redact_secrets(resp.strip())
+                llm_runtime_state["status"] = "connected"
+                llm_runtime_state["model_responding"] = True
+                llm_runtime_state["tested"] = True
+                llm_runtime_state["last_error"] = None
+                llm_runtime_state["active_model"] = client.model
+                return {
+                    "status": "success",
+                    "message": f"Connected to {client.provider}/{client.model}! Response: {clean_resp}",
+                    "connection_state": "connected",
+                    "model_responding": True,
+                    "model": client.model,
+                    "provider": client.provider,
+                }
             else:
-                detail = client.last_error or f"{client.provider} returned an empty response"
-                return {"status": "error", "message": f"Connection failed: {detail}"}
+                detail = redact_secrets(client.last_error or f"{client.provider} returned an empty response")
+                llm_runtime_state["status"] = "error"
+                llm_runtime_state["model_responding"] = False
+                llm_runtime_state["tested"] = True
+                llm_runtime_state["last_error"] = detail
+                return {
+                    "status": "error",
+                    "message": f"Connection failed: {detail}",
+                    "connection_state": "error",
+                    "model_responding": False,
+                }
         except Exception as e:
-            return {"status": "error", "message": f"Connection test failed: {e}"}
+            err_msg = redact_secrets(str(e))
+            llm_runtime_state["status"] = "error"
+            llm_runtime_state["model_responding"] = False
+            llm_runtime_state["tested"] = True
+            llm_runtime_state["last_error"] = err_msg
+            return {
+                "status": "error",
+                "message": f"Connection test failed: {err_msg}",
+                "connection_state": "error",
+                "model_responding": False,
+            }
 
     # ==================== DATA COLLECTORS ====================
 
@@ -843,6 +942,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "has_scope": has_scope,
                     "scope_file": scope_files[0].name if has_scope else None,
                     "findings_total": len(findings),
+                    "raw_findings_total": sum(int(f.get("raw_record_count", 1)) for f in findings),
                     "severities": sev_counts,
                     "is_scanning": is_scanning,
                     "created_at": datetime.fromtimestamp(d.stat().st_ctime, tz=timezone.utc).isoformat(),
@@ -897,6 +997,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "has_scope": has_scope,
             "scope_file": scope_files[0].name if has_scope else None,
             "total_findings": len(findings),
+            "raw_findings_count": sum(int(f.get("raw_record_count", 1)) for f in findings),
             "severities": sev_counts,
             "total_endpoints": endpoints_count,
             "total_js_files": js_count,
@@ -904,6 +1005,44 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "tech_fingerprint": tech_data,
             "is_scanning": target_name in active_scans and active_scans[target_name]["status"] == "running",
         }
+
+    @staticmethod
+    def _dashboard_conversation_messages(messages):
+        """Hide AgentRunner's internal transcript copies from dashboard history."""
+        final_answers = {
+            str(item.get("content", ""))
+            for item in messages
+            if item.get("role") == "assistant"
+            and item.get("source") in ("llm", "deterministic_fallback")
+        }
+        visible = []
+        for item in messages:
+            role = item.get("role")
+            content = str(item.get("content", ""))
+
+            # System prompts are runtime context, not chat messages.
+            if role == "system":
+                continue
+
+            # AgentRunner records the same operator prompt with a run_id after
+            # the dashboard has already recorded it with source="dashboard".
+            if (
+                role == "user"
+                and item.get("run_id")
+                and visible
+                and visible[-1].get("role") == "user"
+                and visible[-1].get("source") == "dashboard"
+                and visible[-1].get("content") == content
+            ):
+                continue
+
+            # A successful ReAct turn stores its raw text and the dashboard
+            # stores the extracted final answer. Show only the final answer.
+            if role == "assistant" and item.get("step") and content in final_answers:
+                continue
+
+            visible.append(item)
+        return visible
 
     def get_agent_greeting(self, target_name, agent):
         greetings = {
@@ -990,86 +1129,123 @@ class DashboardHandler(BaseHTTPRequestHandler):
         store = ConversationStore(target_path)
         scan_state = active_scans.get(target_name, {}).get("status", "idle")
         llm_available = LLMClient(provider="auto").is_available()
+        run_manager = RunManager(target_path)
+        latest_run = run_manager.get_latest_or_active_run()
+        sessions = run_manager.list_agent_sessions(latest_run["run_id"]) if latest_run else []
+        skill_states = {}
+        for session in sessions:
+            skill_states[session.get("skill", "")] = session.get("status", "")
 
-        def _agent_status(agent_id):
+        def _coordinator_status():
             if scan_state in {"starting", "running"}:
-                return "RUNNING" if agent_id == "coordinator" else "QUEUED"
-            if scan_state in {"stopping", "stopped", "failed"}:
+                return "RUNNING"
+            if scan_state in {"stopping", "stopped", "failed", "blocked_scope"}:
                 return scan_state.upper()
-            if agent_id == "coordinator" and not llm_available:
+            if not llm_available:
                 return "LLM OFFLINE"
-            return "READY"
+            if llm_runtime_state.get("model_responding"):
+                return "ONLINE (Active)"
+            if llm_runtime_state.get("status") == "error":
+                return "LLM ERROR"
+            return "CONFIGURED (Ready)"
+
+        def _specialist_status(*skill_ids):
+            states = [skill_states.get(skill, "") for skill in skill_ids if skill_states.get(skill)]
+            if any(state in {"running", "RUNNING"} for state in states):
+                return "RUNNING"
+            if states:
+                latest = states[-1].lower()
+                if latest in {"blocked_scope", "blocked"}:
+                    return "BLOCKED BY SCOPE"
+                if latest in {"success", "completed", "no_spec"}:
+                    return "COMPLETED"
+                if latest in {"failed", "error"}:
+                    return "FAILED"
+            if scan_state in {"starting", "running"}:
+                return "QUEUED"
+            if scan_state in {"stopping", "stopped", "failed", "blocked_scope"}:
+                return scan_state.upper()
+            return "STANDBY (On-Demand)"
 
         roster = [
             {
                 "id": "coordinator",
                 "name": "Coordinator Master",
                 "role": "Attack tree orchestration, plan dispatch & multi-agent planner",
-                "tier": "Coordinator / Configured LLM",
-                "status": _agent_status("coordinator"),
+                "tier": "Coordinator (Primary Interactive Session)",
+                "status": _coordinator_status(),
                 "icon": "shield-alert",
                 "messages_count": len(store.read("coordinator", 200)),
             },
             {
                 "id": "recon-agent",
                 "name": "Reconnaissance Specialist",
-                "role": "Subdomain discovery, asset mapping, DNS brute & Wayback fetch",
-                "tier": "Active Tooling (Subdomain / DNS / Alive)",
-                "status": _agent_status("recon-agent"),
+                "role": "Scope-aware hostname inventory and authorized reachability checks",
+                "tier": "Skill: recon-subdomain",
+                "status": _specialist_status("recon-subdomain"),
                 "icon": "globe",
                 "messages_count": len(store.read("recon-agent", 200)),
             },
             {
                 "id": "js-analyzer",
                 "name": "JavaScript & API Hunter",
-                "role": "Headless browser spider, source map unminifier, AST parser & secret scanner",
-                "tier": "Active Tooling (AST / Crawler / Regex)",
-                "status": _agent_status("js-analyzer"),
+                "role": "Same-host JavaScript collection, endpoint inventory and static sink analysis",
+                "tier": "Skills: api-spec-discovery, js-discover, js-analyze",
+                "status": _specialist_status("api-spec-discovery", "js-discover", "js-analyze"),
                 "icon": "code",
                 "messages_count": len(store.read("js-analyzer", 200)),
             },
             {
                 "id": "xss-specialist",
                 "name": "XSS & Client-Side Specialist",
-                "role": "DOM, Reflected, Stored, and Blind XSS payload injection & context escape",
-                "tier": "Active Tooling (Reflection / Sink Tracer)",
-                "status": _agent_status("xss-specialist"),
+                "role": "XSS candidate analysis; active verification is gated by scope policy",
+                "tier": "Skills: xss-reflected, xss-stored, xss-dom, xss-blind",
+                "status": _specialist_status("xss-reflected", "xss-stored", "xss-dom", "xss-blind"),
                 "icon": "zap",
                 "messages_count": len(store.read("xss-specialist", 200)),
             },
             {
                 "id": "ssrf-specialist",
                 "name": "SSRF & Cloud Metadata Hunter",
-                "role": "SSRF identification, out-of-band canary interaction, AWS/GCP/K8s pivot",
-                "tier": "Active Tooling (OOB Canary / Metadata)",
-                "status": _agent_status("ssrf-specialist"),
+                "role": "SSRF candidate analysis; callbacks and active checks require explicit scope",
+                "tier": "Skills: ssrf-identify, ssrf-post-exploit",
+                "status": _specialist_status("ssrf-identify", "ssrf-post-exploit"),
                 "icon": "cloud-lightning",
                 "messages_count": len(store.read("ssrf-specialist", 200)),
             },
             {
                 "id": "auth-race-specialist",
                 "name": "Auth & Race Condition Agent",
-                "role": "IdP multi-threaded race conditions & password reset rate-limit audit",
-                "tier": "Active Tooling (Concurrent Worker Pool)",
-                "status": _agent_status("auth-race-specialist"),
+                "role": "Authentication and race-condition checks when authorized by scope",
+                "tier": "Skills: idp-race-condition, auth-password-reset-bruteforce",
+                "status": _specialist_status("idp-race-condition", "auth-password-reset-bruteforce"),
                 "icon": "key",
                 "messages_count": len(store.read("auth-race-specialist", 200)),
             },
             {
-                "id": "review-verifier",
-                "name": "Review-Skill Verifier Gate",
-                "role": "False-positive pruning, independent cURL replay & proof verification",
-                "tier": "Verification Gate (Deterministic Proofs)",
-                "status": _agent_status("review-verifier"),
+                "id": "evidence-integrity-review",
+                "name": "Evidence Integrity Reviewer",
+                "role": "Checks evidence files and hashes; does not claim exploitability validation",
+                "tier": "Deterministic saved-artifact review",
+                "status": _specialist_status("evidence-integrity-review"),
                 "icon": "check-circle",
-                "messages_count": len(store.read("review-verifier", 200)),
+                "messages_count": len(store.read("evidence-integrity-review", 200)),
+            },
+            {
+                "id": "skeptical-false-positive-review",
+                "name": "Skeptical Finding Reviewer",
+                "role": "Records missing proof and plausible false-positive explanations for each candidate",
+                "tier": "Deterministic adversarial triage",
+                "status": _specialist_status("skeptical-false-positive-review"),
+                "icon": "shield-alert",
+                "messages_count": len(store.read("skeptical-false-positive-review", 200)),
             },
             {
                 "id": "report-specialist",
                 "name": "Reporting & Synthesis Agent",
-                "role": "Executive deliverable synthesis, CVSS scoring & OASIS SARIF 2.1.0",
-                "tier": "SARIF 2.1.0 & Executive Exporter",
-                "status": _agent_status("report-specialist"),
+                "role": "Deduplicated assessment report and SARIF export with explicit candidate status",
+                "tier": "Skill: report-conglomeration",
+                "status": _specialist_status("report-conglomeration"),
                 "icon": "file-text",
                 "messages_count": len(store.read("report-specialist", 200)),
             },
@@ -1091,7 +1267,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def execute_subagent_chat(self, target: str, agent: str, message: str) -> Dict[str, Any]:
         target_path = TARGETS_DIR / target
         store = ConversationStore(target_path)
-        store.append(agent, "user", message, source="dashboard")
+        clean_user_message = redact_secrets(message)
+        store.append(agent, "user", clean_user_message, source="dashboard")
 
         # Track session in RunManager
         rm = RunManager(target_path)
@@ -1100,21 +1277,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
             latest_run = rm.create_run(target=target, skills=[agent], dry_run=False, models="interactive")
         run_id = latest_run["run_id"]
         rm.register_agent_session(run_id, agent_id=agent, skill=agent, status="running")
-        rm.log_event(run_id, "agent_chat_directive", {"agent": agent, "directive": message[:200]})
+        rm.log_event(run_id, "agent_chat_directive", {"agent": agent, "directive": clean_user_message[:200]})
 
         # Check for tools execution
         from tools.agent_runtime import AgentContext, AgentResult, AgentRunner, ToolRegistry
         from tools.skill_runner import SkillRunner
         from tools.sarif_exporter import write_sarif_report
+        from tools.scope_validator import ScopeValidator
 
         runner = SkillRunner(target=target, target_dir=target_path)
+        scope_validator = ScopeValidator(target, target_dir=target_path)
+        is_scope_valid, scope_reason = scope_validator.is_allowed(target)
+        runner.scope_authorized = bool(is_scope_valid)
+        runner.http.scope_validator = scope_validator
+
         registry = ToolRegistry()
 
         def _tool_recon(active: bool = False):
+            if active and not runner.scope_authorized:
+                return "Active recon blocked: target authorization scope note required."
             res = runner.run_recon_subdomain(active_validation=active)
             return f"Recon completed: {res.get('subdomains_found', 0)} subdomains, {res.get('alive_hosts', 0)} alive hosts."
 
         def _tool_js_analyze():
+            if not runner.scope_authorized:
+                return "JavaScript crawl blocked: target authorization scope note required."
             res = runner.run_js_analyze()
             return f"JavaScript analysis completed: {res.get('secrets_found', 0)} secrets, {res.get('endpoints_found', 0)} endpoints."
 
@@ -1148,8 +1335,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         registry.register("list_findings", _tool_list_findings, "Retrieve security findings and candidate triage items")
 
         client = LLMClient(provider="auto")
-        source = "llm"
+        source = None
         answer = None
+        llm_error_msg = None
 
         if client.is_available():
             context = AgentContext(
@@ -1162,147 +1350,191 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 f"You are the Moros AI specialist agent '{agent}' assessing target '{target}'. "
                 "You have direct execution access to target workspace tools and artifacts. "
                 "Stay strictly within authorization scope. When directed to run actions, invoke the appropriate tool. "
-                "Provide crisp, elite technical pentester output with cURL reproductions and remediation."
+                "For direct questions, ping checks, or conversational queries, answer concisely and directly."
             )
             try:
                 agent_runner = AgentRunner(llm_client=client)
-                result = agent_runner.run(context, registry, system_prompt, message)
+                # The dashboard handler owns the operator/final-answer transcript.
+                # Avoid writing AgentRunner's internal prompt and raw model turns to
+                # the same conversation file, where they would appear as duplicates.
+                result = agent_runner.run(context, registry, system_prompt, message, persist_conversation=False)
                 if result.status == "completed" and result.summary:
-                    answer = result.summary
-                    source = "agent_runner"
+                    answer = redact_secrets(result.summary)
+                    source = "llm"
+                    llm_runtime_state["model_responding"] = True
+                    llm_runtime_state["status"] = "connected"
+                    llm_runtime_state["active_model"] = client.model
+                    llm_runtime_state["last_error"] = None
+                else:
+                    llm_error_msg = redact_secrets(result.summary or client.last_error or f"Model returned status '{result.status}'")
+                    llm_runtime_state["model_responding"] = False
+                    llm_runtime_state["status"] = "error"
+                    llm_runtime_state["last_error"] = llm_error_msg
             except Exception as e:
-                logger.warning(f"AgentRunner execution failed: {e}")
+                llm_error_msg = redact_secrets(str(e))
+                logger.warning(f"AgentRunner execution failed: {llm_error_msg}")
+                llm_runtime_state["model_responding"] = False
+                llm_runtime_state["status"] = "error"
+                llm_runtime_state["last_error"] = llm_error_msg
+        else:
+            llm_error_msg = "No LLM provider configured (missing API credentials)"
+            llm_runtime_state["status"] = "offline"
+            llm_runtime_state["model_responding"] = False
 
-        if not answer:
-            # Deterministic specialist directive handling (offline / LLM unavailable)
-            msg_lower = message.lower()
-            if any(k in msg_lower for k in ["recon", "subdomain", "enumerate", "alive hosts"]):
-                res = runner.run_recon_subdomain(active_validation=False)
-                sub_count = res.get("subdomains_found", 0)
-                alive_count = res.get("alive_hosts", 0)
-                sub_file = target_path / "output" / "recon" / "subdomains.txt"
-                sample_subs = []
-                if sub_file.exists():
-                    sample_subs = [s.strip() for s in sub_file.read_text(encoding="utf-8").splitlines() if s.strip()][:8]
-                sub_list = "\n".join(f"- `{s}`" for s in sample_subs) if sample_subs else "- None recorded yet"
-                answer = (
-                    f"ðŸŒ **[RECON-AGENT] Subdomain Enumeration Directive Executed**\n\n"
-                    f"Target: `{target}` | Status: `COMPLETED`\n\n"
-                    f"### Key Metrics\n"
-                    f"- **Total Subdomains Discovered:** `{sub_count}`\n"
-                    f"- **Alive Web Endpoints:** `{alive_count}`\n"
-                    f"- **Workspace Output:** `targets/{target}/output/recon/`\n\n"
-                    f"### Discovered Subdomain Sample\n{sub_list}\n\n"
-                    f"**Next Action:** Run `run_js_analyze` or test active endpoints for parameter reflection."
-                )
-                source = "deterministic-execution"
-            elif any(k in msg_lower for k in ["js", "javascript", "secret", "token", "source map", "sourcemap", "ast"]):
-                res = runner.run_js_analyze()
-                sec_count = res.get("secrets_found", 0)
-                ep_count = res.get("endpoints_found", 0)
-                sec_file = target_path / "output" / "js" / "secrets-findings.json"
-                sec_items = []
-                if sec_file.exists():
-                    try:
-                        s_data = json.loads(sec_file.read_text(encoding="utf-8"))
-                        sec_items = s_data.get("findings", [])[:5]
-                    except Exception:
-                        pass
-                sec_summary = "\n".join(f"- `{s.get('type')}` in `{s.get('source_file')}` ({s.get('severity')})" for s in sec_items) if sec_items else "- No exposed API keys or tokens identified."
-                answer = (
-                    f"âš¡ **[JS-ANALYZER] JavaScript & Secret Extraction Executed**\n\n"
-                    f"Target: `{target}` | Status: `COMPLETED`\n\n"
-                    f"### Key Metrics\n"
-                    f"- **Secrets / Credentials Flagged:** `{sec_count}`\n"
-                    f"- **Endpoints Extracted via AST:** `{ep_count}`\n"
-                    f"- **Workspace Output:** `targets/{target}/output/js/`\n\n"
-                    f"### Extracted Secrets\n{sec_summary}\n\n"
-                    f"**Next Action:** Validate detected secret patterns against live endpoints or test candidate routes."
-                )
-                source = "deterministic-execution"
-            elif any(k in msg_lower for k in ["sarif", "github", "code scanning", "export", "report"]):
-                res = runner.run_report_conglomeration()
-                findings_count = res.get("findings_count", 0)
-                sarif_path = res.get("sarif_path") or f"targets/{target}/output/report/findings.sarif"
-                report_path = res.get("report_path") or f"targets/{target}/output/report/"
-                answer = (
-                    f"ðŸ“„ **[REPORT-SPECIALIST] Enterprise Deliverables Compiled**\n\n"
-                    f"Target: `{target}` | Status: `COMPLETED`\n\n"
-                    f"### Export Artifacts\n"
-                    f"- **OASIS SARIF 2.1.0:** `{sarif_path}` (Directly uploadable via `github/codeql-action/upload-sarif`)\n"
-                    f"- **Executive Deliverable:** `{report_path}`\n"
-                    f"- **Total Triage Items Processed:** `{findings_count}`\n\n"
-                    f"**CI/CD Integration Hint:**\n"
-                    f"```bash\n"
-                    f"# Upload to GitHub Code Scanning Alerts\n"
-                    f"gh code-scanning upload-sarif --sarif {sarif_path}\n"
-                    f"```"
-                )
-                source = "deterministic-execution"
-            elif any(k in msg_lower for k in ["verify", "verification", "review", "proof", "reproduce", "candidate"]):
-                res = runner.run_review_skill("all")
-                status_str = res.get("overall_status", "SUCCESS")
-                answer = (
-                    f"ðŸ” **[REVIEW-VERIFIER] Verification Gate Executed**\n\n"
-                    f"Target: `{target}` | Status: `{status_str}`\n\n"
-                    f"- Evaluated candidate findings against strict evidence gates.\n"
-                    f"- Verified reproduction proof standards (independent evidence, cURL validation).\n"
-                    f"- Findings without reproducible evidence marked as unverified candidates to eliminate false positives."
-                )
-                source = "deterministic-execution"
-            elif any(k in msg_lower for k in ["endpoint", "endpoints", "routes", "url", "urls"]):
-                eps = _tool_list_endpoints()
-                ep_text = "\n".join(f"- `{e}`" for e in eps[:15]) if eps else "- No endpoints discovered yet. Run recon or js-analyze first."
-                answer = (
-                    f"ðŸ›¡ï¸ **[AGENT: {agent.upper()}] Discovered Endpoints Inventory**\n\n"
-                    f"Target: `{target}` | Inventory Count: `{len(eps)}`\n\n"
-                    f"### Target Routes\n{ep_text}\n\n"
-                    f"Directives available: Ask to test specific endpoints or run vulnerability auditing."
-                )
-                source = "artifact-query"
-            elif any(k in msg_lower for k in ["finding", "findings", "vuln", "vulnerabilities", "bug", "status"]):
-                findings = self.get_target_findings(target)
-                validated = sum(1 for f in findings if f.get("validation_status") == "validated")
-                candidates = len(findings) - validated
-                f_sample = "\n".join(f"- **{f.get('title')}** â€” `{f.get('severity')}` [{f.get('validation_status')}]" for f in findings[:8]) if findings else "- No findings recorded in workspace."
-                answer = (
-                    f"ðŸ›¡ï¸ **[AGENT: {agent.upper()}] Workspace Triage Overview**\n\n"
-                    f"Target: `{target}` | Total Items: `{len(findings)}` ({validated} validated, {candidates} unverified candidates)\n\n"
-                    f"### Key Findings\n{f_sample}\n\n"
-                    f"Use `Verify findings` to invoke the verification gate or `Generate SARIF 2.1.0` to compile CI/CD reports."
-                )
-                source = "artifact-query"
-            else:
-                summary_data = self.get_target_summary(target)
-                endpoints = summary_data.get("total_endpoints", 0)
-                findings = summary_data.get("total_findings", 0)
-                answer = (
-                    f"ðŸ›¡ï¸ **[AGENT: {agent.upper()}] Operational Briefing**\n\n"
-                    f"Target: `{target}` | Status: `READY`\n\n"
-                    f"I have initialized workspace context for `{target}` with {endpoints} endpoints and {findings} triage items. "
-                    f"I am ready to execute tasks under authorization scope.\n\n"
-                    f"**Suggested Directives:**\n"
-                    f"- `Run subdomain recon` â€” Enumerate subdomains & alive hosts\n"
-                    f"- `Analyze JavaScript` â€” Crawl JS files, extract AST routes & scan for secrets\n"
-                    f"- `Verify findings` â€” Execute independent cURL replay & prune false positives\n"
-                    f"- `Export SARIF 2.1.0` â€” Build GitHub Code Scanning deliverable"
-                )
-                source = "specialist-briefing"
+        if answer and source == "llm":
+            # Successful model response
+            store.append(agent, "assistant", answer, provider=client.provider, model=client.model, source="llm")
+            rm.update_agent_session(run_id, agent_id=agent, status="completed", summary=answer[:200])
+            return {
+                "status": "success",
+                "agent": agent,
+                "provider": client.provider,
+                "model": client.model,
+                "message": answer,
+                "source": "llm",
+                "fallback_used": False,
+            }
 
-        provider = client.provider if source in ("llm", "agent_runner") else "agent-runtime"
-        model_name = client.model if source in ("llm", "agent_runner") else "specialist-tooling"
-        store.append(agent, "assistant", answer, provider=provider, model=model_name, source=source)
-        rm.update_agent_session(run_id, agent_id=agent, status="completed", summary=answer[:200])
+        # Deterministic Fallback Path (LLM failed or unavailable)
+        # Explicitly labeled fallback — NEVER present as a Gemini or successful agent response
+        fallback_source = "deterministic_fallback"
+        fallback_provider = "deterministic-fallback"
+        fallback_model = "deterministic-fallback"
+
+        msg_lower = message.lower()
+        if any(k in msg_lower for k in ["recon", "subdomain", "enumerate", "alive hosts"]):
+            res = runner.run_recon_subdomain(active_validation=False)
+            sub_count = res.get("subdomains_found", 0)
+            alive_count = res.get("alive_hosts", 0)
+            sub_file = target_path / "output" / "recon" / "subdomains.txt"
+            sample_subs = []
+            if sub_file.exists():
+                sample_subs = [s.strip() for s in sub_file.read_text(encoding="utf-8").splitlines() if s.strip()][:8]
+            sub_list = "\n".join(f"- `{s}`" for s in sample_subs) if sample_subs else "- None recorded yet"
+            fallback_body = (
+                f"🌐 **[RECON-AGENT] Subdomain Enumeration Directive Executed**\n\n"
+                f"Target: `{target}` | Status: `COMPLETED (Deterministic Fallback)`\n\n"
+                f"### Key Metrics\n"
+                f"- **Total Subdomains Discovered:** `{sub_count}`\n"
+                f"- **Alive Web Endpoints:** `{alive_count}`\n"
+                f"- **Workspace Output:** `targets/{target}/output/recon/`\n\n"
+                f"### Discovered Subdomain Sample\n{sub_list}\n\n"
+                f"**Next Action:** Run `run_js_analyze` or test active endpoints for parameter reflection."
+            )
+        elif any(k in msg_lower for k in ["js", "javascript", "secret", "token", "source map", "sourcemap", "ast"]):
+            res = runner.run_js_analyze()
+            sec_count = res.get("secrets_found", 0)
+            ep_count = res.get("endpoints_found", 0)
+            sec_file = target_path / "output" / "js" / "secrets-findings.json"
+            sec_items = []
+            if sec_file.exists():
+                try:
+                    s_data = json.loads(sec_file.read_text(encoding="utf-8"))
+                    sec_items = s_data.get("findings", [])[:5]
+                except Exception:
+                    pass
+            sec_summary = "\n".join(f"- `{s.get('type')}` in `{s.get('source_file')}` ({s.get('severity')})" for s in sec_items) if sec_items else "- No exposed API keys or tokens identified."
+            fallback_body = (
+                f"⚡ **[JS-ANALYZER] JavaScript & Secret Extraction Executed**\n\n"
+                f"Target: `{target}` | Status: `COMPLETED (Deterministic Fallback)`\n\n"
+                f"### Key Metrics\n"
+                f"- **Secrets / Credentials Flagged:** `{sec_count}`\n"
+                f"- **Endpoints Extracted via AST:** `{ep_count}`\n"
+                f"- **Workspace Output:** `targets/{target}/output/js/`\n\n"
+                f"### Extracted Secrets\n{sec_summary}\n\n"
+                f"**Next Action:** Validate detected secret patterns against live endpoints or test candidate routes."
+            )
+        elif any(k in msg_lower for k in ["sarif", "github", "code scanning", "export", "report"]):
+            res = runner.run_report_conglomeration()
+            findings_count = res.get("findings_count", 0)
+            sarif_path = res.get("sarif_path") or f"targets/{target}/output/report/findings.sarif"
+            report_path = res.get("report_path") or f"targets/{target}/output/report/"
+            fallback_body = (
+                f"📄 **[REPORT-SPECIALIST] Enterprise Deliverables Compiled**\n\n"
+                f"Target: `{target}` | Status: `COMPLETED (Deterministic Fallback)`\n\n"
+                f"### Export Artifacts\n"
+                f"- **OASIS SARIF 2.1.0:** `{sarif_path}` (Directly uploadable via `github/codeql-action/upload-sarif`)\n"
+                f"- **Executive Deliverable:** `{report_path}`\n"
+                f"- **Total Triage Items Processed:** `{findings_count}`\n\n"
+                f"**CI/CD Integration Hint:**\n"
+                f"```bash\n"
+                f"# Upload to GitHub Code Scanning Alerts\n"
+                f"gh code-scanning upload-sarif --sarif {sarif_path}\n"
+                f"```"
+            )
+        elif any(k in msg_lower for k in ["verify", "verification", "review", "proof", "reproduce", "candidate"]):
+            res = runner.run_review_skill("all")
+            status_str = res.get("overall_status", "SUCCESS")
+            fallback_body = (
+                f"🔍 **[REVIEW-VERIFIER] Verification Gate Executed**\n\n"
+                f"Target: `{target}` | Status: `{status_str} (Deterministic Fallback)`\n\n"
+                f"- Evaluated candidate findings against strict evidence gates.\n"
+                f"- Verified reproduction proof standards (independent evidence, cURL validation).\n"
+                f"- Findings without reproducible evidence marked as unverified candidates to eliminate false positives."
+            )
+        elif any(k in msg_lower for k in ["endpoint", "endpoints", "routes", "url", "urls"]):
+            eps = _tool_list_endpoints()
+            ep_text = "\n".join(f"- `{e}`" for e in eps[:15]) if eps else "- No endpoints discovered yet. Run recon or js-analyze first."
+            fallback_body = (
+                f"🛡️ **[AGENT: {agent.upper()}] Discovered Endpoints Inventory**\n\n"
+                f"Target: `{target}` | Inventory Count: `{len(eps)}`\n\n"
+                f"### Target Routes\n{ep_text}\n\n"
+                f"Directives available: Ask to test specific endpoints or run vulnerability auditing."
+            )
+        elif any(k in msg_lower for k in ["finding", "findings", "vuln", "vulnerabilities", "bug", "status"]):
+            findings = self.get_target_findings(target)
+            validated = sum(1 for f in findings if f.get("validation_status") == "validated")
+            candidates = len(findings) - validated
+            f_sample = "\n".join(f"- **{f.get('title')}** — `{f.get('severity')}` [{f.get('validation_status')}]" for f in findings[:8]) if findings else "- No findings recorded in workspace."
+            fallback_body = (
+                f"🛡️ **[AGENT: {agent.upper()}] Workspace Triage Overview**\n\n"
+                f"Target: `{target}` | Total Items: `{len(findings)}` ({validated} validated, {candidates} unverified candidates)\n\n"
+                f"### Key Findings\n{f_sample}\n\n"
+                f"Use `Verify findings` to invoke the verification gate or `Generate SARIF 2.1.0` to compile CI/CD reports."
+            )
+        elif any(k in msg_lower for k in ["pong", "ping", "connectivity", "hello", "hi"]):
+            fallback_body = (
+                f"The agent could not generate a model response for your ping/connectivity request because the upstream LLM backend is unavailable.\n\n"
+                f"**LLM Error Details:** `{llm_error_msg or 'No response from model'}`\n\n"
+                f"Please test model connectivity in Dashboard Settings or check your API key quota."
+            )
+        else:
+            summary_data = self.get_target_summary(target)
+            endpoints = summary_data.get("total_endpoints", 0)
+            findings = summary_data.get("total_findings", 0)
+            fallback_body = (
+                f"🛡️ **[AGENT: {agent.upper()}] Deterministic Workspace Briefing**\n\n"
+                f"Target: `{target}` | Status: `FALLBACK_READY`\n\n"
+                f"Workspace context for `{target}` contains {endpoints} endpoints and {findings} triage items. "
+                f"Deterministic tools remain available under authorization scope.\n\n"
+                f"**Suggested Directives:**\n"
+                f"- `Run subdomain recon` — Enumerate subdomains & alive hosts\n"
+                f"- `Analyze JavaScript` — Crawl JS files, extract AST routes & scan for secrets\n"
+                f"- `Verify findings` — Execute independent cURL replay & prune false positives\n"
+                f"- `Export SARIF 2.1.0` — Build GitHub Code Scanning deliverable"
+            )
+
+        err_detail = llm_error_msg or "Model execution failed or timed out"
+        fallback_banner = (
+            f"⚠️ **[LLM UNAVAILABLE — DETERMINISTIC FALLBACK]**\n"
+            f"*Model '{client.provider}/{client.model}' failed: {err_detail}*\n\n"
+            f"---\n\n"
+        )
+        full_fallback_message = fallback_banner + fallback_body
+
+        store.append(agent, "assistant", full_fallback_message, provider=fallback_provider, model=fallback_model, source=fallback_source)
+        rm.update_agent_session(run_id, agent_id=agent, status="fallback_completed", summary=full_fallback_message[:200])
 
         return {
-            "status": "success",
+            "status": "fallback",
             "agent": agent,
-            "provider": provider,
-            "model": model_name,
-            "message": answer,
-            "source": source
+            "provider": fallback_provider,
+            "model": fallback_model,
+            "message": full_fallback_message,
+            "source": fallback_source,
+            "fallback_used": True,
+            "llm_error": llm_error_msg,
         }
-        return roster
 
     def get_target_skills_status(self, target_name):
         target_dir = TARGETS_DIR / target_name
@@ -1310,9 +1542,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
         logs_dir = output_dir / "logs"
 
         latest_status = {}
+        latest_run = None
+        requested_skills = set()
+        completed_skills = set()
+        failed_skills = set()
+        run_started_at = None
         try:
             latest_run = RunManager(target_dir).get_latest_or_active_run()
             if latest_run:
+                requested_skills = set(latest_run.get("skills_requested", []))
+                completed_skills = set(latest_run.get("skills_completed", []))
+                failed_skills = set(latest_run.get("skills_failed", []))
+                started = latest_run.get("started_at")
+                if started:
+                    run_started_at = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
                 events_path = output_dir / "runs" / latest_run["run_id"] / "events.jsonl"
                 if events_path.is_file():
                     for line in events_path.read_text(encoding="utf-8").splitlines():
@@ -1334,36 +1577,48 @@ class DashboardHandler(BaseHTTPRequestHandler):
         for s_obj in all_skills:
             s = s_obj["id"]
             skill_log_dir = logs_dir / s
-            has_logs = skill_log_dir.exists() and any(skill_log_dir.glob("*.log"))
-
-            # Determine status
-            state = "pending"
-            log_files = []
-            if has_logs:
-                log_files = [f.name for f in skill_log_dir.glob("*.log")]
-                state = "completed"
-
+            log_files = [f.name for f in skill_log_dir.glob("*.log")] if skill_log_dir.exists() else []
             run_state = latest_status.get(s)
-            if run_state in {"running", "failed", "blocked", "blocked_scope"}:
+            if s not in requested_skills:
+                state = "not_run"
+                review_status = "not_run"
+            elif run_state in {"running", "failed", "blocked", "blocked_scope"}:
                 state = run_state
+                review_status = "not_recorded"
             elif run_state == "candidates_only":
                 state = "candidates_only"
+                review_status = "not_recorded"
             elif run_state == "not_implemented":
                 state = "not_implemented"
+                review_status = "not_recorded"
             elif run_state in {"completed", "success"}:
                 state = "completed"
+                review_status = "not_recorded"
+            elif s in failed_skills:
+                state = "failed"
+                review_status = "not_recorded"
+            elif s in completed_skills:
+                state = "completed"
+                review_status = "not_recorded"
+            else:
+                state = "no_result"
+                review_status = "not_recorded"
 
-            # Check if review failed
+            # Only treat a review file as current when it postdates this run's start.
             review_log = logs_dir / "review" / f"{s}-review-1.json"
-            review_status = "unreviewed"
-            if review_log.exists():
+            if s in requested_skills and review_log.exists():
                 try:
-                    rev_data = json.loads(review_log.read_text(encoding="utf-8"))
-                    review_status = rev_data.get("overall_status", "PASS")
-                    if review_status == "FAIL":
-                        state = "failed"
+                    review_time = datetime.fromtimestamp(review_log.stat().st_mtime, tz=timezone.utc)
+                    comparable_start = run_started_at.astimezone(timezone.utc) if run_started_at else None
+                    if comparable_start and review_time < comparable_start:
+                        review_status = "historical"
+                    else:
+                        rev_data = json.loads(review_log.read_text(encoding="utf-8"))
+                        review_status = rev_data.get("overall_status", "PASS")
+                        if review_status == "FAIL":
+                            state = "failed"
                 except Exception:
-                    pass
+                    review_status = "not_recorded"
 
             statuses.append({
                 "skill": s,
@@ -1376,6 +1631,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "review_status": review_status,
                 "logs_count": len(log_files),
                 "log_files": log_files,
+                "latest_run_id": latest_run.get("run_id") if latest_run else None,
+                "requested_in_latest_run": s in requested_skills,
             })
 
         return statuses
@@ -1383,7 +1640,74 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def get_target_findings(self, target_name):
         target_dir = TARGETS_DIR / target_name
         output_dir = target_dir / "output"
+
+        # A current report is the canonical grouped inventory. When source
+        # artifacts have changed since that report, fall through and rebuild the
+        # live view so stale reports cannot hide new evidence.
+        report_files = sorted(
+            (output_dir / "report").glob("hackbot-report-*.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        if report_files:
+            latest_report = report_files[0]
+            source_roots = [output_dir / "findings"]
+            source_files = [
+                output_dir / "js" / "secrets-findings.json",
+                output_dir / "js" / "gadgets.json",
+                output_dir / "content-discovery" / "interesting-findings.json",
+            ]
+            if source_roots[0].exists():
+                source_files.extend(source_roots[0].rglob("*.json"))
+            current_manifest = {
+                str(path.relative_to(target_dir)).replace("\\", "/"): path.stat().st_mtime
+                for path in source_files if path.is_file()
+            }
+            try:
+                report_data = json.loads(latest_report.read_text(encoding="utf-8"))
+                source_manifest = report_data.get("source_artifact_mtimes") if isinstance(report_data, dict) else None
+                if isinstance(source_manifest, dict) and source_manifest == current_manifest:
+                    report_findings = report_data.get("findings", []) if isinstance(report_data, dict) else []
+                    if isinstance(report_findings, list):
+                        normalized = []
+                        for index, raw in enumerate(report_findings, 1):
+                            if not isinstance(raw, dict):
+                                continue
+                            finding = dict(raw)
+                            finding.setdefault("id", f"report-{index}")
+                            finding.setdefault("endpoint", finding.get("url", ""))
+                            finding.setdefault("category", finding.get("type", "candidate"))
+                            severity = str(finding.get("severity", "UNASSESSED")).upper()
+                            finding.setdefault("severity_level", next((level for level in
+                                ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO") if level in severity), "UNASSESSED"))
+                            finding.setdefault("validation_status", "unverified")
+                            finding.setdefault("status", "candidate")
+                            normalized.append(finding)
+                        return normalized
+            except (OSError, json.JSONDecodeError):
+                pass
+
         findings = []
+        grouped = {}
+        dom_lookup = {}
+
+        def sink_name(item):
+            value = str(item.get("sink", "")).strip()
+            if not value:
+                match = re.search(r"Potential DOM XSS Sink ['\"]([^'\"]+)", str(item.get("title", "")))
+                value = match.group(1) if match else ""
+            value = value.casefold().replace(" assignment", "").replace(" redirect", "")
+            return value
+
+        def add_occurrence(finding, source, line=None):
+            occurrence = {"source_file": source, "line": line}
+            occurrences = finding.setdefault("occurrences", [])
+            if occurrence not in occurrences:
+                occurrences.append(occurrence)
+            finding["raw_record_count"] = finding.get("raw_record_count", 1) + 1
+
+        def source_basename(source):
+            return Path(str(source or "").replace("\\", "/")).name.casefold()
 
         # 1. From findings/* directory
         findings_dir = output_dir / "findings"
@@ -1395,6 +1719,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         items = content if isinstance(content, list) else content.get("findings", [content])
                         for item in items:
                             if isinstance(item, dict) and ("type" in item or "title" in item or "url" in item):
+                                raw_title = str(item.get("title", item.get("type", fpath.stem)))
+                                url = str(item.get("url", item.get("endpoint", "")))
+                                is_dom_candidate = "Potential DOM XSS Sink" in raw_title
+                                sink = sink_name(item) if is_dom_candidate else ""
+                                parsed_url = urllib.parse.urlsplit(url)
+                                line_match = re.search(r"#L(\d+)", url)
+                                line = item.get("line") or (int(line_match.group(1)) if line_match else None)
+                                if is_dom_candidate:
+                                    source_reference = Path(parsed_url.path).name
+                                    identity = finding_identity({
+                                        **item, "type": "DOM XSS", "sink": sink,
+                                        "source_file": source_reference, "url": url,
+                                    })
+                                else:
+                                    source_reference = _safe_source_reference(item.get("source_file") or str(fpath.relative_to(output_dir)), target_name)
+                                    identity = finding_identity({
+                                        **item, "title": raw_title, "category": item.get("type", fpath.parent.name),
+                                        "source_file": source_reference, "url": url,
+                                    })
+
                                 raw_sev = item.get("severity", "Triage Severity: UNASSESSED â€” pending evidence and human review")
                                 sev_lvl = "UNASSESSED" if "UNASSESSED" in raw_sev.upper() else "MEDIUM"
                                 if "CRITICAL" in raw_sev.upper():
@@ -1414,17 +1758,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
                                     and bool(validation.get("evidence_ids"))
                                     and validation.get("outcome") == "reproduced"
                                 )
-                                findings.append({
+                                existing = grouped.get(identity)
+                                if existing:
+                                    add_occurrence(existing, source_reference, line)
+                                    if is_dom_candidate:
+                                        dom_lookup[(source_basename(source_reference), sink)] = existing
+                                    continue
+
+                                finding = {
                                     "id": f"{fpath.stem}-{len(findings)+1}",
-                                    "title": item.get("title", item.get("type", fpath.stem)),
+                                    "title": raw_title,
                                     "category": fpath.parent.name,
                                     "severity": raw_sev,
                                     "severity_level": sev_lvl,
-                                    "endpoint": item.get("url", item.get("endpoint", "")),
+                                    "endpoint": url,
                                     "parameter": item.get("parameter", item.get("param", "")),
                                     "payload": item.get("payload", ""),
                                     "curl_command": item.get("curl", ""),
-                                    "source_file": str(fpath.relative_to(output_dir)),
+                                    "source_file": source_reference,
+                                    "line": line,
+                                    "occurrences": [{"source_file": source_reference, "line": line}],
+                                    "raw_record_count": 1,
                                     "details": item.get("notes", item.get("context", "")),
                                     "status": "validated" if human_validation else "candidate",
                                     "validation_status": "validated" if human_validation else "unverified",
@@ -1432,7 +1786,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                                     "evidence_ids": item.get("evidence_ids", []),
                                     "poc_sh": item.get("poc_sh", ""),
                                     "poc_py": item.get("poc_py", ""),
-                                })
+                                }
+                                grouped[identity] = finding
+                                findings.append(finding)
+                                if is_dom_candidate:
+                                    dom_lookup[(source_basename(source_reference), sink)] = finding
                     except Exception:
                         pass
 
@@ -1442,6 +1800,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             try:
                 s_data = json.loads(secrets_file.read_text(encoding="utf-8"))
                 for s in s_data.get("findings", []):
+                    source_file = _safe_source_reference(s.get("source_file", ""), target_name)
+                    fingerprint = str(s.get("value_fingerprint", "")).strip()
+                    identity = ("secret", str(s.get("type", "")).casefold(), fingerprint) if fingerprint else (
+                        "secret", str(s.get("type", "")).casefold(), source_file, s.get("line_number")
+                    )
+                    existing = grouped.get(identity)
+                    if existing:
+                        add_occurrence(existing, source_file, s.get("line_number"))
+                        continue
                     raw_sev = s.get("severity", "Triage Severity: MEDIUM â€” pending human review")
                     sev_lvl = "MEDIUM"
                     if "HIGH" in raw_sev.upper():
@@ -1451,7 +1818,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     elif "LOW" in raw_sev.upper():
                         sev_lvl = "LOW"
 
-                    findings.append({
+                    finding = {
                         "id": f"secret-{len(findings)+1}",
                         "title": f"Hardcoded Secret: {s.get('type')}",
                         "category": "secrets",
@@ -1462,11 +1829,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "parameter": s.get("pattern_name", ""),
                         "payload": s.get("value_preview", ""),
                         "curl_command": "",
-                        "source_file": s.get("source_file", ""),
+                        "source_file": source_file,
                         "line": s.get("line_number"),
+                        "occurrences": [{"source_file": source_file, "line": s.get("line_number")}],
+                        "raw_record_count": 1,
                         "details": s.get("context", ""),
                         "status": "pending_review",
-                    })
+                    }
+                    grouped[identity] = finding
+                    findings.append(finding)
             except Exception:
                 pass
 
@@ -1475,26 +1846,46 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if gadgets_file.exists():
             try:
                 g_data = json.loads(gadgets_file.read_text(encoding="utf-8"))
+                gadget_groups = {}
                 for g in g_data.get("gadgets", []):
-                    findings.append({
+                    source_file = _safe_source_reference(g.get("source_file", ""), target_name)
+                    sink = sink_name({"sink": g.get("type", "")})
+                    identity = (source_file.casefold(), sink, str(g.get("line_number", "")).strip())
+                    if identity not in gadget_groups:
+                        gadget_groups[identity] = {"count": 0, "sample": g, "source_file": source_file}
+                    gadget_groups[identity]["count"] += 1
+
+                for (source_key, sink, _line), group in gadget_groups.items():
+                    raw_count = group["count"]
+                    candidate = dom_lookup.get((source_key, sink))
+                    if candidate:
+                        candidate["raw_record_count"] += raw_count
+                        continue
+                    g = group["sample"]
+                    source_file = group["source_file"]
+                    finding = {
                         "id": f"gadget-{len(findings)+1}",
-                        "title": f"Dangerous Sink: {g.get('type')}",
+                        "title": f"Dangerous Sink: {sink}",
                         "category": "dom-xss",
                         "severity": "Triage Severity: MEDIUM â€” pending human review",
                         "severity_level": "MEDIUM",
                         "endpoint": g.get("source_file", ""),
                         "parameter": g.get("controllable_source", ""),
-                        "payload": g.get("code_snippet", ""),
+                        "payload": "",
                         "curl_command": "",
-                        "source_file": g.get("source_file", ""),
-                        "line": g.get("line_number"),
-                        "details": g.get("risk", ""),
+                        "source_file": source_file,
+                        "line": None,
+                        "occurrences": [{"source_file": source_file, "line": None}],
+                        "raw_record_count": raw_count,
+                        "details": "Potential DOM sink identified in client-side JavaScript; no controllable input-to-sink path has been demonstrated.",
                         "status": "pending_review",
-                    })
+                    }
+                    grouped[("gadget", source_key, sink)] = finding
+                    findings.append(finding)
             except Exception:
                 pass
 
-        return findings
+        return deduplicate_findings(findings)
 
     def get_target_endpoints(self, target_name):
         ep_file = TARGETS_DIR / target_name / "output" / "js" / "endpoints.json"
@@ -1509,6 +1900,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         endpoints = inventory.get("endpoints", [])
         for endpoint in endpoints:
             endpoint.setdefault("source", "javascript")
+            endpoint["source_file"] = _safe_source_reference(endpoint.get("source_file"), target_name)
         if api_file.exists() or legacy_api_file.exists():
             try:
                 source_file = api_file if api_file.exists() else legacy_api_file
@@ -1517,6 +1909,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     if not isinstance(endpoint, dict):
                         continue
                     endpoint["source"] = "openapi"
+                    endpoint["source_file"] = _safe_source_reference(endpoint.get("source_file"), target_name)
                     endpoint["url"] = endpoint.get("base_url", "").rstrip("/") + endpoint.get("path", "")
                     endpoints.append(endpoint)
             except Exception as e:
@@ -1575,18 +1968,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not report_dir.exists():
             return {"markdown": "# No Report Generated Yet", "json": {}}
 
-        md_files = list(report_dir.glob("*.md"))
-        json_files = list(report_dir.glob("*.json"))
+        md_files = sorted(report_dir.glob("*.md"), key=lambda path: path.stat().st_mtime, reverse=True)
+        json_files = sorted(report_dir.glob("hackbot-report-*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
 
-        md_content = md_files[0].read_text(encoding="utf-8") if md_files else "# No report markdown found"
+        md_file = md_files[0] if md_files else None
+        md_content = md_file.read_text(encoding="utf-8") if md_file else "# No report markdown found"
         json_content = {}
-        if json_files:
+        matching_json = next((path for path in json_files if md_file and path.stem == md_file.stem), None)
+        json_file = matching_json or (json_files[0] if json_files else None)
+        if json_file:
             try:
-                json_content = json.loads(json_files[0].read_text(encoding="utf-8"))
+                json_content = json.loads(json_file.read_text(encoding="utf-8"))
             except Exception:
                 pass
 
-        return {"markdown": md_content, "json": json_content, "files": [f.name for f in md_files + json_files]}
+        report_summary = json_content.get("summary", {}) if isinstance(json_content, dict) else {}
+        report_findings = json_content.get("findings", []) if isinstance(json_content, dict) else []
+        report_count = report_summary.get("triage_items") if isinstance(report_summary, dict) else None
+        if report_count is None and isinstance(report_findings, list):
+            report_count = len(report_findings)
+        current_count = len(self.get_target_findings(target_name))
+        if isinstance(report_count, int) and report_count != current_count:
+            warning = (
+                f"> **Report snapshot is out of date:** it contains {report_count} triage items, "
+                f"while the current dashboard data contains {current_count}. Regenerate the report before sharing it.\n\n"
+            )
+            md_content = warning + md_content
+
+        return {"markdown": md_content, "json": json_content, "files": [f.name for f in md_files + sorted(report_dir.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)]}
 
     # ==================== SCAN MANAGEMENT ====================
 
@@ -1647,7 +2056,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 proc.stdout.close()
                 proc.wait()
 
-                active_scans[target]["status"] = "completed" if proc.returncode == 0 else "failed"
+                if proc.returncode == 0:
+                    active_scans[target]["status"] = "completed"
+                elif proc.returncode == 3:
+                    active_scans[target]["status"] = "blocked_scope"
+                else:
+                    active_scans[target]["status"] = "failed"
                 log_buffer.append(f"\n[Finished with exit code {proc.returncode}]\n")
                 notification = send_discord_scan_summary(target, active_scans[target]["status"])
                 if notification != "not configured":

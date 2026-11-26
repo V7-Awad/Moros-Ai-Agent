@@ -1,6 +1,0 @@
-graphql
-metrics
-debug
-test
-staging
-internal

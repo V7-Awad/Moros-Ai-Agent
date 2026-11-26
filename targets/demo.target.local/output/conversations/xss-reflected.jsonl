@@ -1,2 +1,0 @@
-{"timestamp": "2026-11-22T14:15:33.585101+00:00", "agent": "xss-reflected", "role": "tool", "content": "[STARTED] Model: default, Run: 1", "source": "orchestrator"}
-{"timestamp": "2026-11-22T14:15:33.590689+00:00", "agent": "xss-reflected", "role": "tool", "content": "[SUCCESS] Identified 0 candidate findings", "source": "orchestrator"}
