@@ -8,7 +8,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-318%20passing-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-356%20passing-brightgreen.svg)](tests/)
 [![SARIF 2.1.0](https://img.shields.io/badge/SARIF-2.1.0-orange.svg)](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html)
 [![CVSS v3.1](https://img.shields.io/badge/CVSS-v3.1-red.svg)](https://www.first.org/cvss/v3.1/)
 
@@ -23,11 +23,13 @@
 Traditional DAST scanners frequently spray indiscriminate payload lists at web targets, resulting in IP bans from Web Application Firewalls (WAFs), excessive log noise, and high false-positive rates. Moros replaces generic scanning with an evidence-driven, methodology-oriented architecture:
 
 - **Target Profiling & WAF Evasion**: Automatically fingerprints upstream WAFs (Cloudflare, AWS WAF, Akamai, Imperva, ModSecurity, F5 BIG-IP) and backend stacks (Spring Boot, Django, Laravel, Express, Next.js, WordPress, GraphQL), dynamically throttling concurrency and selecting tailored attack vectors.
-- **Modular Micro-Skills Suite (33 Skills)**: A comprehensive library of decoupled security modules covering surface discovery, client-side vulnerabilities, server-side injection, authentication bypasses, race conditions, and business logic flaws.
+- **Modular Micro-Skills Suite (33 Skills)**: Decoupled security modules covering surface discovery, client-side vulnerabilities, server-side injection, authentication bypasses, race conditions, and business logic flaws.
 - **Enforceable Human-in-the-Loop (HITL) Checkpoints**: Deterministic thread-blocking approval gates pause execution before any state-changing HTTP request (`POST`, `PUT`, `DELETE`, password resets, race audits) until explicitly confirmed by the operator.
+- **Resilient HTTP & LLM Failover**: Supports scoped HTTP/HTTPS/SOCKS5 proxy routing (`--proxy`), idempotent `GET`/`HEAD` retry backoff, optional session cookie jars, complexity-based model routing (`--smart-route`), and automatic cross-provider LLM failover.
+- **Scan Resumability & Sandboxed Execution**: Resumes interrupted runs cleanly from durable state (`--resume`) and isolates custom skill scripts inside scrubbed local or Docker sandboxes (`--sandbox`).
 - **Cryptographic False-Positive Suppression**: Automatically hashes attack responses (`status:length:body_snippet`) against a local false-positive database (`memory/FALSE_POSITIVE_DB.md`) to eliminate repetitive alerts.
-- **Standardized Outputs & Standalone PoCs**: Every verified finding is mathematically scored using official FIRST CVSS v3.1 metrics, exported to OASIS SARIF 2.1.0 for CI/CD integration, and accompanied by reproducible Bash/cURL and Python reproduction scripts.
-- **Interactive Operations Dashboard**: Local web interface providing live multi-agent event streams, real-time tool terminals, visual attack graphs, and one-click checkpoint management.
+- **Standardized Outputs & Standalone PoCs**: Verified findings are scored with FIRST CVSS v3.1 metrics, exported to OASIS SARIF 2.1.0, and accompanied by reproducible Bash/cURL and Python scripts.
+- **Interactive Operations Dashboard**: Local web interface with optional TLS/HTTPS, Bearer token auth, live SSE event streams, visual attack graphs, cost/trace/memory panels, scheduling, and checkpoint management.
 
 ---
 
@@ -143,8 +145,22 @@ cp .env.example .env
 ```
 
 Supported backends:
-- **Cloud Providers**: DeepSeek (`DEEPSEEK_API_KEY`), OpenAI (`OPENAI_API_KEY`), Anthropic (`ANTHROPIC_API_KEY`), Groq (`GROQ_API_KEY`), Google Gemini (`GEMINI_API_KEY`), OpenRouter (`OPENROUTER_API_KEY`), Mistral (`MISTRAL_API_KEY`), xAI (`XAI_API_KEY`).
+- **Cloud Providers**: DeepSeek (`DEEPSEEK_API_KEY`), OpenAI (`OPENAI_API_KEY`), Anthropic (`ANTHROPIC_API_KEY`), Groq (`GROQ_API_KEY`), Google Gemini (`GEMINI_API_KEY`), OpenRouter (`OPENROUTER_API_KEY`), Mistral (`MISTRAL_API_KEY`), xAI (`XAI_API_KEY`), Together, Cerebras, SambaNova, Fireworks, Perplexity, and Cohere.
 - **Local Self-Hosted**: Ollama (`http://localhost:11434`), LM Studio, or vLLM (`http://localhost:1234/v1`).
+
+### Docker & Compose (Optional)
+
+Run the dashboard or CLI scanner inside non-root containers using [Dockerfile](Dockerfile) and [docker-compose.yml](docker-compose.yml):
+
+```bash
+# Start web operations dashboard (bound to 127.0.0.1:8080)
+docker compose up -d dashboard
+
+# Run a dry-run CLI scan with local target mount
+docker compose --profile cli run --rm scanner --target app.example.com --dry-run
+```
+
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for TLS/HTTPS setup, HITL blocking configuration, and container build options.
 
 ---
 
@@ -197,7 +213,8 @@ python run.py --target app.example.com --dry-run
 | `--skills` | `all \| <s1,s2,...>` | Comma-separated list of skills to run (default: `all`) |
 | `--deep-recon` | | Include parallel `deep-recon` fan-out skill in scan |
 | `--parallel` | | Run independent skills concurrently via `ThreadPoolExecutor` (up to 4 workers) |
-| `--max-subagents` | `<int>` | Maximum autonomous child subagents cap (default: `10`; distinct from `--parallel` skill workers; not currently forwarded by `run.py` to `HackbotOrchestrator`) |
+| `--max-subagents` | `<int>` | Maximum autonomous child subagents cap (default: `10`; forwarded to orchestrator and enforced at runtime) |
+| `--sandbox` | `none \| local \| docker` | Execution sandbox mode for custom skills (default: `local`) |
 | `--models` | `<m1,m2,...>` | Comma-separated model names (default: `default`) |
 | `--runs-per-skill` | `<int>` | Number of runs per skill per model (default: `1`) |
 | `--review-model` | `<model>` | Model to use for `review-skill` (default: same as skill model) |
@@ -205,6 +222,7 @@ python run.py --target app.example.com --dry-run
 | `--api-key` | `<key>` | API key for the selected provider |
 | `--model` | `<name>` | Model name override for the selected provider |
 | `--smart-route` | | Enable complexity-based cost-aware model routing |
+| `--no-failover` | | Disable cross-provider LLM failover (sets `MOROS_LLM_FAILOVER=0`) |
 | `--budget` | `<float>` | Maximum LLM spend budget in USD (default: `10.0`) |
 | `--api-spec` | `<path>` | Local OpenAPI/Swagger JSON or YAML file for `api-spec-discovery` |
 | `--active-host-limit` | `<int>` | Maximum hosts for recon HEAD checks (default: `100`) |
@@ -212,6 +230,8 @@ python run.py --target app.example.com --dry-run
 | `--https-only` | | Do not fall back to plaintext HTTP during active recon |
 | `--max-http-requests` | `<int>` | Maximum same-host GET/HEAD requests per scan (default: `150`) |
 | `--request-delay` | `<float>` | Minimum seconds between target requests (default: `0.3`) |
+| `--proxy` | `<url>` | HTTP/HTTPS/SOCKS5 proxy URL for scoped target requests (sets `MOROS_PROXY`) |
+| `--resume` | `[run_id]` | Resume the latest (or specified) incomplete scan run ID |
 | `--fail-on-candidate` | | Exit with code `2` when unverified candidate findings are present (CI gate) |
 | `--mcp-server` | `<cmd_or_url>` | External MCP tool server URL (HTTP/SSE) or stdio command (repeatable) |
 | `--no-trace` | | Disable OpenTelemetry trace export under `output/traces/` |
@@ -299,8 +319,8 @@ Moros includes a local web-based operations console for monitoring scans, review
 # Start dashboard on http://127.0.0.1:8080
 python run.py --dashboard
 
-# Or via the standalone launcher:
-python dashboard.py --port 8080
+# Or via the standalone launcher with TLS/HTTPS enabled:
+python dashboard.py --port 8443 --ssl-cert server.crt --ssl-key server.key
 ```
 
 ### Dashboard Features
@@ -309,7 +329,15 @@ python dashboard.py --port 8080
 - **Attack Graph Visualizer**: Interactive network graph showing discovered assets, endpoints, parameters, and vulnerability sinks.
 - **Live Event Stream**: Server-Sent Events (SSE) streaming real-time tool logs and scan progress.
 - **Vulnerability Inspector**: Structured finding cards with CVSS v3.1 vector breakdowns, CWE mappings, and linked reproduction scripts.
-- **Dynamic Skills Registry**: Browse, inspect, and register custom micro-skills directly through the interface.
+- **Observability & Automation**: Interactive panels for LLM spend/tokens, trace spans, tiered memory, recurring schedules, and learned skill proposals.
+- **Hardened API Controls**: Bearer token auth (`MOROS_DASHBOARD_TOKEN`), same-origin CSRF checks on mutations, and configurable `/api/` rate limiting.
+
+### Further Documentation
+- [Architecture & Operations Guide](docs/architecture.md)
+- [Dashboard & A2A API Reference](docs/API_REFERENCE.md)
+- [Deployment & Hardening Guide](docs/DEPLOYMENT.md)
+- [OWASP Agentic Security Control Matrix](docs/OWASP_AGENTIC_SECURITY.md)
+- [PDF Operator Guide](docs/MOROS_AI_OPERATOR_GUIDE.pdf)
 
 ---
 
@@ -401,35 +429,21 @@ Moros is designed for modular extensibility. New security skills can be added wi
 
 ## Automated Testing
 
-The repository includes 84 core unit and integration tests across 16 tracked test modules (17 tracked files in `tests/`):
+The repository includes **356 automated tests** across **35 test modules** in `tests/`, plus a simulated vulnerable-app evaluation benchmark (`evals/juice_shop_benchmark.py`) and GitHub Actions CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)):
 
 ```bash
-python -m pytest tests/ -v
+# Run the full unit, integration, security, and local E2E test suite
+python -m pytest tests/ -q
+
+# Run the offline Juice Shop benchmark evaluation
+python evals/juice_shop_benchmark.py --json
 ```
 
-```text
-============================= test session starts =============================
-collected 84 items (core tracked suite)
-
-tests/test_advanced_features.py ............                             [ 14%]
-tests/test_agent_runtime.py .......                                      [ 22%]
-tests/test_checkpoint_manager.py ....                                    [ 27%]
-tests/test_competitor_enhancements.py .....                              [ 33%]
-tests/test_dashboard_data.py .....                                       [ 39%]
-tests/test_dependency_validation.py ...                                  [ 42%]
-tests/test_dynamic_skills_and_subagents.py .....                         [ 48%]
-tests/test_integration.py ....                                           [ 53%]
-tests/test_learning_engine.py .                                          [ 54%]
-tests/test_run_manager.py ....                                           [ 59%]
-tests/test_sarif_exporter.py ...                                         [ 63%]
-tests/test_scan_modes.py ....                                            [ 67%]
-tests/test_skill_registry.py .....                                       [ 73%]
-tests/test_subagent_chat.py .......                                      [ 82%]
-tests/test_universal_llm.py ........                                     [ 91%]
-tests/test_vuln_skills.py .......                                        [100%]
-
-============================= 84 passed in 16.00s =============================
-```
+Coverage includes:
+- Scope boundary validation, HITL checkpoint gating, prompt injection scrubbing, and secret redaction
+- HTTP proxy routing, safe `GET`/`HEAD` backoff retries, cookie jar persistence, and cross-provider LLM failover
+- Scan resumability, sandbox isolation (`LocalSandbox` / `DockerSandbox`), `business-logic` runner, and end-to-end local mock target scanning
+- Dashboard TLS/HTTPS, CSRF origin enforcement, rate limiting, REST/SSE/A2A endpoints, and DevOps config checks
 
 ---
 

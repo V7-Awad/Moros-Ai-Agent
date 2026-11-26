@@ -2,6 +2,17 @@
 
 All notable changes to the Moros AI Agent project are documented in this file.
 
+## [2.3.1] - 2026-11-26
+### Added
+- **Containerization & CI/CD (`Dockerfile`, `docker-compose.yml`, `.github/workflows/ci.yml`)**: Non-root container image, CLI/dashboard Compose profiles, and Python 3.10 / 3.12 GitHub Actions workflow.
+- **HTTP Resilience (`tools/scoped_http.py`)**: Scoped HTTP/HTTPS/SOCKS5 proxy support (`--proxy` / `MOROS_PROXY`), safe `GET`/`HEAD` exponential backoff retries, and optional `CookieJar` persistence.
+- **Cross-Provider LLM Failover (`tools/llm_client.py`)**: Automatic fallback across configured LLM providers (`--no-failover` to disable) and transient 429/503 retries for Anthropic.
+- **Scan Resumability & Business Logic Skill (`tools/run_manager.py`, `tools/hackbot_orchestrator.py`, `skills/business-logic/run.py`)**: `--resume` flag to continue interrupted scans from saved run state and executable workflow risk analyzer for checkout/payment/role endpoints.
+- **Dashboard Security Hardening (`dashboard/server.py`)**: Optional TLS/HTTPS (`--ssl-cert` / `--ssl-key`), CSRF `Origin`/`Referer` checks on mutations, API rate limiting, and `docs/API_REFERENCE.md` + `docs/DEPLOYMENT.md`.
+
+### Fixed
+- Separated blocked off-host redirects (`stopped_by_policy`) from real out-of-scope deviations in `hackbot_orchestrator.py` and `finding_review.py`, with persisted `blocked_scope` terminal state recovery in `dashboard/server.py`.
+
 ## [2.3.0] - 2026-11-26
 ### Added
 - **Smart Model Router (`tools/model_router.py`)**: Complexity-aware routing across configured providers (`--smart-route`) with pre-execution scan cost range estimation and automatic low-budget downgrade.
