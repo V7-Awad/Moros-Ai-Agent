@@ -18,7 +18,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("llm-client")
@@ -186,17 +186,110 @@ KNOWN_PROVIDERS = {
     },
 }
 
+PROVIDER_PRIORITY_ORDER = [
+    "deepseek",
+    "groq",
+    "openai",
+    "anthropic",
+    "gemini",
+    "openrouter",
+    "xai",
+    "mistral",
+    "together",
+    "cerebras",
+    "sambanova",
+    "fireworks",
+    "perplexity",
+    "cohere",
+    "ollama",
+]
+
 
 class LLMClient:
-    def __init__(self, provider: str = "auto", model: str = None, api_key: str = None, base_url: str = None):
+    def __init__(
+        self,
+        provider: str = "auto",
+        model: Optional[str] = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        fallback_providers: Optional[List[str]] = None,
+        enable_failover: Optional[bool] = None,
+    ):
         load_dotenv_if_present()
-        self.provider = provider.lower() if provider else "auto"
+        self._requested_provider = provider.strip().lower() if provider else "auto"
+        self.provider = self._requested_provider
+        self._logical_provider = self._requested_provider
         self.model = model
         self.api_key = api_key
         self.base_url = base_url
-        self.last_error = None
-        self.last_usage = {"input_tokens": 0, "output_tokens": 0}
+        self.fallback_providers = (
+            [p.strip().lower() for p in fallback_providers if p and str(p).strip()]
+            if fallback_providers is not None
+            else None
+        )
+        self.enable_failover = enable_failover
+        self.last_error: Optional[str] = None
+        self.last_usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+        self.last_failover_attempts: List[Dict[str, str]] = []
         self._detect_provider()
+
+    def _resolve_provider_settings(
+        self,
+        selected: str,
+        model: Optional[str] = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ):
+        """Resolve (runtime_provider, model, api_key, base_url) for a logical provider."""
+        if selected == "anthropic":
+            return (
+                "anthropic",
+                model or os.environ.get("ANTHROPIC_MODEL") or "claude-3-5-sonnet-20241022",
+                api_key or os.environ.get("ANTHROPIC_API_KEY"),
+                base_url or os.environ.get("ANTHROPIC_BASE_URL") or None,
+            )
+        if selected == "gemini":
+            return (
+                "gemini",
+                model or os.environ.get("GEMINI_MODEL") or "gemini-3-flash-preview",
+                api_key or os.environ.get("GEMINI_API_KEY"),
+                base_url or os.environ.get("GEMINI_BASE_URL") or None,
+            )
+        if selected == "ollama":
+            return (
+                "ollama",
+                model or os.environ.get("OLLAMA_MODEL") or "llama3",
+                api_key,
+                base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
+            )
+        if selected in KNOWN_PROVIDERS:
+            info = KNOWN_PROVIDERS[selected]
+            prov_env_base = os.environ.get(f"{selected.upper()}_BASE_URL")
+            if selected == "openai":
+                prov_env_base = prov_env_base or os.environ.get("OPENAI_BASE_URL")
+            resolved_base = base_url or prov_env_base or info["base_url"]
+            resolved_key = (
+                api_key
+                or os.environ.get(info["env_key"])
+                or (os.environ.get("OPENAI_API_KEY") if selected == "openai" else None)
+            )
+            resolved_model = model or os.environ.get(info["env_model"]) or info["default_model"]
+            return ("openai", resolved_model, resolved_key, resolved_base)
+        if selected in ["custom", "openai_compatible"] or base_url or os.environ.get("OPENAI_BASE_URL"):
+            return (
+                "openai",
+                model or os.environ.get("OPENAI_MODEL") or os.environ.get("LLM_MODEL") or "default",
+                api_key or os.environ.get("OPENAI_API_KEY") or os.environ.get("LLM_API_KEY") or "none",
+                base_url or os.environ.get("OPENAI_BASE_URL") or os.environ.get("LLM_BASE_URL") or "http://localhost:1234/v1",
+            )
+        if selected != "none":
+            return (
+                "openai",
+                model or os.environ.get(f"{selected.upper()}_MODEL") or "default",
+                api_key or os.environ.get(f"{selected.upper()}_API_KEY") or os.environ.get("OPENAI_API_KEY"),
+                base_url or os.environ.get(f"{selected.upper()}_BASE_URL") or "https://api.openai.com/v1",
+            )
+        return ("none", model, api_key, base_url)
 
     def _detect_provider(self):
         """Auto-detect provider based on environment variables or explicit selection."""
@@ -242,57 +335,173 @@ class LLMClient:
             self.provider = selected
 
         selected = self.provider
-
-        # Anthropic, Gemini, Ollama have specialized protocols
-        if selected == "anthropic":
-            self.api_key = self.api_key or os.environ.get("ANTHROPIC_API_KEY")
-            self.model = self.model or os.environ.get("ANTHROPIC_MODEL") or "claude-3-5-sonnet-20241022"
-        elif selected == "gemini":
-            self.api_key = self.api_key or os.environ.get("GEMINI_API_KEY")
-            self.model = self.model or os.environ.get("GEMINI_MODEL") or "gemini-3-flash-preview"
-        elif selected == "ollama":
-            self.base_url = self.base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-            self.model = self.model or os.environ.get("OLLAMA_MODEL") or "llama3"
-        elif selected in KNOWN_PROVIDERS:
-            # Route all known OpenAI-compatible providers
-            info = KNOWN_PROVIDERS[selected]
-            self.provider = "openai"
-            prov_env_base = os.environ.get(f"{selected.upper()}_BASE_URL")
-            if selected == "openai":
-                prov_env_base = prov_env_base or os.environ.get("OPENAI_BASE_URL")
-            self.base_url = self.base_url or prov_env_base or info["base_url"]
-            self.api_key = self.api_key or os.environ.get(info["env_key"]) or (os.environ.get("OPENAI_API_KEY") if selected == "openai" else None)
-            self.model = self.model or os.environ.get(info["env_model"]) or info["default_model"]
-        elif selected in ["custom", "openai_compatible"] or self.base_url or os.environ.get("OPENAI_BASE_URL"):
-            # Custom OpenAI compatible gateway (LM Studio, vLLM, LocalAI, etc.)
-            self.provider = "openai"
-            self.base_url = self.base_url or os.environ.get("OPENAI_BASE_URL") or os.environ.get("LLM_BASE_URL") or "http://localhost:1234/v1"
-            self.api_key = self.api_key or os.environ.get("OPENAI_API_KEY") or os.environ.get("LLM_API_KEY") or "none"
-            self.model = self.model or os.environ.get("OPENAI_MODEL") or os.environ.get("LLM_MODEL") or "default"
-        elif selected != "none":
-            # Universal fallback: Any arbitrary provider name with an API key or base URL is routed as OpenAI-compatible
-            self.provider = "openai"
-            self.base_url = self.base_url or os.environ.get(f"{selected.upper()}_BASE_URL") or "https://api.openai.com/v1"
-            self.api_key = self.api_key or os.environ.get(f"{selected.upper()}_API_KEY") or os.environ.get("OPENAI_API_KEY")
-            self.model = self.model or os.environ.get(f"{selected.upper()}_MODEL") or "default"
-        else:
-            self.provider = "none"
+        self._logical_provider = selected
+        self.provider, self.model, self.api_key, self.base_url = self._resolve_provider_settings(
+            selected, model=self.model, api_key=self.api_key, base_url=self.base_url
+        )
 
     def _check_ollama(self) -> bool:
         """Check if local Ollama daemon is reachable."""
+        base = (os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434").rstrip("/")
         try:
-            req = urllib.request.Request("http://localhost:11434/api/tags", method="GET")
+            req = urllib.request.Request(f"{base}/api/tags", method="GET")
             with urllib.request.urlopen(req, timeout=1) as resp:
                 return resp.status == 200
         except Exception:
             return False
 
+    def _sanitize_text(self, text: Optional[str], extra_secrets: Optional[List[Optional[str]]] = None) -> str:
+        """Redact known secret patterns and any explicit client API keys from text."""
+        cleaned = redact_secrets(text)
+        candidates = [self.api_key]
+        if extra_secrets:
+            candidates.extend(extra_secrets)
+        for secret in candidates:
+            if not secret:
+                continue
+            val = str(secret).strip()
+            if val and val.lower() != "none" and len(val) >= 8 and val in cleaned:
+                cleaned = cleaned.replace(val, "[REDACTED_API_KEY]")
+        return cleaned
+
+    @staticmethod
+    def _extract_http_error_details(exc: urllib.error.HTTPError) -> str:
+        """Safely read and extract an error message from an urllib HTTPError."""
+        raw_error = ""
+        try:
+            raw_error = exc.read(4096).decode("utf-8", errors="replace")
+        except Exception:
+            raw_error = ""
+        if raw_error:
+            try:
+                parsed_error = json.loads(raw_error)
+                if isinstance(parsed_error, dict):
+                    error = parsed_error.get("error", parsed_error)
+                    if isinstance(error, dict):
+                        return str(error.get("message") or raw_error)
+                    return str(error)
+                return str(parsed_error)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                return raw_error
+        return str(getattr(exc, "reason", "") or exc)
+
+    @staticmethod
+    def _is_same_provider(a: str, b: str) -> bool:
+        a_norm = (a or "").strip().lower()
+        b_norm = (b or "").strip().lower()
+        if a_norm == b_norm:
+            return True
+        return {a_norm, b_norm} == {"xai", "grok"}
+
+    def _is_provider_configured(self, cand: str, explicit: bool = False, include_ollama: bool = True) -> bool:
+        if cand == "ollama":
+            return explicit or (include_ollama and self._check_ollama())
+        if cand in KNOWN_PROVIDERS:
+            info = KNOWN_PROVIDERS[cand]
+            env_key = info.get("env_key", "")
+            return bool(env_key and os.environ.get(env_key, "").strip())
+        if cand in {"custom", "openai_compatible"}:
+            return bool(os.environ.get("OPENAI_BASE_URL", "").strip() or os.environ.get("LLM_BASE_URL", "").strip())
+        return bool(
+            os.environ.get(f"{cand.upper()}_API_KEY", "").strip()
+            or os.environ.get(f"{cand.upper()}_BASE_URL", "").strip()
+        )
+
+    def _discover_failover_candidates(self, include_ollama: bool = True) -> List[str]:
+        if self._logical_provider == "none":
+            return []
+        explicit = self.fallback_providers is not None
+        source = self.fallback_providers if explicit else PROVIDER_PRIORITY_ORDER
+        primary = self._logical_provider
+
+        candidates: List[str] = []
+        seen = set()
+        for raw in source:
+            cand = (raw or "").strip().lower()
+            if not cand or cand in {"auto", "none"}:
+                continue
+            if self._is_same_provider(cand, primary):
+                continue
+            canonical = "xai" if cand == "grok" else cand
+            if canonical in seen:
+                continue
+            if self._is_provider_configured(cand, explicit=explicit, include_ollama=include_ollama):
+                seen.add(canonical)
+                candidates.append(cand)
+        return candidates
+
+    def _get_failover_candidates(self) -> List[str]:
+        """Return configured backup providers in priority order, excluding the primary."""
+        return self._discover_failover_candidates(include_ollama=True)
+
+    def _is_failover_enabled(self) -> bool:
+        if self._logical_provider == "none":
+            return False
+        if self.enable_failover is not None:
+            return bool(self.enable_failover)
+        env_flag = os.environ.get("MOROS_LLM_FAILOVER", "").strip().lower()
+        if env_flag in {"0", "false", "no", "off"}:
+            return False
+        if env_flag in {"1", "true", "yes", "on"}:
+            return True
+        if self.fallback_providers is not None:
+            return len(self.fallback_providers) > 0
+        return self._requested_provider == "auto"
+
+    def _resolve_runtime_failover_candidates(self, include_ollama: bool = True) -> List[str]:
+        if (
+            type(self)._get_failover_candidates is not LLMClient._get_failover_candidates
+            or "_get_failover_candidates" in self.__dict__
+        ):
+            return list(self._get_failover_candidates() or [])
+        return self._discover_failover_candidates(include_ollama=include_ollama)
+
     def is_available(self) -> bool:
         """Return True if an LLM backend is configured and ready."""
-        return self.provider != "none" and bool(self.api_key or self.provider == "ollama")
+        if self._logical_provider == "none" or self.provider == "none":
+            return False
+        if bool(self.api_key or self.provider == "ollama"):
+            return True
+        if self._is_failover_enabled():
+            return bool(self._resolve_runtime_failover_candidates(include_ollama=False))
+        return False
+
+    def _invoke_current_provider(
+        self,
+        prompt: str,
+        system_prompt: str,
+        temperature: float,
+        max_tokens: int,
+        timeout: int,
+    ) -> Optional[str]:
+        if self.provider in ["openai", "openrouter"]:
+            return self._call_openai_compatible(prompt, system_prompt, temperature, max_tokens, timeout=timeout)
+        if self.provider == "anthropic":
+            return self._call_anthropic(prompt, system_prompt, temperature, max_tokens, timeout=timeout)
+        if self.provider == "gemini":
+            return self._call_gemini(prompt, system_prompt, temperature, max_tokens, timeout=timeout)
+        if self.provider == "ollama":
+            return self._call_ollama(prompt, system_prompt, temperature, max_tokens, timeout=timeout)
+        return None
+
+    def _finalize_success(
+        self,
+        res: str,
+        prompt: str,
+        system_prompt: str,
+        extra_secrets: Optional[List[Optional[str]]] = None,
+    ) -> str:
+        self.last_error = None
+        if self.last_usage["input_tokens"] == 0 and self.last_usage["output_tokens"] == 0:
+            self.last_usage = {
+                "input_tokens": max(1, (len(prompt) + len(system_prompt)) // 4),
+                "output_tokens": max(1, len(res) // 4),
+            }
+        return self._sanitize_text(res, extra_secrets=extra_secrets)
 
     def complete(self, prompt: str, system_prompt: str = "", temperature: float = 0.2, max_tokens: int = 8192, timeout: Optional[int] = None) -> Optional[str]:
-        """Generate text completion from the configured LLM backend."""
+        """Generate text completion from the configured LLM backend, failing over if enabled."""
+        self.last_failover_attempts = []
         if not self.is_available():
             logger.debug("No LLM API key configured — skipping model inference.")
             return None
@@ -300,31 +509,114 @@ class LLMClient:
         call_timeout = timeout or getattr(self, "timeout", None) or 20
         self.last_usage = {"input_tokens": 0, "output_tokens": 0}
 
-        try:
-            if self.provider in ["openai", "openrouter"]:
-                res = self._call_openai_compatible(prompt, system_prompt, temperature, max_tokens, timeout=call_timeout)
-            elif self.provider == "anthropic":
-                res = self._call_anthropic(prompt, system_prompt, temperature, max_tokens, timeout=call_timeout)
-            elif self.provider == "gemini":
-                res = self._call_gemini(prompt, system_prompt, temperature, max_tokens, timeout=call_timeout)
-            elif self.provider == "ollama":
-                res = self._call_ollama(prompt, system_prompt, temperature, max_tokens, timeout=call_timeout)
-            else:
-                res = None
-            if res:
-                self.last_error = None
-                if self.last_usage["input_tokens"] == 0 and self.last_usage["output_tokens"] == 0:
-                    self.last_usage = {
-                        "input_tokens": max(1, (len(prompt) + len(system_prompt)) // 4),
-                        "output_tokens": max(1, len(res) // 4),
-                    }
-                return redact_secrets(res)
+        original_state = (
+            self.provider,
+            self._logical_provider,
+            self.model,
+            self.api_key,
+            self.base_url,
+        )
+        seen_secrets: List[Optional[str]] = [self.api_key]
+        primary_label = self._logical_provider or self.provider
+        primary_model = str(self.model or "")
+        primary_error = ""
+
+        if self.provider == "ollama" or self.api_key:
+            try:
+                res = self._invoke_current_provider(prompt, system_prompt, temperature, max_tokens, call_timeout)
+                if res:
+                    return self._finalize_success(res, prompt, system_prompt, extra_secrets=seen_secrets)
+                primary_error = f"{primary_label} returned an empty response"
+            except Exception as exc:
+                primary_error = self._sanitize_text(str(exc), extra_secrets=seen_secrets)[:500]
+                logger.warning(f"LLM completion failed ({primary_label}/{self.model}): {primary_error}")
+        else:
+            primary_error = f"{primary_label} API key not configured"
+
+        self.last_error = primary_error
+
+        if not self._is_failover_enabled():
             return None
-        except Exception as e:
-            error_text = redact_secrets(str(e))
-            self.last_error = error_text[:500]
-            logger.warning(f"LLM completion failed ({self.provider}/{self.model}): {self.last_error}")
+
+        candidates = self._resolve_runtime_failover_candidates(include_ollama=False)
+        tried_ollama = self._is_same_provider("ollama", primary_label) or "ollama" in candidates
+
+        if not candidates and not tried_ollama and self.fallback_providers is None:
+            if self._check_ollama():
+                candidates = ["ollama"]
+            tried_ollama = True
+
+        if not candidates:
             return None
+
+        attempts: List[Dict[str, str]] = [
+            {
+                "provider": primary_label,
+                "model": primary_model,
+                "status": "failed",
+                "error": primary_error,
+            }
+        ]
+
+        idx = 0
+        while idx < len(candidates):
+            cand = candidates[idx]
+            idx += 1
+            cand_runtime, cand_model, cand_key, cand_base = self._resolve_provider_settings(cand)
+            if cand_key:
+                seen_secrets.append(cand_key)
+
+            self.provider = cand_runtime
+            self._logical_provider = cand
+            self.model = cand_model
+            self.api_key = cand_key
+            self.base_url = cand_base
+            self.last_usage = {"input_tokens": 0, "output_tokens": 0}
+
+            if cand_runtime != "ollama" and not cand_key:
+                cand_err = f"{cand} API key not configured"
+                attempts.append({
+                    "provider": cand,
+                    "model": str(cand_model or ""),
+                    "status": "failed",
+                    "error": cand_err,
+                })
+                self.last_error = cand_err
+                continue
+
+            try:
+                res = self._invoke_current_provider(prompt, system_prompt, temperature, max_tokens, call_timeout)
+                if res:
+                    attempts.append({
+                        "provider": cand,
+                        "model": str(self.model or ""),
+                        "status": "succeeded",
+                        "error": "",
+                    })
+                    self.last_failover_attempts = attempts
+                    logger.info(f"LLM failover succeeded: {primary_label} -> {cand}/{self.model}")
+                    return self._finalize_success(res, prompt, system_prompt, extra_secrets=seen_secrets)
+                cand_err = f"{cand} returned an empty response"
+            except Exception as exc:
+                cand_err = self._sanitize_text(str(exc), extra_secrets=seen_secrets)[:500]
+                logger.warning(f"LLM failover attempt failed ({cand}/{cand_model}): {cand_err}")
+
+            attempts.append({
+                "provider": cand,
+                "model": str(cand_model or ""),
+                "status": "failed",
+                "error": cand_err,
+            })
+            self.last_error = cand_err
+
+            if idx == len(candidates) and not tried_ollama and self.fallback_providers is None:
+                tried_ollama = True
+                if self._check_ollama():
+                    candidates.append("ollama")
+
+        self.provider, self._logical_provider, self.model, self.api_key, self.base_url = original_state
+        self.last_failover_attempts = attempts
+        return None
 
     def _call_openai_compatible(self, prompt: str, system_prompt: str, temperature: float, max_tokens: int, timeout: int = 60) -> str:
         base = self.base_url or ("https://openrouter.ai/api/v1" if self.provider == "openrouter" else "https://api.openai.com/v1")
@@ -346,7 +638,7 @@ class LLMClient:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
         }
-        if self.provider == "openrouter":
+        if self.provider == "openrouter" or self._logical_provider == "openrouter":
             headers["HTTP-Referer"] = "https://github.com/V7-Awad/Moros-Ai-Agent"
             headers["X-Title"] = "Moros AI Pentest Agent"
 
@@ -363,15 +655,20 @@ class LLMClient:
                     }
                 return data["choices"][0]["message"]["content"]
             except urllib.error.HTTPError as exc:
+                details = self._sanitize_text(self._extract_http_error_details(exc))
                 if exc.code in (429, 503) and attempt < 2:
                     wait = (attempt + 1) * 2
-                    logger.warning(f"{self.provider}/{self.model} HTTP {exc.code}; retrying in {wait}s...")
+                    logger.warning(f"{self._logical_provider}/{self.model} HTTP {exc.code} ({details[:120]}); retrying in {wait}s...")
                     time.sleep(wait)
                     continue
-                raise
+                raise RuntimeError(f"{self._logical_provider} API HTTP {exc.code}: {details[:300]}") from None
+            except (TimeoutError, urllib.error.URLError) as exc:
+                exc_msg = self._sanitize_text(str(exc))
+                raise RuntimeError(f"{self._logical_provider} connection error: {exc_msg[:200]}") from None
 
     def _call_anthropic(self, prompt: str, system_prompt: str, temperature: float, max_tokens: int, timeout: int = 60) -> str:
-        url = "https://api.anthropic.com/v1/messages"
+        base = (self.base_url or "https://api.anthropic.com/v1").rstrip("/")
+        url = f"{base}/messages"
         payload = {
             "model": self.model or "claude-3-5-sonnet-20241022",
             "messages": [{"role": "user", "content": prompt}],
@@ -387,16 +684,34 @@ class LLMClient:
             "anthropic-version": "2023-06-01",
         }
 
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            usage = data.get("usage") or {}
-            if usage:
-                self.last_usage = {
-                    "input_tokens": int(usage.get("input_tokens", 0)),
-                    "output_tokens": int(usage.get("output_tokens", 0)),
-                }
-            return data["content"][0]["text"]
+        for attempt in range(3):
+            try:
+                req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                usage = data.get("usage") or {}
+                if usage:
+                    self.last_usage = {
+                        "input_tokens": int(usage.get("input_tokens", 0)),
+                        "output_tokens": int(usage.get("output_tokens", 0)),
+                    }
+                content = data.get("content") or []
+                if isinstance(content, list) and content:
+                    texts = [blk.get("text", "") for blk in content if isinstance(blk, dict) and blk.get("text")]
+                    if texts:
+                        return "\n".join(texts)
+                return data["content"][0]["text"]
+            except urllib.error.HTTPError as exc:
+                details = self._sanitize_text(self._extract_http_error_details(exc))
+                if exc.code in (429, 503) and attempt < 2:
+                    wait = (attempt + 1) * 2
+                    logger.warning(f"anthropic/{self.model} HTTP {exc.code} ({details[:120]}); retrying in {wait}s...")
+                    time.sleep(wait)
+                    continue
+                raise RuntimeError(f"Anthropic API HTTP {exc.code}: {details[:300]}") from None
+            except (TimeoutError, urllib.error.URLError) as exc:
+                exc_msg = self._sanitize_text(str(exc))
+                raise RuntimeError(f"Anthropic connection error: {exc_msg[:200]}") from None
 
     def _call_gemini(self, prompt: str, system_prompt: str, temperature: float, max_tokens: int, timeout: int = 15) -> str:
         primary_model = self.model or "gemini-3.8-flash"
@@ -406,7 +721,8 @@ class LLMClient:
             if fallback not in candidate_models:
                 candidate_models.append(fallback)
 
-        url = "https://generativelanguage.googleapis.com/v1beta/interactions"
+        base = (self.base_url or "https://generativelanguage.googleapis.com").rstrip("/")
+        url = f"{base}/v1beta/interactions"
         last_exc = None
 
         for model_name in candidate_models:
@@ -437,14 +753,7 @@ class LLMClient:
                     with urllib.request.urlopen(req, timeout=timeout) as resp:
                         data = json.loads(resp.read().decode("utf-8"))
                 except urllib.error.HTTPError as exc:
-                    raw_error = exc.read(4096).decode("utf-8", errors="replace")
-                    try:
-                        parsed_error = json.loads(raw_error)
-                        error = parsed_error.get("error", parsed_error)
-                        details = error.get("message", raw_error) if isinstance(error, dict) else str(error)
-                    except json.JSONDecodeError:
-                        details = raw_error or exc.reason
-                    details = redact_secrets(details)
+                    details = self._sanitize_text(self._extract_http_error_details(exc))
                     if exc.code == 503:
                         logger.warning(f"Gemini {model_name} HTTP 503 spike ({details[:120]}); checking next candidate...")
                         last_exc = RuntimeError(f"Gemini API HTTP {exc.code} on {model_name}: {details[:300]}")
@@ -455,7 +764,7 @@ class LLMClient:
                         break
                     raise RuntimeError(f"Gemini API HTTP {exc.code}: {details[:300]}") from None
                 except (TimeoutError, urllib.error.URLError) as exc:
-                    exc_msg = redact_secrets(str(exc))
+                    exc_msg = self._sanitize_text(str(exc))
                     if attempt == 0 and model_name == candidate_models[-1]:
                         time.sleep(0.5)
                         continue
@@ -467,7 +776,7 @@ class LLMClient:
 
                 if data.get("status") != "completed":
                     details = data.get("errors") or data.get("status") or "no completed response"
-                    raise RuntimeError(f"Gemini interaction did not complete: {redact_secrets(str(details))}")
+                    raise RuntimeError(f"Gemini interaction did not complete: {self._sanitize_text(str(details))}")
 
                 output = []
                 for step in data.get("steps", []):
@@ -479,7 +788,7 @@ class LLMClient:
                     if self.model != model_name:
                         logger.info(f"Switched active Gemini model from '{self.model}' to working candidate '{model_name}'")
                         self.model = model_name
-                    return redact_secrets("\n".join(output))
+                    return self._sanitize_text("\n".join(output))
 
         if last_exc:
             raise last_exc
@@ -495,6 +804,13 @@ class LLMClient:
             "options": {"temperature": temperature, "num_predict": max_tokens}
         }
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return data.get("response", "")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return data.get("response", "")
+        except urllib.error.HTTPError as exc:
+            details = self._sanitize_text(self._extract_http_error_details(exc))
+            raise RuntimeError(f"Ollama API HTTP {exc.code}: {details[:300]}") from None
+        except (TimeoutError, urllib.error.URLError) as exc:
+            exc_msg = self._sanitize_text(str(exc))
+            raise RuntimeError(f"Ollama connection error: {exc_msg[:200]}") from None
