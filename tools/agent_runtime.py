@@ -654,8 +654,6 @@ class AgentRunner:
             try:
                 decision = self.model_router.select_model(current_prompt)
                 if decision and decision.provider and decision.provider != "auto":
-                    step_provider = decision.provider
-                    step_model = decision.model
                     if (
                         isinstance(self.llm, LLMClient)
                         and type(self.llm).complete is LLMClient.complete
@@ -664,7 +662,12 @@ class AgentRunner:
                         candidate = LLMClient(provider=decision.provider, model=decision.model)
                         if candidate.is_available():
                             step_llm = candidate
+                            step_provider = decision.provider
                             step_model = candidate.model or decision.model
+                    else:
+                        # Mock / custom test client: reflect routing selection in telemetry
+                        step_provider = decision.provider
+                        step_model = decision.model
             except Exception as exc:
                 logger.debug("Per-step routing skipped on step %d: %s", step, exc)
         return step_llm, step_provider, step_model

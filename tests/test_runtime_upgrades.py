@@ -474,3 +474,94 @@ class TestCliAndRuntimeSandboxWiring:
         assert sb_res["status"] == "success"
         assert "CLEAN CLEAN" in sb_res["stdout"]
 
+    def test_dashboard_a2a_and_schedules_endpoints(self, tmp_path, monkeypatch):
+        import io
+        import dashboard.server as ds
+
+        monkeypatch.setattr(ds, "TARGETS_DIR", tmp_path)
+        tdir = tmp_path / "demo.local"
+        tdir.mkdir(parents=True)
+
+        # 1. Schedule GET endpoint should instantiate ScanScheduler cleanly without TypeError/AttributeError
+        h_sched = object.__new__(ds.DashboardHandler)
+        h_sched.path = "/api/targets/demo.local/schedules"
+        h_sched.headers = {"Host": "127.0.0.1:8080"}
+        h_sched.rfile = io.BytesIO(b"")
+        h_sched.wfile = io.BytesIO()
+        h_sched.send_response = lambda code, msg=None: setattr(h_sched, "_code", code)
+        h_sched.send_header = lambda k, v: None
+        h_sched.end_headers = lambda: None
+        h_sched.do_GET()
+        assert h_sched._code == 200
+        sched_payload = json.loads(h_sched.wfile.getvalue().decode("utf-8"))
+        assert sched_payload["target"] == "demo.local"
+        assert sched_payload["schedules"] == []
+
+        # 2. A2A AgentCard GET endpoint
+        h_card = object.__new__(ds.DashboardHandler)
+        h_card.path = "/.well-known/agent.json"
+        h_card.headers = {"Host": "127.0.0.1:8080"}
+        h_card.rfile = io.BytesIO(b"")
+        h_card.wfile = io.BytesIO()
+        h_card.send_response = lambda code, msg=None: setattr(h_card, "_code", code)
+        h_card.send_header = lambda k, v: None
+        h_card.end_headers = lambda: None
+        h_card.do_GET()
+        assert h_card._code == 200
+        card = json.loads(h_card.wfile.getvalue().decode("utf-8"))
+        assert "Moros" in card["name"]
+
+        # 3. A2A JSON-RPC tasks/send followed by tasks/get (persistent across requests)
+        req_send = json.dumps({
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "tasks/send",
+            "params": {
+                "id": "task-a2a-1",
+                "message": {"role": "user", "parts": [{"type": "text", "text": "Run recon"}]},
+                "metadata": {"target": "demo.local", "skills": ["recon-subdomain"]},
+            },
+        }).encode("utf-8")
+        h_send = object.__new__(ds.DashboardHandler)
+        h_send.path = "/api/a2a"
+        h_send.headers = {"Host": "127.0.0.1:8080", "Content-Length": str(len(req_send))}
+        h_send.rfile = io.BytesIO(req_send)
+        h_send.wfile = io.BytesIO()
+        h_send.send_response = lambda code, msg=None: setattr(h_send, "_code", code)
+        h_send.send_header = lambda k, v: None
+        h_send.end_headers = lambda: None
+        h_send.do_POST()
+        assert h_send._code == 200
+        send_resp = json.loads(h_send.wfile.getvalue().decode("utf-8"))
+        assert send_resp["result"]["id"] == "task-a2a-1"
+
+        req_get = json.dumps({"jsonrpc": "2.0", "id": "2", "method": "tasks/get", "params": {"id": "task-a2a-1"}}).encode("utf-8")
+        h_get = object.__new__(ds.DashboardHandler)
+        h_get.path = "/api/a2a"
+        h_get.headers = {"Host": "127.0.0.1:8080", "Content-Length": str(len(req_get))}
+        h_get.rfile = io.BytesIO(req_get)
+        h_get.wfile = io.BytesIO()
+        h_get.send_response = lambda code, msg=None: setattr(h_get, "_code", code)
+        h_get.send_header = lambda k, v: None
+        h_get.end_headers = lambda: None
+        h_get.do_POST()
+        assert h_get._code == 200
+        get_resp = json.loads(h_get.wfile.getvalue().decode("utf-8"))
+        assert get_resp["result"]["id"] == "task-a2a-1"
+
+    def test_xss_blind_reads_moros_oob_url_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MOROS_OOB_URL", "https://oob.example.local")
+        runner = SkillRunner("example.com", tmp_path)
+        runner.scope_authorized = True
+        api_dir = tmp_path / "output" / "api"
+        api_dir.mkdir(parents=True)
+        (api_dir / "endpoints.json").write_text(
+            json.dumps({"endpoints": [{"url": "https://example.com/contact", "parameters": ["message"]}]}),
+            encoding="utf-8",
+        )
+        res = runner.run_vuln_skill("xss-blind")
+        assert res["findings_count"] >= 1
+        data = json.loads((tmp_path / "output" / "findings" / "xss-blind" / "candidates-xss-blind.json").read_text(encoding="utf-8"))
+        assert data["findings"][0]["callback_listener_configured"] is True
+
+

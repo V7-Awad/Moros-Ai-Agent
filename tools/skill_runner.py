@@ -1144,7 +1144,7 @@ class SkillRunner:
 
         elif skill_name == "xss-blind":
             blind_params = {"contact", "feedback", "support", "ticket", "inquiry", "report", "bug", "message", "subject", "email_body", "user_agent", "referrer"}
-            callback_listener = os.environ.get("MOROS_CALLBACK_URL", "").strip()
+            callback_listener = (os.environ.get("MOROS_OOB_URL") or os.environ.get("MOROS_CALLBACK_URL") or "").strip()
             for ep in endpoints:
                 raw_params = ep.get("parameters", [])
                 params = [str(p.get("name", "") if isinstance(p, dict) else p).lower() for p in raw_params]

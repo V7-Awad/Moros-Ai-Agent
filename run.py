@@ -213,6 +213,7 @@ Examples:
         os.environ["MOROS_AUTH_HEADER_B"] = args.auth_header_b
     if args.oob_url:
         os.environ["MOROS_OOB_URL"] = args.oob_url
+        os.environ["MOROS_CALLBACK_URL"] = args.oob_url
     os.environ["MOROS_REPORT_LANG"] = args.lang
     os.environ["MOROS_REPORT_DIALECT"] = args.dialect
     if args.bug_bounty_id:

@@ -541,7 +541,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif sub == "schedules":
                 try:
                     from tools.scheduler import ScanScheduler
-                    sched = ScanScheduler(target_path)
+                    sched = ScanScheduler(target=target_name, target_dir=target_path)
                     self.send_json({"target": target_name, "schedules": sched.list_schedules()})
                 except Exception as exc:
                     self.send_json({"error": str(exc)}, status=500)
@@ -650,9 +650,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/a2a":
             try:
                 from tools.a2a_server import A2ATaskHandler
-                handler = A2ATaskHandler()
-                auth_header = self._get_header("Authorization") or ""
-                resp = handler.handle_request(body, auth_header=auth_header)
+                from tools.scope_validator import ScopeValidator
+
+                params = body.get("params") if isinstance(body, dict) and isinstance(body.get("params"), dict) else {}
+                extracted = A2ATaskHandler._extract_task_target_and_skills(params)
+                target_name = extracted.get("target")
+                scope_validator = None
+                if isinstance(target_name, str) and target_name.strip():
+                    clean_target = target_name.strip()
+                    t_dir = TARGETS_DIR / clean_target
+                    scope_validator = ScopeValidator(
+                        clean_target,
+                        target_dir=t_dir if t_dir.is_dir() else None,
+                    )
+
+                handler = A2ATaskHandler(
+                    scope_validator=scope_validator,
+                    storage_path=TARGETS_DIR / ".a2a_tasks.json",
+                )
+                req_headers = {}
+                auth_header = self._get_header("Authorization")
+                if auth_header:
+                    req_headers["Authorization"] = auth_header
+                x_token = self._get_header("X-Moros-Token")
+                if x_token:
+                    req_headers["X-Moros-Token"] = x_token
+                resp = handler.handle_request(body, headers=req_headers)
                 self.send_json(resp)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=500)
