@@ -89,9 +89,9 @@ def init_target(domain: str):
             f"# Authorization Required for {domain}\n\n"
             f"Before running any offensive skills against {domain}, you MUST:\n\n"
             f"1. Place your signed scope-of-work document in this directory:\n"
-            f"   - File name: scope-of-work.pdf (or .md)\n"
-            f"   - Must be a signed authorization document, bug bounty program rules,\n"
-            f"     or signed penetration testing agreement.\n\n"
+            f"   - File name: scope-of-work.md (also supported: .txt, .yaml, .yml, .json)\n"
+            f"   - Must contain the target domain and signed authorization wording\n"
+            f"     (bug bounty program rules or penetration testing agreement).\n\n"
             f"2. Without this file, only passive reconnaissance skills will execute.\n\n"
             f"⚠️  UNAUTHORIZED TESTING IS ILLEGAL. ⚠️\n",
             encoding="utf-8"
@@ -141,7 +141,7 @@ def init_target(domain: str):
 
     print(f"✅ Target initialized: {target_dir}")
     print(f"   📁 Output directories created")
-    print(f"   ⚠️  Place your scope-of-work.pdf in: {target_dir}/")
+    print(f"   ⚠️  Review/authorize scope-of-work.md (or .txt/.yaml/.yml/.json) in: {target_dir}/")
     print(f"\n   Next: python run.py --target {domain}")
 
 
@@ -175,12 +175,23 @@ def check_system():
 
     # Playwright browsers
     try:
-        import playwright
-        browsers_path = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", ""))
-        if browsers_path.exists() or True:  # Playwright manages its own path
-            print(f"  ✅ Playwright installed (run 'playwright install chromium' if browsers missing)")
+        from playwright.sync_api import sync_playwright
+        browsers_env = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
+        if browsers_env and not Path(browsers_env).exists():
+            print(f"  ❌ PLAYWRIGHT_BROWSERS_PATH does not exist: {browsers_env} (run 'playwright install chromium')")
+            all_ok = False
+        else:
+            with sync_playwright() as p:
+                chromium_exe = Path(p.chromium.executable_path)
+            if chromium_exe.is_file():
+                print(f"  ✅ Playwright Chromium browser installed ({chromium_exe})")
+            else:
+                print("  ❌ Playwright Chromium browser missing (run 'playwright install chromium')")
+                all_ok = False
     except ImportError:
         pass
+    except Exception as exc:
+        print(f"  ⚠️  Could not verify Playwright Chromium browser ({exc}); run 'playwright install chromium' if missing")
 
     print()
     if all_ok:

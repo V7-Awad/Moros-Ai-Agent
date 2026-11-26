@@ -316,7 +316,7 @@ HTML_CONTENT = """<!DOCTYPE html>
     </div>
     <div class="cover-meta-item">
       <strong>Platform Release</strong>
-      <span>Moros AI Agent Core v1.2</span>
+      <span>Moros AI Agent Core v2.0</span>
     </div>
     <div class="cover-meta-item">
       <strong>Supported Interfaces</strong>
@@ -333,7 +333,7 @@ HTML_CONTENT = """<!DOCTYPE html>
   </div>
 
   <div class="cover-footer">
-    Engineered by Raider &bull; Licensed under MIT License &bull; Automated Test Suite: 32 Passing Unit Tests (100% Coverage)
+    Engineered by Raider &bull; Licensed under MIT License &bull; Core Test Suite: 84 Tests Across 16 Tracked Test Modules (17 Tracked Files in <code>tests/</code>)
   </div>
 </div>
 
@@ -372,7 +372,7 @@ HTML_CONTENT = """<!DOCTYPE html>
     </tr>
     <tr>
       <td><strong>Chapter 5</strong></td>
-      <td><strong>CLI Terminal Operations (Complete Flag Reference)</strong> — Initializing targets, scan profiles (quick, deep, passive), custom skills flags, rate-tuning, and dry-run planning.</td>
+      <td><strong>CLI Terminal Operations (Complete Flag Reference)</strong> — Initializing targets, scan profiles (quick, deep, full, passive), custom skills flags, rate-tuning, and dry-run planning.</td>
       <td><code>run.py</code></td>
     </tr>
     <tr>
@@ -419,7 +419,7 @@ HTML_CONTENT = """<!DOCTYPE html>
   </div>
   <div class="card">
     <h4>2. Specialist Sub-Agent Division</h4>
-    <p>Rather than a single prompt attempting all attacks, specialized micro-agents (Recon, JS AST Hunter, XSS Specialist, SSRF Pivoter, Auth/Race Specialist, and Review Gate) manage specific attack phases.</p>
+    <p>Rather than a single prompt attempting all attacks, a 9-role roster (Coordinator Master plus 8 specialists: Recon, JS/API Hunter, XSS, SSRF, Auth/Race, Evidence Integrity Reviewer, Skeptical Finding Reviewer, and Reporting Agent) manages each phase.</p>
   </div>
   <div class="card">
     <h4>3. Enforceable Human-in-the-Loop</h4>
@@ -599,17 +599,17 @@ DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...</code></pre>
   Safety, rate limitation, and strict legal authorization are foundational requirements in Moros AI. It enforces multi-layered guardrails before executing any offensive check.
 </p>
 
-<h2>4.1 The `scope-of-work.md` Requirement</h2>
+<h2>4.1 Scope-of-Work &amp; <code>scope.json</code> Requirements</h2>
 <p>
-  Every target workspace under <code>targets/&lt;target_domain&gt;/</code> must contain a valid <code>scope-of-work.md</code> file. The orchestrator's <code>verify_scope()</code> function parses this file on startup:
+  Every target workspace under <code>targets/&lt;target_domain&gt;/</code> includes <code>scope.json</code> (machine-readable <code>in_scope</code> / <code>out_of_scope</code> host policy enforced by <code>ScopeValidator</code>) and must contain a readable <code>scope-of-work.*</code> file (<code>.md</code>, <code>.txt</code>, <code>.yaml</code>, <code>.yml</code>, or <code>.json</code>; <code>.pdf</code> is not parsed). The orchestrator's <code>verify_scope()</code> function checks these files on startup:
 </p>
 <ul>
   <li><strong>Target Name Matching:</strong> The target domain name must appear explicitly in the document.</li>
-  <li><strong>Authorization Keywords:</strong> The document must contain at least one recognized authorization term (e.g., <code>authorized</code>, <code>authorised</code>, <code>in scope</code>, <code>scope of work</code>).</li>
+  <li><strong>Authorization Keywords:</strong> The document must contain at least one recognized authorization term (e.g., <code>authorized</code>, <code>authorised</code>, <code>in scope</code>, <code>scope of work</code>, <code>scope-of-work</code>).</li>
 </ul>
 
 <div class="callout callout-critical">
-  <strong>Automatic Passive Downgrade:</strong> If a target lacks a valid <code>scope-of-work.md</code>, Moros strictly refuses to execute active network probes. It automatically forces <strong>PASSIVE-ONLY mode</strong>, restricting execution exclusively to OSINT, Certificate Transparency (CT) logs, and Wayback Machine archives.
+  <strong>Automatic Passive Downgrade:</strong> If a target lacks a valid readable <code>scope-of-work.{md,txt,yaml,yml,json}</code>, Moros strictly refuses to execute active network probes. It automatically forces <strong>PASSIVE-ONLY mode</strong>, restricting execution exclusively to OSINT, Certificate Transparency (CT) logs, and Wayback Machine archives.
 </div>
 
 <h2>4.2 Built-in Scoped HTTP Client Guardrails</h2>
@@ -647,18 +647,19 @@ DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...</code></pre>
 <p>This creates the standardized target directory tree:</p>
 <pre><code>targets/app.example.com/
 ├── PLACE_SCOPE_OF_WORK_HERE.txt   # Instructions for authorization
-├── scope-of-work.md               # Your authorized scope document
+├── scope.json                     # Machine-readable in-scope / out-of-scope policy
+├── scope-of-work.md               # Your authorized scope document (.md/.txt/.yaml/.yml/.json)
 └── output/                        # All scan outputs, evidence, and logs</code></pre>
 
 <h2>5.2 Primary Scan Profiles</h2>
 
 <h3>1. Quick Scan Profile (Recommended Initial Audit)</h3>
-<p>Fast surface reconnaissance, dynamic client-side JS AST analysis, endpoint discovery, and reflected XSS triage:</p>
+<p>Fast surface reconnaissance, dynamic client-side JS AST analysis, endpoint discovery, and reflected XSS/SSRF triage:</p>
 <pre><code>python run.py --target app.example.com --scan-mode quick</code></pre>
 
-<h3>2. Deep Scan Profile (Comprehensive Vulnerability Audit)</h3>
-<p>Executes the complete offensive suite including SSRF candidate triage, IDP race auditing, DOM/Stored/Blind XSS checks, and password reset analysis:</p>
-<pre><code>python run.py --target app.example.com --scan-mode deep</code></pre>
+<h3>2. Full / Deep Scan Profile (Default Comprehensive Audit)</h3>
+<p>Executes all 33 discovered skills in dependency order, including injection checks, SSRF post-exploitation, IDP race auditing, DOM/Stored/Blind XSS checks, and review/reporting:</p>
+<pre><code>python run.py --target app.example.com --scan-mode full</code></pre>
 
 <h3>3. Passive OSINT Profile (Zero Active Target Network Packets)</h3>
 <p>Restricted purely to Certificate Transparency logs, historical archives, and passive discovery without sending any HTTP requests to the target:</p>
@@ -676,23 +677,63 @@ DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...</code></pre>
   <tbody>
     <tr>
       <td><code>--target</code></td>
-      <td>String (Required)</td>
+      <td>String (Required for scan)</td>
       <td>Target hostname or domain (e.g., <code>lastpass.com</code>).</td>
     </tr>
     <tr>
+      <td><code>--target-dir</code></td>
+      <td>Path (Default: <code>targets/&lt;domain&gt;</code>)</td>
+      <td>Override the target workspace directory path.</td>
+    </tr>
+    <tr>
       <td><code>--scan-mode</code></td>
-      <td><code>quick</code> | <code>deep</code> | <code>passive</code></td>
-      <td>Execution profile defining active skill chain. Default: <code>quick</code>.</td>
+      <td><code>quick</code> | <code>deep</code> | <code>full</code> | <code>passive</code></td>
+      <td>Execution profile defining active skill chain. Default: <code>full</code>.</td>
     </tr>
     <tr>
       <td><code>--skills</code></td>
       <td>Comma-separated list</td>
-      <td>Execute specific skills only (e.g., <code>--skills recon-subdomain,js-discover</code>).</td>
+      <td>Execute specific skills only, or <code>all</code> (default: <code>all</code>).</td>
+    </tr>
+    <tr>
+      <td><code>--deep-recon</code></td>
+      <td>Boolean flag</td>
+      <td>Include parallel <code>deep-recon</code> fan-out skill in the scan schedule.</td>
+    </tr>
+    <tr>
+      <td><code>--parallel</code></td>
+      <td>Boolean flag</td>
+      <td>Execute independent vulnerability skills concurrently (up to 4 workers).</td>
+    </tr>
+    <tr>
+      <td><code>--max-subagents</code></td>
+      <td>Integer (Default: <code>10</code>)</td>
+      <td>Maximum autonomous child subagents cap (distinct from <code>--parallel</code> skill workers; not currently forwarded by <code>run.py</code> to <code>HackbotOrchestrator</code>).</td>
     </tr>
     <tr>
       <td><code>--models</code></td>
       <td>String (<code>default</code>)</td>
-      <td>Override LLM model (e.g., <code>deepseek/deepseek-chat</code>, <code>openai/gpt-4o</code>).</td>
+      <td>Comma-separated LLM model overrides (e.g., <code>deepseek-chat</code>, <code>gpt-4o</code>).</td>
+    </tr>
+    <tr>
+      <td><code>--runs-per-skill</code></td>
+      <td>Integer (Default: <code>1</code>)</td>
+      <td>Number of repetitions per skill per model.</td>
+    </tr>
+    <tr>
+      <td><code>--review-model</code></td>
+      <td>String (Optional)</td>
+      <td>Dedicated model override for <code>review-skill</code>.</td>
+    </tr>
+    <tr>
+      <td><code>--provider</code> / <code>--api-key</code> / <code>--model</code></td>
+      <td>Strings (Optional)</td>
+      <td>Override active LLM provider, API key, and model directly via CLI.</td>
+    </tr>
+    <tr>
+      <td><code>--smart-route</code> / <code>--budget</code></td>
+      <td>Flag / Float (Default: <code>10.0</code>)</td>
+      <td>Enable cost-aware model routing and cap LLM spend in USD.</td>
     </tr>
     <tr>
       <td><code>--max-http-requests</code></td>
@@ -720,14 +761,44 @@ DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...</code></pre>
       <td>Prevents fallback to unencrypted plaintext HTTP during probes.</td>
     </tr>
     <tr>
-      <td><code>--dry-run</code></td>
-      <td>Boolean flag</td>
-      <td>Validates scope, computes dependency graph, and prints plan without sending traffic.</td>
+      <td><code>--api-spec</code></td>
+      <td>Path (Optional)</td>
+      <td>Local OpenAPI/Swagger JSON or YAML file for <code>api-spec-discovery</code>.</td>
     </tr>
     <tr>
-      <td><code>--dashboard</code></td>
+      <td><code>--cookie</code> / <code>--auth-header</code> / <code>--auth-file</code></td>
+      <td>String / Path</td>
+      <td>Inject session cookies, Authorization headers, or JSON auth profile.</td>
+    </tr>
+    <tr>
+      <td><code>--in-scope</code> / <code>--out-of-scope</code> / <code>--bug-bounty-id</code></td>
+      <td>Strings (Optional)</td>
+      <td>Configure allowed/forbidden host patterns and <code>X-Bug-Bounty</code> header.</td>
+    </tr>
+    <tr>
+      <td><code>--fail-on-candidate</code></td>
       <td>Boolean flag</td>
-      <td>Launches the local interactive Web Dashboard on port 8080.</td>
+      <td>Exit with status code <code>2</code> when unverified candidate findings are produced.</td>
+    </tr>
+    <tr>
+      <td><code>--mcp-server</code> / <code>--no-trace</code></td>
+      <td>String / Flag</td>
+      <td>Attach external MCP server URL/command; disable trace export under <code>output/traces/</code>.</td>
+    </tr>
+    <tr>
+      <td><code>--dry-run</code> / <code>--check</code> / <code>--list-skills</code></td>
+      <td>Boolean flags</td>
+      <td>Print execution plan, verify prerequisites, or list installed skills and exit.</td>
+    </tr>
+    <tr>
+      <td><code>--dashboard</code> / <code>--port</code> / <code>--no-open</code></td>
+      <td>Flag / Int (<code>8080</code>)</td>
+      <td>Launch the local Web Dashboard on port 8080 (or via positional <code>view</code>).</td>
+    </tr>
+    <tr>
+      <td><code>--verbose</code> / <code>--quiet</code> / <code>--log-level</code></td>
+      <td>Flags / Level (<code>INFO</code>)</td>
+      <td>Control terminal logging verbosity (<code>DEBUG</code>, <code>INFO</code>, <code>WARNING</code>, <code>ERROR</code>).</td>
     </tr>
   </tbody>
 </table>
@@ -768,17 +839,18 @@ python dashboard.py --port 8080</code></pre>
 
 <h3>Tab 02: AI Agents & Chat</h3>
 <p>
-  Interactive command and control for specialist sub-agents. Select any specialist from the roster:
+  Interactive command and control for the 9-role specialist roster (1 Coordinator + 8 specialists):
 </p>
 <ul>
-  <li><strong>Coordinator Master:</strong> High-level orchestration directives and synthesized assessment briefings.</li>
-  <li><strong>Reconnaissance Specialist:</strong> Subdomain enumeration, DNS brute, and CT log intelligence.</li>
-  <li><strong>JavaScript & API Hunter:</strong> Headless browser crawl, JS unminification, AST parameter extraction.</li>
-  <li><strong>XSS & Client-Side Specialist:</strong> DOM, Reflected, Stored, and Blind XSS payload evaluations.</li>
-  <li><strong>SSRF & Cloud Metadata Hunter:</strong> Out-of-band canary interaction, AWS/GCP metadata probes.</li>
-  <li><strong>Auth & Race Condition Agent:</strong> Multi-threaded race conditions and password reset testing.</li>
-  <li><strong>Review-Skill Verifier Gate:</strong> Independent cURL replay and false-positive pruning.</li>
-  <li><strong>Reporting & Synthesis Agent:</strong> CVSS scoring, remediation advisory, and executive export.</li>
+  <li><strong>Coordinator Master (<code>coordinator</code>):</strong> Attack tree orchestration, plan dispatch &amp; multi-agent planner.</li>
+  <li><strong>Reconnaissance Specialist (<code>recon-agent</code>):</strong> Scope-aware hostname inventory and authorized reachability checks (<code>recon-subdomain</code>).</li>
+  <li><strong>JavaScript &amp; API Hunter (<code>js-analyzer</code>):</strong> Same-host JavaScript collection, endpoint inventory, and static sink analysis (<code>api-spec-discovery</code>, <code>js-discover</code>, <code>js-analyze</code>).</li>
+  <li><strong>XSS &amp; Client-Side Specialist (<code>xss-specialist</code>):</strong> XSS candidate analysis with scope-gated active verification (<code>xss-reflected</code>, <code>xss-stored</code>, <code>xss-dom</code>, <code>xss-blind</code>).</li>
+  <li><strong>SSRF &amp; Cloud Metadata Hunter (<code>ssrf-specialist</code>):</strong> SSRF candidate analysis; callbacks and active checks require explicit scope (<code>ssrf-identify</code>, <code>ssrf-post-exploit</code>).</li>
+  <li><strong>Auth &amp; Race Condition Agent (<code>auth-race-specialist</code>):</strong> Authentication and race-condition checks when authorized by scope (<code>idp-race-condition</code>, <code>auth-password-reset-bruteforce</code>).</li>
+  <li><strong>Evidence Integrity Reviewer (<code>evidence-integrity-review</code>):</strong> Deterministic saved-artifact review verifying evidence files and cryptographic hashes without claiming exploitability validation.</li>
+  <li><strong>Skeptical Finding Reviewer (<code>skeptical-false-positive-review</code>):</strong> Deterministic adversarial triage recording missing proof and plausible false-positive explanations for each candidate.</li>
+  <li><strong>Reporting &amp; Synthesis Agent (<code>report-specialist</code>):</strong> Deduplicated assessment report and SARIF export with explicit candidate status (<code>report-conglomeration</code>).</li>
 </ul>
 
 <h3>Tab 03: Skills Graph</h3>
@@ -889,24 +961,28 @@ Audits target endpoints for JWT misconfigurations and algorithm confusion.
 <h2>8.1 Output Directory Structure</h2>
 <pre><code>targets/&lt;target&gt;/output/
 ├── recon/
-│   ├── subdomains-all.txt        # Comprehensive discovered subdomain list
-│   └── live-hosts.json           # Validated responsive hosts
+│   ├── subdomains-all.txt                      # Comprehensive discovered subdomain list
+│   └── live-hosts.json                         # Validated responsive hosts
 ├── js/
-│   ├── endpoints.json            # Extracted REST/GraphQL route catalog
-│   ├── parameters.json           # Discovered parameter dictionary
-│   └── secrets-findings.json     # Leaked API keys and credentials
+│   ├── endpoints.json                          # Extracted REST/GraphQL route catalog
+│   ├── parameters.json                         # Discovered parameter dictionary
+│   └── secrets-findings.json                   # Leaked API keys and credentials
 ├── findings/
-│   └── &lt;skill-name&gt;/             # Structured JSON candidate records
+│   └── &lt;skill-name&gt;/                           # Structured JSON candidate records
 ├── evidence/
-│   └── ledger.jsonl              # Cryptographic SHA-256 evidence provenance
+│   └── ledger.jsonl                            # Cryptographic SHA-256 evidence provenance
+├── pocs/
+│   └── poc_&lt;sanitized_title&gt;_&lt;hash&gt;.{sh,py}   # Standalone cURL &amp; Python reproduction scripts
 ├── report/
-│   ├── hackbot-report-&lt;date&gt;.md  # Executive Markdown deliverable
-│   └── findings.sarif            # OASIS SARIF 2.1.0 standardized export
+│   ├── hackbot-report-&lt;target&gt;-&lt;date&gt;.md      # Executive Markdown deliverable
+│   ├── hackbot-report-&lt;target&gt;-&lt;date&gt;.json    # Machine-readable JSON report
+│   ├── attack-graph.json                       # Directed attack graph (embedded Mermaid)
+│   └── findings.sarif                          # OASIS SARIF 2.1.0 standardized export
 └── runs/
     └── run-&lt;id&gt;/
-        ├── run.json              # Durable state machine record
-        ├── events.jsonl          # Complete event timeline
-        └── agents.jsonl          # Sub-agent session lifecycles</code></pre>
+        ├── run.json                            # Durable state machine record
+        ├── events.jsonl                        # Complete event timeline
+        └── agents.jsonl                        # Sub-agent session lifecycles</code></pre>
 
 <h2>8.2 OASIS SARIF 2.1.0 & GitHub Code Scanning Integration</h2>
 <p>

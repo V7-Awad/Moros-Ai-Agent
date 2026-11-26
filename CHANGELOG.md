@@ -2,6 +2,19 @@
 
 All notable changes to the Moros AI Agent project are documented in this file.
 
+## [2.3.0] - 2026-11-26
+### Added
+- **Smart Model Router (`tools/model_router.py`)**: Complexity-aware routing across configured providers (`--smart-route`) with pre-execution scan cost range estimation and automatic low-budget downgrade.
+- **Cost Transparency Engine (`tools/cost_tracker.py`)**: Thread-safe token and cost accounting per LLM call and skill, USD budget cap enforcement (`--budget`), JSONL step logging, and scan cost receipts in `output/costs/receipt.json`.
+- **MCP Client Support (`tools/mcp_client.py`)**: JSON-RPC 2.0 Model Context Protocol client with stdio and HTTP transports, tool discovery, argument schema validation, allowlist filtering, and `--mcp-server` CLI integration.
+- **Tiered Persistent Memory (`tools/memory_manager.py`)**: Per-target SQLite WAL memory database (`memory.db`) storing episodic events, semantic infrastructure facts, procedural technique outcomes, and resume checkpoints.
+- **Execution Sandbox Abstraction (`tools/sandbox_manager.py`)**: Scrubbed `LocalSandbox`, `DockerSandbox`, and explicit-fail `E2BSandbox`/`ModalSandbox` adapters.
+- **OWASP Agentic Security Controls (`tools/agent_security.py`, `docs/OWASP_AGENTIC_SECURITY.md`)**: Observation spotlighting, prompt injection detection and stripping, per-skill tool permission scoping, `ActionBudget` gates, and output sanitization.
+- **Structured Observability (`tools/trace_logger.py`)**: Hierarchical OpenTelemetry-compatible span tracing exported to `output/traces/` (`--no-trace` to disable).
+- **Parallel Deep Recon & Subagent Fan-Out**: Added `skills/deep-recon/SKILL.md` (`--deep-recon`), `SkillRunner.run_deep_recon()`, and `spawn_subagents_parallel` in `tools/agent_runtime.py`.
+- **AAIF Skill Frontmatter & Eval Harness**: Added YAML frontmatter parsing + `export_aaif_manifest()` in `tools/skill_registry.py`, plus deterministic safety/routing evaluations in `tools/eval_harness.py` and `evals/`.
+- **Dashboard Endpoints**: Added `/api/security/posture`, `/api/targets/<target>/costs`, `/api/targets/<target>/traces`, and `/api/targets/<target>/memory` in `dashboard/server.py`.
+
 ## [2.2.0] - 2026-11-24
 ### Added
 - **Official FIRST CVSS v3.1 Calculator**: Automatic Base Score, qualitative severity, and Vector String calculation for all findings and SARIF 2.1.0 exports.

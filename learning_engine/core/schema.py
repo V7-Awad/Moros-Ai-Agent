@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 from .config import SCHEMA_VERSION
 
-SCHEMA = """
+BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -63,7 +65,9 @@ CREATE INDEX IF NOT EXISTS idx_findings_class    ON findings (vuln_class);
 CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings (severity);
 CREATE INDEX IF NOT EXISTS idx_triage_finding    ON triage (finding_id);
 CREATE INDEX IF NOT EXISTS idx_lessons_class     ON lessons (vuln_class);
+"""
 
+FTS_SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS findings_fts USING fts5 (
     title, target, vuln_class, signals
 );
@@ -80,8 +84,8 @@ CREATE TRIGGER IF NOT EXISTS lessons_fts_ai AFTER INSERT ON lessons BEGIN
 END;
 """
 
-# FTS tables are rebuilt on every init so schema changes and backfills are
-# always reflected; the corpus is small, so rebuild is cheap.
+SCHEMA = BASE_SCHEMA + FTS_SCHEMA
+
 FTS_PRELUDE = """
 DROP TRIGGER IF EXISTS findings_fts_ai;
 DROP TRIGGER IF EXISTS lessons_fts_ai;
@@ -92,6 +96,15 @@ DROP TABLE IF EXISTS lessons_fts;
 MIGRATIONS: dict[str, list[str]] = {
     "1.0.0": [],
 }
+
+
+def _fts_objects_present(conn) -> bool:
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE (type = 'table' AND name IN ('findings_fts', 'lessons_fts')) "
+        "   OR (type = 'trigger' AND name IN ('findings_fts_ai', 'lessons_fts_ai'))"
+    ).fetchall()
+    return len(rows) == 4
 
 
 def _backfill_fts(conn) -> None:
@@ -111,9 +124,22 @@ def _backfill_fts(conn) -> None:
 
 def apply_schema(conn) -> None:
     """Apply full schema; idempotent. Record schema version in meta."""
-    conn.executescript(FTS_PRELUDE)
-    conn.executescript(SCHEMA)
-    _backfill_fts(conn)
+    conn.executescript(BASE_SCHEMA)
+
+    ver_row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    current_version = ver_row[0] if ver_row else None
+    fts_ready = _fts_objects_present(conn)
+
+    if current_version != SCHEMA_VERSION or not fts_ready:
+        try:
+            if current_version is not None and current_version != SCHEMA_VERSION:
+                conn.executescript(FTS_PRELUDE)
+            conn.executescript(FTS_SCHEMA)
+            _backfill_fts(conn)
+        except sqlite3.OperationalError:
+            # SQLite build without FTS5; retrieval falls back to LIKE queries.
+            pass
+
     conn.execute(
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
         (SCHEMA_VERSION,),

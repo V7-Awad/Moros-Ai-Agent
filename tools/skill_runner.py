@@ -17,17 +17,15 @@ import json
 import logging
 import os
 import re
-import socket
 import subprocess
 import sys
-import time
 import shutil
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 tools_dir = Path(__file__).parent.resolve()
 if str(tools_dir) not in sys.path:
@@ -53,6 +51,12 @@ class SkillRunner:
         self._recorded_evidence_ids = None
         self.scope_authorized = False
         self.run_started_at = None
+        self.cost_tracker = None
+        self.tracer = None
+        self.memory_manager = None
+        self.model_router = None
+        self.trace_id = None
+        self.mcp_clients = []
         self.http = ScopedHttpClient(target, max_requests=max_http_requests, delay_seconds=request_delay)
 
     @staticmethod
@@ -247,6 +251,142 @@ class SkillRunner:
 
         return {"status": "SUCCESS", "subdomains": len(sorted_subs), "live_hosts": len(live_hosts),
                 "active_validation": active_validation}
+
+    # ==================== SKILL 1B: DEEP-RECON (PARALLEL FAN-OUT) ====================
+
+    def run_deep_recon(self, active_validation: bool = False) -> Dict[str, Any]:
+        """Parallel fan-out reconnaissance with explicit per-source attribution."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        skill = "deep-recon"
+        recon_dir = self.output_dir / "recon"
+        recon_dir.mkdir(parents=True, exist_ok=True)
+
+        policy = getattr(getattr(self.http, "scope_validator", None), "policy", {})
+        external_sources_allowed = policy.get("allow_cross_host_sources", True)
+        provenance: Dict[str, set] = {self.target: {"seed_target"}}
+
+        def fetch_crtsh() -> Dict[str, Any]:
+            if not external_sources_allowed:
+                return {"source": "crt.sh", "subdomains": [], "skipped": True}
+            found = []
+            try:
+                url = f"https://crt.sh/?q=%25.{self.target}&output=json"
+                req = urllib.request.Request(url, headers={"User-Agent": "MorosAI/2.3"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+                for item in data:
+                    for sub in str(item.get("name_value", "")).split("\n"):
+                        sub = sub.strip().lower().lstrip("*.")
+                        if self._host_is_in_root_scope(sub, self.target):
+                            found.append(sub)
+                return {"source": "crt.sh", "subdomains": sorted(set(found)), "error": None}
+            except Exception as exc:
+                return {"source": "crt.sh", "subdomains": [], "error": str(exc)}
+
+        def fetch_wayback() -> Dict[str, Any]:
+            if not external_sources_allowed:
+                return {"source": "wayback_cdx", "subdomains": [], "urls": [], "skipped": True}
+            found_hosts = []
+            found_urls = []
+            try:
+                cdx_url = (
+                    f"https://web.archive.org/cdx/search/cdx?url=*.{self.target}/*"
+                    "&output=json&fl=original&collapse=urlkey&limit=2000"
+                )
+                req = urllib.request.Request(cdx_url, headers={"User-Agent": "MorosAI/2.3"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    rows = json.loads(resp.read().decode("utf-8", errors="ignore"))
+                for row in rows[1:]:
+                    raw_url = row[0]
+                    host = urllib.parse.urlparse(raw_url).netloc.split(":")[0].lower()
+                    if self._host_is_in_root_scope(host, self.target):
+                        found_hosts.append(host)
+                        found_urls.append(raw_url)
+                return {
+                    "source": "wayback_cdx",
+                    "subdomains": sorted(set(found_hosts)),
+                    "urls": found_urls[:200],
+                    "error": None,
+                }
+            except Exception as exc:
+                return {"source": "wayback_cdx", "subdomains": [], "urls": [], "error": str(exc)}
+
+        def fingerprint_target() -> Dict[str, Any]:
+            if not active_validation:
+                return {"source": "http_fingerprint", "wafs": [], "technologies": [], "skipped": True}
+            wafs, techs = [], []
+            try:
+                resp = self.http.request(f"https://{self.target}/")
+                if resp.get("status") == "response":
+                    from waf_detector import WafDetector
+                    from tech_profiler import TechProfiler
+                    w_info = WafDetector().inspect_response(
+                        resp.get("status_code", 0), resp.get("headers", {}), resp.get("body", "")
+                    )
+                    wafs = [d["waf"] for d in w_info.get("detected_wafs", [])]
+                    t_info = TechProfiler().profile_target(resp.get("headers", {}), resp.get("body", ""))
+                    techs = t_info.get("technologies", [])
+            except Exception as exc:
+                return {"source": "http_fingerprint", "wafs": wafs, "technologies": techs, "error": str(exc)}
+            return {"source": "http_fingerprint", "wafs": wafs, "technologies": techs, "error": None}
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            f_crt = pool.submit(fetch_crtsh)
+            f_wb = pool.submit(fetch_wayback)
+            f_fp = pool.submit(fingerprint_target)
+            crt_res = f_crt.result()
+            wb_res = f_wb.result()
+            fp_res = f_fp.result()
+
+        for sub in crt_res.get("subdomains", []):
+            provenance.setdefault(sub, set()).add("crt.sh")
+        for sub in wb_res.get("subdomains", []):
+            provenance.setdefault(sub, set()).add("wayback_cdx")
+
+        merged_subs = sorted(provenance.keys())
+        (recon_dir / "subdomains-all.txt").write_text("\n".join(merged_subs), encoding="utf-8")
+
+        summary = {
+            "target": self.target,
+            "total_subdomains": len(merged_subs),
+            "subdomains": [{"host": h, "sources": sorted(provenance[h])} for h in merged_subs],
+            "wafs_detected": fp_res.get("wafs", []),
+            "technologies_detected": fp_res.get("technologies", []),
+            "archival_urls_sample": wb_res.get("urls", [])[:50],
+            "worker_status": {
+                "crt.sh": crt_res.get("error") or ("skipped" if crt_res.get("skipped") else "ok"),
+                "wayback_cdx": wb_res.get("error") or ("skipped" if wb_res.get("skipped") else "ok"),
+                "http_fingerprint": fp_res.get("error") or ("skipped" if fp_res.get("skipped") else "ok"),
+            },
+        }
+        (recon_dir / "deep-recon-summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+        # Persist target facts to tiered semantic memory
+        try:
+            from memory_manager import MemoryManager
+            mm = MemoryManager(self.target_dir)
+            if fp_res.get("wafs"):
+                mm.store_fact("waf", ", ".join(fp_res["wafs"]), category="infrastructure", source="deep-recon")
+            if fp_res.get("technologies"):
+                mm.store_fact("tech_stack", ", ".join(fp_res["technologies"]), category="infrastructure", source="deep-recon")
+            mm.store_fact("subdomain_count", str(len(merged_subs)), category="recon", source="deep-recon")
+            mm.record_event("deep_recon", f"Merged {len(merged_subs)} subdomains across parallel workers", skill=skill)
+        except Exception as exc:
+            logger.debug("MemoryManager write skipped in deep-recon: %s", exc)
+
+        self.log_step(
+            skill, "step-01-fanout.log",
+            f"Deep recon merged {len(merged_subs)} subdomains; WAFs={fp_res.get('wafs', [])}; Tech={fp_res.get('technologies', [])}",
+        )
+        return {
+            "status": "SUCCESS",
+            "subdomains": len(merged_subs),
+            "wafs": fp_res.get("wafs", []),
+            "technologies": fp_res.get("technologies", []),
+        }
 
     # ==================== SKILL 2: API-SPEC-DISCOVERY ====================
 
@@ -1167,10 +1307,17 @@ class SkillRunner:
         if exec_script:
             script_source = exec_script.read_text(encoding="utf-8", errors="ignore")
             unscoped_network_patterns = (
-                r"\brequests\b", r"\burllib\.request\b", r"\burllib3\b",
-                r"\bhttpx\b", r"\bhttpcore\b", r"\baiohttp\b", r"\bsocket\b",
-                r"\bhttp\.client\b", r"\bplaywright\b", r"\bselenium\b",
-                r"\bsubprocess\b", r"\bos\.system\s*\(", r"\bScopedHttpClient\s*\(",
+                r"\b(?:import|from)\s+requests\b",
+                r"\brequests\.(?:get|post|put|patch|delete|head|options|request|Session|session|api|adapters)\b",
+                r"\burllib\.request\b", r"\bfrom\s+urllib\s+import\s+request\b", r"\burllib3\b",
+                r"\b(?:import|from)\s+httpx\b",
+                r"\bhttpx\.(?:get|post|put|patch|delete|head|options|request|Client|AsyncClient)\b",
+                r"\bhttpcore\b", r"\baiohttp\b",
+                r"\b(?:import|from)\s+socket\b",
+                r"\bsocket\.(?:socket|create_connection|getaddrinfo|gethostbyname)\b",
+                r"\bhttp\.client\b", r"\bfrom\s+http\s+import\s+client\b",
+                r"\bplaywright\b", r"\bselenium\b",
+                r"\bsubprocess\b", r"\bos\.system\s*\(", r"\bos\.popen\s*\(",
             )
             if any(re.search(pattern, script_source, re.IGNORECASE) for pattern in unscoped_network_patterns):
                 reason = (
@@ -1236,6 +1383,11 @@ class SkillRunner:
                 tools = build_default_agent_tools(
                     ctx, llm_client=self.llm, allow_subagents=True, http_client=self.http
                 )
+                for client in getattr(self, "mcp_clients", []) or []:
+                    try:
+                        tools.register_mcp_client(client)
+                    except Exception as exc:
+                        logger.debug("MCP client tool registration skipped: %s", exc)
                 system_prompt = (
                     f"You are an expert security researcher executing the custom skill: '{title}'.\n"
                     f"Target: {self.target}\n"
@@ -1247,7 +1399,20 @@ class SkillRunner:
                     "4. Conclude with 'Final Answer: <concise summary>'."
                 )
                 user_goal = f"Execute offensive audit for '{title}' against {self.target}. Endpoints available: {len(endpoints)}"
-                runner = AgentRunner(llm_client=self.llm)
+                try:
+                    from agent_security import ActionBudget
+                    action_budget = ActionBudget()
+                except ImportError:
+                    action_budget = None
+                runner = AgentRunner(
+                    llm_client=self.llm,
+                    cost_tracker=getattr(self, "cost_tracker", None),
+                    tracer=getattr(self, "tracer", None),
+                    memory_manager=getattr(self, "memory_manager", None),
+                    action_budget=action_budget,
+                    model_router=getattr(self, "model_router", None),
+                    trace_id=getattr(self, "trace_id", None),
+                )
                 agent_res = runner.run(ctx, tools, system_prompt, user_goal)
                 summary = agent_res.summary
 

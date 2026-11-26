@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import json
-
 from ..core.storage import Database
+from ..core.validation import normalize_target, parse_signals_json
 from ..scoring.engine import weight_for
 
 
@@ -35,13 +34,14 @@ def per_class_stats(db: Database) -> list[dict]:
             },
         )
         agg["count"] += 1
-        agg["conf_sums"] += float(f["confidence"])
+        agg["conf_sums"] += float(f["confidence"] or 0.0)
         agg["targets"].add(f["target"])
-        signals = json.loads(f["signals"] or "{}")
+        signals = parse_signals_json(f["signals"])
         for key in signals:
             signal_occurrence.setdefault(c, {}).setdefault(key, 0)
             signal_occurrence[c][key] += 1
         v = (verdicts.get(f["finding_id"]) or ["unverified"])[-1]
+        agg.setdefault(v, 0)
         agg[v] += 1
 
     out: list[dict] = []
@@ -72,7 +72,7 @@ def fp_pattern_candidates(db: Database, min_occurrences: int = 2) -> list[dict]:
     )
     signal_hits: dict[tuple[str, str], int] = {}
     for r in rows:
-        for key in json.loads(r["signals"] or "{}"):
+        for key in parse_signals_json(r["signals"]):
             signal_hits[(r["vuln_class"], key)] = signal_hits.get((r["vuln_class"], key), 0) + 1
     return [
         {"vuln_class": c, "signal": key, "occurrences": n}
@@ -85,7 +85,7 @@ def signal_heatmap(db: Database) -> dict:
     """Per-class signal occurrence counts: {vuln_class: {signal: count}}."""
     out: dict[str, dict[str, int]] = {}
     for f in db.rows("SELECT vuln_class, signals FROM findings"):
-        for key in json.loads(f["signals"] or "{}"):
+        for key in parse_signals_json(f["signals"]):
             out.setdefault(f["vuln_class"], {}).setdefault(key, 0)
             out[f["vuln_class"]][key] += 1
     return {c: dict(sorted(sig.items(), key=lambda kv: -kv[1])) for c, sig in out.items()}
@@ -115,7 +115,7 @@ def duplicate_heavy_patterns(db: Database, min_occurrences: int = 2) -> list[dic
     )
     hits: dict[tuple[str, str], int] = {}
     for r in rows:
-        for key in json.loads(r["signals"] or "{}"):
+        for key in parse_signals_json(r["signals"]):
             hits[(r["vuln_class"], key)] = hits.get((r["vuln_class"], key), 0) + 1
     return [
         {"vuln_class": c, "signal": key, "occurrences": n}
@@ -126,8 +126,9 @@ def duplicate_heavy_patterns(db: Database, min_occurrences: int = 2) -> list[dic
 
 def target_summary(db: Database, target: str) -> dict:
     """Per-class findings + signals for one target."""
+    norm_target = normalize_target(target)
     rows = db.rows(
-        "SELECT * FROM findings WHERE target = ? ORDER BY id", (target,)
+        "SELECT * FROM findings WHERE target = ? ORDER BY id", (norm_target,)
     )
     by_class: dict[str, dict] = {}
     for f in rows:
@@ -135,7 +136,7 @@ def target_summary(db: Database, target: str) -> dict:
         agg["count"] += 1
         agg["findings"].append({"finding_id": f["finding_id"], "title": f["title"],
                                 "severity": f["severity"], "confidence": f["confidence"]})
-        for key in json.loads(f["signals"] or "{}"):
+        for key in parse_signals_json(f["signals"]):
             agg["signals"][key] = agg["signals"].get(key, 0) + 1
-    return {"target": target, "classes": by_class,
+    return {"target": norm_target, "classes": by_class,
             "total_findings": len(rows)}

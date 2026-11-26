@@ -1,6 +1,3 @@
-from pathlib import Path
-import pytest
-
 from tools.cvss_calculator import calculate_cvss_31, score_finding
 from tools.waf_detector import WafDetector
 from tools.tech_profiler import TechProfiler

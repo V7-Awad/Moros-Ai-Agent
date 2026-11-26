@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 
 from .config import SEVERITIES, VERDICTS
@@ -19,9 +20,10 @@ def normalize_target(target: str) -> str:
 
 def normalize_vuln_class(vuln_class: str) -> str:
     v = str(vuln_class or "").strip().lower()
-    if not v:
+    normalized = _ID_RE.sub("-", v).strip("-")
+    if not normalized:
         raise ValueError("vuln_class must be non-empty")
-    return _ID_RE.sub("-", v).strip("-")
+    return normalized
 
 
 def normalize_finding_id(finding_id: str) -> str:
@@ -67,3 +69,14 @@ def validate_signals(signals: dict | None) -> dict:
         if isinstance(value, (int, float, bool, str)):
             out[k] = value
     return out
+
+
+def parse_signals_json(raw: str | None) -> dict:
+    """Safely parse a JSON-encoded signals dict, returning {} on invalid/null values."""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}

@@ -1,4 +1,3 @@
-import json
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -175,3 +174,49 @@ def test_llm_config_connection_states():
         cfg = handler.get_llm_config()
         assert cfg["connection_state"] == "connected"
         assert cfg["model_responding"] is True
+
+
+def test_redact_secrets_extended_provider_and_webhook_env_vars():
+    from tools.llm_client import redact_secrets
+
+    env_secrets = {
+        "MISTRAL_API_KEY": "mistral_secret_987654321",
+        "TOGETHER_API_KEY": "together_secret_987654321",
+        "CEREBRAS_API_KEY": "cerebras_secret_987654321",
+        "SAMBANOVA_API_KEY": "sambanova_secret_987654321",
+        "FIREWORKS_API_KEY": "fireworks_secret_987654321",
+        "PERPLEXITY_API_KEY": "perplexity_secret_987654321",
+        "COHERE_API_KEY": "cohere_secret_987654321",
+        "DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/111222333/secret_token_abc",
+        "TELEGRAM_BOT_TOKEN": "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
+        "SLACK_WEBHOOK_URL": "https://hooks.slack.com/services/T0000/B0000/secret_slack_xyz",
+    }
+    payload = " | ".join(f"{k}={v}" for k, v in env_secrets.items())
+    with patch.dict("os.environ", env_secrets):
+        redacted = redact_secrets(payload)
+
+    for secret_val in env_secrets.values():
+        assert secret_val not in redacted
+    assert redacted.count("[REDACTED_API_KEY]") == len(env_secrets)
+
+
+def test_execute_subagent_chat_type_annotations_and_secret_redaction():
+    from typing import get_type_hints
+
+    hints = get_type_hints(DashboardHandler.execute_subagent_chat)
+    assert "return" in hints
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        target_path = Path(tmp_dir) / "test.com"
+        target_path.mkdir(parents=True)
+        (target_path / "scope-of-work.md").write_text("# Authorized Scope\n## In Scope\n- `test.com`\n", encoding="utf-8")
+
+        secret_hook = "https://hooks.slack.com/services/T999/B888/leak_secret_token"
+        with patch("dashboard.server.TARGETS_DIR", Path(tmp_dir)), \
+             patch.dict("os.environ", {"SLACK_WEBHOOK_URL": secret_hook}):
+            handler = DashboardHandler.__new__(DashboardHandler)
+            with patch("tools.llm_client.LLMClient.is_available", return_value=True), \
+                 patch("tools.llm_client.LLMClient.complete", side_effect=RuntimeError(f"boom {secret_hook}")):
+                res = handler.execute_subagent_chat("test.com", "coordinator", "ping")
+                assert secret_hook not in res["message"]
+                assert secret_hook not in (res.get("llm_error") or "")

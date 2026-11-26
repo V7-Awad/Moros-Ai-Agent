@@ -17,12 +17,10 @@ import argparse
 import hashlib
 import json
 import logging
-import os
-import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote, urlencode
+from urllib.parse import urlencode
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 

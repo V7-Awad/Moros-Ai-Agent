@@ -14,12 +14,11 @@ import json
 import logging
 import os
 import re
-import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Optional
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("llm-client")
@@ -42,7 +41,25 @@ def redact_secrets(text: Optional[str]) -> str:
     text = re.sub(r"((?:x-goog-api-key|x-api-key):\s*)[^\r\n,;'\"]+", r"\g<1>[REDACTED]", text, flags=re.IGNORECASE)
     text = re.sub(r"(authorization:\s*)(?:Basic|Token)\s+[^\r\n,;'\"]+", r"\g<1>[REDACTED]", text, flags=re.IGNORECASE)
     # Check loaded environment variables for any other configured keys
-    for var in ("GEMINI_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "XAI_API_KEY"):
+    for var in (
+        "GEMINI_API_KEY",
+        "OPENAI_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GROQ_API_KEY",
+        "OPENROUTER_API_KEY",
+        "XAI_API_KEY",
+        "MISTRAL_API_KEY",
+        "TOGETHER_API_KEY",
+        "CEREBRAS_API_KEY",
+        "SAMBANOVA_API_KEY",
+        "FIREWORKS_API_KEY",
+        "PERPLEXITY_API_KEY",
+        "COHERE_API_KEY",
+        "DISCORD_WEBHOOK_URL",
+        "TELEGRAM_BOT_TOKEN",
+        "SLACK_WEBHOOK_URL",
+    ):
         val = os.environ.get(var, "").strip()
         if val and len(val) >= 8 and val in text:
             text = text.replace(val, "[REDACTED_API_KEY]")
@@ -178,6 +195,7 @@ class LLMClient:
         self.api_key = api_key
         self.base_url = base_url
         self.last_error = None
+        self.last_usage = {"input_tokens": 0, "output_tokens": 0}
         self._detect_provider()
 
     def _detect_provider(self):
@@ -280,6 +298,7 @@ class LLMClient:
             return None
 
         call_timeout = timeout or getattr(self, "timeout", None) or 20
+        self.last_usage = {"input_tokens": 0, "output_tokens": 0}
 
         try:
             if self.provider in ["openai", "openrouter"]:
@@ -294,6 +313,11 @@ class LLMClient:
                 res = None
             if res:
                 self.last_error = None
+                if self.last_usage["input_tokens"] == 0 and self.last_usage["output_tokens"] == 0:
+                    self.last_usage = {
+                        "input_tokens": max(1, (len(prompt) + len(system_prompt)) // 4),
+                        "output_tokens": max(1, len(res) // 4),
+                    }
                 return redact_secrets(res)
             return None
         except Exception as e:
@@ -331,6 +355,12 @@ class LLMClient:
                 req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
+                usage = data.get("usage") or {}
+                if usage:
+                    self.last_usage = {
+                        "input_tokens": int(usage.get("prompt_tokens", 0)),
+                        "output_tokens": int(usage.get("completion_tokens", 0)),
+                    }
                 return data["choices"][0]["message"]["content"]
             except urllib.error.HTTPError as exc:
                 if exc.code in (429, 503) and attempt < 2:
@@ -360,6 +390,12 @@ class LLMClient:
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
+            usage = data.get("usage") or {}
+            if usage:
+                self.last_usage = {
+                    "input_tokens": int(usage.get("input_tokens", 0)),
+                    "output_tokens": int(usage.get("output_tokens", 0)),
+                }
             return data["content"][0]["text"]
 
     def _call_gemini(self, prompt: str, system_prompt: str, temperature: float, max_tokens: int, timeout: int = 15) -> str:

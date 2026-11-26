@@ -39,7 +39,7 @@ from .core.config import Config, DEFAULT_RECALL_LIMIT, get_config
 from .core.storage import Database
 from .graph.builder import build_graph
 from .ingestion.finding import normalize_finding, persist_finding
-from .ingestion.triage import latest_verdict, persist_triage
+from .ingestion.triage import persist_triage
 from .retrieval.search import search_findings, search_lessons
 from .scoring.engine import score as _score
 
@@ -57,9 +57,23 @@ class LearningEngine:
         self.db: Database | None = None
 
     def init_db(self) -> Database:
+        if self.db is not None:
+            self.db.close()
         self.db = Database(self.db_path)
         self.db.init_schema()
         return self.db
+
+    def close(self) -> None:
+        if self.db is not None:
+            self.db.close()
+            self.db = None
+
+    def __enter__(self) -> "LearningEngine":
+        self._db()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     def _db(self) -> Database:
         if self.db is None:
@@ -217,7 +231,8 @@ class LearningEngine:
                     signals: dict, validation_state: str, source_provenance: str
                 out record_finding doc dict (with "finding_id", "status").
         """
-        confidence = self.STATE_CONFIDENCE.get(validation_state.lower(), 0.5)
+        state = str(validation_state or "").strip().lower()
+        confidence = self.STATE_CONFIDENCE.get(state, 0.5)
         return self.record_finding(
             target=target,
             vuln_class=vulnerability_class,
@@ -240,9 +255,9 @@ class LearningEngine:
         ranked = sorted(
             findings,
             key=lambda f: (
-                rank.get(str(f.get("severity", "medium")).lower(), 3),
-                float(f.get("confidence", 0.0)),
-                float(f.get("score", 0.0)),
+                rank.get(str(f.get("severity") or "medium").strip().lower(), 3),
+                float(f.get("confidence") or 0.0),
+                float(f.get("score") or 0.0),
             ),
             reverse=True,
         )
@@ -261,7 +276,8 @@ class LearningEngine:
         Shapes: in  finding_id: str, feedback_type: str, notes: str, provenance: str
                 out record_triage doc dict (with "verdict", "finding_id").
         """
-        verdict = self.FEEDBACK_VERDICTS.get(feedback_type.lower(), "unverified")
+        fb = str(feedback_type or "").strip().lower()
+        verdict = self.FEEDBACK_VERDICTS.get(fb, "unverified")
         return self.record_triage(
             finding_id=finding_id,
             verdict=verdict,

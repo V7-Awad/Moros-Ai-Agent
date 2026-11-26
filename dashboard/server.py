@@ -12,7 +12,6 @@ Provides a local web server and REST API for:
 - Viewing and exporting conglomerated penetration testing reports
 """
 
-import hashlib
 import json
 import logging
 import mimetypes
@@ -29,6 +28,7 @@ from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from socketserver import ThreadingMixIn
+from typing import Any, Dict
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 STATIC_DIR = Path(__file__).parent / "static"
@@ -41,13 +41,14 @@ from tools.conversation_store import ConversationStore, safe_agent_name
 from tools.llm_client import LLMClient, redact_secrets
 from tools.checkpoint_manager import CheckpointManager
 from tools.run_manager import RunManager
-from tools.skill_registry import SkillRegistry, CORE_SKILLS
+from tools.skill_registry import SkillRegistry
 from tools.finding_dedupe import deduplicate_findings, finding_identity
 
 logger = logging.getLogger(__name__)
 
 # In-memory scan manager
 active_scans = {}  # target -> {thread, status, logs, start_time, pid}
+active_scans_lock = threading.Lock()
 
 # In-memory runtime state for LLM connectivity
 llm_runtime_state = {
@@ -59,9 +60,42 @@ llm_runtime_state = {
     "last_error": None,
     "active_model": None,
 }
+llm_runtime_lock = threading.Lock()
+
+
+def _has_newline(value) -> bool:
+    """Return True if a value contains CR, LF, or NUL bytes that could inject lines."""
+    if value is None:
+        return False
+    text = str(value)
+    return "\r" in text or "\n" in text or "\x00" in text
+
+
+def _close_learning_engine(engine) -> None:
+    """Close LearningEngine SQLite connection if opened."""
+    if engine is None:
+        return
+    close_fn = getattr(engine, "close", None)
+    if callable(close_fn):
+        close_fn()
+    elif getattr(engine, "db", None) is not None:
+        engine.db.close()
+
+
+def is_valid_http_url(value) -> bool:
+    """Validate an http:// or https:// base URL without newlines."""
+    if not isinstance(value, str) or _has_newline(value):
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(value.strip())
+        return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc) and bool(parsed.hostname)
+    except (TypeError, ValueError):
+        return False
 
 
 def is_valid_discord_webhook_url(value):
+    if not isinstance(value, str) or _has_newline(value):
+        return False
     try:
         parsed = urllib.parse.urlsplit(value)
         return (
@@ -73,6 +107,25 @@ def is_valid_discord_webhook_url(value):
             and not parsed.query
             and not parsed.fragment
             and re.fullmatch(r"/api/webhooks/\d+/[A-Za-z0-9._-]+", parsed.path) is not None
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def is_valid_slack_webhook_url(value):
+    if not isinstance(value, str) or _has_newline(value):
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        return (
+            parsed.scheme == "https"
+            and parsed.hostname == "hooks.slack.com"
+            and parsed.port in (None, 443)
+            and not parsed.username
+            and not parsed.password
+            and not parsed.query
+            and not parsed.fragment
+            and re.fullmatch(r"/(?:services|workflows|triggers)/[A-Za-z0-9._/-]+", parsed.path) is not None
         )
     except (TypeError, ValueError):
         return False
@@ -175,13 +228,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _is_local_browser_request(self):
         local_names = {"127.0.0.1", "::1", "localhost"}
-        host = self.headers.get("Host", "").rsplit(":", 1)[0].strip("[]").lower()
-        origin = self.headers.get("Origin")
+        raw_host = (self.headers.get("Host") or "").strip()
+        if not raw_host or any(ch in raw_host for ch in ("/", "\\", "@", "?", "#")):
+            return False
+        try:
+            parsed_host = urllib.parse.urlsplit(f"//{raw_host}")
+            host = (parsed_host.hostname or "").lower()
+            _ = parsed_host.port
+        except ValueError:
+            return False
         if host not in local_names:
             return False
+        origin = self.headers.get("Origin")
         if origin:
-            origin_host = urllib.parse.urlparse(origin).hostname
-            if (origin_host or "").lower() not in local_names:
+            try:
+                origin_host = (urllib.parse.urlsplit(origin).hostname or "").lower()
+            except ValueError:
+                return False
+            if origin_host not in local_names:
                 return False
         return True
 
@@ -220,8 +284,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         try:
             body_json = json.loads(body_bytes.decode("utf-8")) if body_bytes else {}
-        except Exception:
-            body_json = {}
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self.send_error_json("Invalid JSON request body", status=400)
+            return
+
+        if not isinstance(body_json, dict):
+            self.send_error_json("JSON request body must be an object", status=400)
+            return
 
         if path.startswith("/api/"):
             self.handle_api_post(path, body_json)
@@ -230,18 +299,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_error_json("Not Found", status=404)
 
     def handle_static_get(self, path):
+        static_root = STATIC_DIR.resolve()
         if path in ["", "/", "/index.html"]:
-            file_path = STATIC_DIR / "index.html"
+            file_path = static_root / "index.html"
         else:
             rel = path.lstrip("/")
-            file_path = (STATIC_DIR / rel).resolve()
-            if not str(file_path).startswith(str(STATIC_DIR)):
+            file_path = (static_root / rel).resolve()
+            if not file_path.is_relative_to(static_root):
                 self.send_error_json("Forbidden", status=403)
                 return
 
         if not file_path.exists() or not file_path.is_file():
             # Fallback to index.html for SPA client-side routing
-            file_path = STATIC_DIR / "index.html"
+            file_path = static_root / "index.html"
 
         mime, _ = mimetypes.guess_type(str(file_path))
         mime = mime or "application/octet-stream"
@@ -253,8 +323,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
-        except Exception as e:
-            self.send_error_json(f"Error reading file: {e}", status=500)
+        except Exception:
+            logger.exception("Error reading static file %s", file_path)
+            self.send_error_json("Error reading static file", status=500)
 
     # ==================== API HANDLERS ====================
 
@@ -364,6 +435,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif sub == "sarif":
                 self.send_json(self.get_target_sarif(target_name))
                 return
+            elif sub == "costs":
+                self.send_json(self.get_target_costs(target_name))
+                return
+            elif sub == "traces":
+                self.send_json(self.get_target_traces(target_name))
+                return
+            elif sub == "memory":
+                self.send_json(self.get_target_memory(target_name))
+                return
 
         # 5. Scan status
         if path == "/api/scan/status":
@@ -398,34 +478,59 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_json(self.get_notification_config())
             return
 
+        # 7b. Agentic security posture (OWASP Agentic Top 10 coverage)
+        if path == "/api/security/posture":
+            try:
+                from tools.agent_security import get_security_posture
+                self.send_json(get_security_posture())
+            except Exception as e:
+                self.send_json({"error": str(e)}, status=500)
+            return
+
         # 8. Learning Engine Endpoints
         if path == "/api/learning/stats":
+            engine = None
             try:
                 from learning_engine.engine import LearningEngine
                 engine = LearningEngine()
                 self.send_json(engine.distill())
-            except Exception as e:
-                self.send_json({"error": str(e)}, status=500)
+            except Exception:
+                logger.exception("Failed to load learning stats")
+                self.send_json({"error": "Failed to load learning stats"}, status=500)
+            finally:
+                _close_learning_engine(engine)
             return
 
         if path == "/api/learning/recall":
             try:
-                q = query.get("q", [""])[0]
                 limit = int(query.get("limit", [10])[0])
+            except (TypeError, ValueError):
+                self.send_error_json("Invalid limit parameter", status=400)
+                return
+            engine = None
+            try:
+                q = query.get("q", [""])[0]
                 from learning_engine.engine import LearningEngine
                 engine = LearningEngine()
                 self.send_json({"results": engine.recall(q, limit=limit)})
-            except Exception as e:
-                self.send_json({"error": str(e)}, status=500)
+            except Exception:
+                logger.exception("Failed to recall learning entries")
+                self.send_json({"error": "Failed to recall learning entries"}, status=500)
+            finally:
+                _close_learning_engine(engine)
             return
 
         if path == "/api/learning/graph":
+            engine = None
             try:
                 from learning_engine.engine import LearningEngine
                 engine = LearningEngine()
-                self.send_json(engine.knowledge_graph())
-            except Exception as e:
-                self.send_json({"error": str(e)}, status=500)
+                self.send_json(engine.export_graph())
+            except Exception:
+                logger.exception("Failed to export learning graph")
+                self.send_json({"error": "Failed to export learning graph"}, status=500)
+            finally:
+                _close_learning_engine(engine)
             return
 
         self.send_error_json("Unknown API endpoint", status=404)
@@ -433,6 +538,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def handle_api_post(self, path, body):
         # Learning Engine Endpoints
         if path == "/api/learning/finding":
+            engine = None
             try:
                 from learning_engine.engine import LearningEngine
                 engine = LearningEngine()
@@ -447,11 +553,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     source=body.get("source", "dashboard"),
                 )
                 self.send_json(res)
-            except Exception as e:
-                self.send_json({"error": str(e)}, status=500)
+            except (TypeError, ValueError):
+                self.send_error_json("Invalid learning finding payload", status=400)
+            except Exception:
+                logger.exception("Failed to record learning finding")
+                self.send_json({"error": "Failed to record learning finding"}, status=500)
+            finally:
+                _close_learning_engine(engine)
             return
 
         if path == "/api/learning/triage":
+            engine = None
             try:
                 from learning_engine.engine import LearningEngine
                 engine = LearningEngine()
@@ -462,8 +574,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     reviewer=body.get("reviewer", "dashboard"),
                 )
                 self.send_json(res)
-            except Exception as e:
-                self.send_json({"error": str(e)}, status=500)
+            except Exception:
+                logger.exception("Failed to record learning triage")
+                self.send_json({"error": "Failed to record learning triage"}, status=500)
+            finally:
+                _close_learning_engine(engine)
             return
 
         if path == "/api/learning/score":
@@ -471,8 +586,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 from learning_engine.scoring.engine import score
                 res = score(body.get("signals", {}))
                 self.send_json(res)
-            except Exception as e:
-                self.send_json({"error": str(e)}, status=500)
+            except Exception:
+                logger.exception("Failed to score learning signals")
+                self.send_json({"error": "Failed to score learning signals"}, status=500)
             return
 
         # 1. Create target
@@ -582,13 +698,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         # 6. Save LLM Configuration directly from Dashboard
         if path == "/api/config/llm":
             res = self.save_llm_config(body)
-            self.send_json(res)
+            self.send_json(res, status=200 if res.get("status") == "success" else 400)
             return
 
         # 7. Test LLM Connection from Dashboard
         if path == "/api/config/llm/test":
             res = self.test_llm_config(body)
-            self.send_json(res)
+            self.send_json(res, status=200 if res.get("status") == "success" else 400)
             return
 
         if path == "/api/config/notifications":
@@ -646,16 +762,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
         key = client.api_key or ""
         configured = client.is_available()
 
+        with llm_runtime_lock:
+            runtime_snapshot = dict(llm_runtime_state)
+
         if not configured:
             conn_state = "offline"
             responding = False
-        elif llm_runtime_state.get("model_responding"):
+        elif runtime_snapshot.get("model_responding"):
             conn_state = "connected"
             responding = True
-        elif llm_runtime_state.get("status") == "error":
+        elif runtime_snapshot.get("status") == "error":
             conn_state = "error"
             responding = False
-        elif llm_runtime_state.get("tested"):
+        elif runtime_snapshot.get("tested"):
             conn_state = "tested"
             responding = False
         else:
@@ -664,14 +783,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         return {
             "provider": client.provider,
-            "model": llm_runtime_state.get("active_model") or client.model,
+            "model": runtime_snapshot.get("active_model") or client.model,
             "base_url": client.base_url or "",
             "is_available": configured,
             "has_api_key": bool(key),
             "connection_state": conn_state,
             "model_responding": responding,
-            "last_error": redact_secrets(llm_runtime_state.get("last_error")),
-            "last_tested": llm_runtime_state.get("last_tested"),
+            "last_error": redact_secrets(runtime_snapshot.get("last_error")),
+            "last_tested": runtime_snapshot.get("last_tested"),
         }
 
     def get_notification_config(self):
@@ -683,22 +802,36 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def save_notification_config(self, body):
         env_file = PROJECT_ROOT / ".env"
-        lines = env_file.read_text(encoding="utf-8").splitlines() if env_file.is_file() else []
+        try:
+            lines = env_file.read_text(encoding="utf-8", errors="replace").splitlines() if env_file.is_file() else []
+        except OSError:
+            logger.exception("Failed to read .env while saving notification settings")
+            return {"status": "error", "message": "Could not read notification settings locally."}
         saved = []
 
         if "discord_webhook_url" in body:
-            webhook_url = str(body.get("discord_webhook_url", "")).strip()
+            raw_webhook = body.get("discord_webhook_url")
+            if _has_newline(raw_webhook):
+                return {"status": "error", "message": "Discord webhook URL must not contain newlines."}
+            webhook_url = str(raw_webhook or "").strip()
+            lines = [line for line in lines if not line.strip().startswith("DISCORD_WEBHOOK_URL=")]
             if webhook_url:
                 if not is_valid_discord_webhook_url(webhook_url):
                     return {"status": "error", "message": "Enter a valid HTTPS Discord webhook URL."}
-                lines = [line for line in lines if not line.strip().startswith("DISCORD_WEBHOOK_URL=")]
                 lines.append(f"DISCORD_WEBHOOK_URL={webhook_url}")
                 os.environ["DISCORD_WEBHOOK_URL"] = webhook_url
                 saved.append("Discord")
+            else:
+                os.environ.pop("DISCORD_WEBHOOK_URL", None)
+                saved.append("Discord (cleared)")
 
         if "telegram_bot_token" in body and "telegram_chat_id" in body:
-            tg_token = str(body.get("telegram_bot_token", "")).strip()
-            tg_chat = str(body.get("telegram_chat_id", "")).strip()
+            raw_token = body.get("telegram_bot_token")
+            raw_chat = body.get("telegram_chat_id")
+            if _has_newline(raw_token) or _has_newline(raw_chat):
+                return {"status": "error", "message": "Telegram settings must not contain newlines."}
+            tg_token = str(raw_token or "").strip()
+            tg_chat = str(raw_chat or "").strip()
             if tg_token and tg_chat:
                 lines = [line for line in lines if not line.strip().startswith(("TELEGRAM_BOT_TOKEN=", "TELEGRAM_CHAT_ID="))]
                 lines.append(f"TELEGRAM_BOT_TOKEN={tg_token}")
@@ -706,17 +839,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 os.environ["TELEGRAM_BOT_TOKEN"] = tg_token
                 os.environ["TELEGRAM_CHAT_ID"] = tg_chat
                 saved.append("Telegram")
+            elif not tg_token and not tg_chat:
+                lines = [line for line in lines if not line.strip().startswith(("TELEGRAM_BOT_TOKEN=", "TELEGRAM_CHAT_ID="))]
+                os.environ.pop("TELEGRAM_BOT_TOKEN", None)
+                os.environ.pop("TELEGRAM_CHAT_ID", None)
+                saved.append("Telegram (cleared)")
 
         if "slack_webhook_url" in body:
-            slack_url = str(body.get("slack_webhook_url", "")).strip()
+            raw_slack = body.get("slack_webhook_url")
+            if _has_newline(raw_slack):
+                return {"status": "error", "message": "Slack webhook URL must not contain newlines."}
+            slack_url = str(raw_slack or "").strip()
+            lines = [line for line in lines if not line.strip().startswith("SLACK_WEBHOOK_URL=")]
             if slack_url:
-                lines = [line for line in lines if not line.strip().startswith("SLACK_WEBHOOK_URL=")]
+                if not is_valid_slack_webhook_url(slack_url):
+                    return {"status": "error", "message": "Enter a valid HTTPS Slack webhook URL."}
                 lines.append(f"SLACK_WEBHOOK_URL={slack_url}")
                 os.environ["SLACK_WEBHOOK_URL"] = slack_url
                 saved.append("Slack")
+            else:
+                os.environ.pop("SLACK_WEBHOOK_URL", None)
+                saved.append("Slack (cleared)")
 
         try:
-            env_file.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+            content = ("\n".join(lines).rstrip() + "\n") if lines else ""
+            env_file.write_text(content, encoding="utf-8")
         except OSError:
             logger.exception("Failed to save notification settings")
             return {"status": "error", "message": "Could not save notification settings locally."}
@@ -724,16 +871,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return {"status": "success", "message": f"Configured alerts: {', '.join(saved) if saved else 'Saved.'}"}
 
     def save_llm_config(self, body):
-        provider = str(body.get("provider", "openai")).strip().lower()
-        model = str(body.get("model", "")).strip()
-        api_key = str(body.get("api_key", "")).strip()
-        base_url = str(body.get("base_url", "")).strip()
+        raw_provider = body.get("provider", "openai")
+        raw_model = body.get("model", "")
+        raw_api_key = body.get("api_key", "")
+        raw_base_url = body.get("base_url", "")
+        for field_name, raw_val in (
+            ("provider", raw_provider),
+            ("model", raw_model),
+            ("api_key", raw_api_key),
+            ("base_url", raw_base_url),
+        ):
+            if _has_newline(raw_val):
+                return {"status": "error", "message": f"Invalid {field_name}: newline characters are not allowed."}
+
+        provider = str(raw_provider or "openai").strip().lower()
+        model = str(raw_model or "").strip()
+        api_key = str(raw_api_key or "").strip()
+        base_url = str(raw_base_url or "").strip()
+
+        if base_url and not is_valid_http_url(base_url):
+            return {"status": "error", "message": "Invalid base_url: must be an http:// or https:// URL."}
 
         env_file = PROJECT_ROOT / ".env"
         env_lines = []
         if env_file.is_file():
             try:
-                env_lines = env_file.read_text(encoding="utf-8").splitlines()
+                env_lines = env_file.read_text(encoding="utf-8", errors="replace").splitlines()
             except Exception:
                 pass
 
@@ -742,7 +905,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             line_str = line.strip()
             if line_str and not line_str.startswith("#") and "=" in line_str:
                 k, v = line_str.split("=", 1)
-                env_dict[k.strip()] = v.strip().strip('"').strip("'")
+                clean_k = k.strip()
+                clean_v = v.strip().strip('"').strip("'")
+                if clean_k and not _has_newline(clean_k) and not _has_newline(clean_v):
+                    env_dict[clean_k] = clean_v
 
         # Map according to provider
         env_dict["MOROS_LLM_PROVIDER"] = provider
@@ -822,16 +988,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
         out_content = "# Moros AI Environment Configuration (Saved from Dashboard)\n"
         for k, v in env_dict.items():
             out_content += f"{k}={v}\n"
-        env_file.write_text(out_content, encoding="utf-8")
+        try:
+            env_file.write_text(out_content, encoding="utf-8")
+        except OSError:
+            logger.exception("Failed to write LLM configuration to .env")
+            return {"status": "error", "message": "Could not save LLM configuration locally."}
 
         # Reset runtime state to reflect newly configured credentials
         has_key = bool(api_key or (provider == "ollama"))
-        llm_runtime_state["configured"] = has_key
-        llm_runtime_state["model_responding"] = False
-        llm_runtime_state["tested"] = False
-        llm_runtime_state["status"] = "configured" if has_key else "offline"
-        llm_runtime_state["last_error"] = None
-        llm_runtime_state["active_model"] = model
+        with llm_runtime_lock:
+            llm_runtime_state["configured"] = has_key
+            llm_runtime_state["model_responding"] = False
+            llm_runtime_state["tested"] = False
+            llm_runtime_state["status"] = "configured" if has_key else "offline"
+            llm_runtime_state["last_error"] = None
+            llm_runtime_state["active_model"] = model
 
         return {
             "status": "success",
@@ -840,17 +1011,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
         }
 
     def test_llm_config(self, body):
+        raw_base_url = body.get("base_url", "")
+        if _has_newline(raw_base_url):
+            return {
+                "status": "error",
+                "message": "Invalid base_url: newline characters are not allowed.",
+                "connection_state": "error",
+                "model_responding": False,
+            }
         provider = str(body.get("provider", "")).strip().lower() or None
         model = str(body.get("model", "")).strip() or None
         api_key = str(body.get("api_key", "")).strip() or None
-        base_url = str(body.get("base_url", "")).strip() or None
+        base_url = str(raw_base_url or "").strip() or None
+
+        if base_url and not is_valid_http_url(base_url):
+            return {
+                "status": "error",
+                "message": "Invalid base_url: must be an http:// or https:// URL.",
+                "connection_state": "error",
+                "model_responding": False,
+            }
 
         try:
             client = LLMClient(provider=provider or "auto", model=model, api_key=api_key, base_url=base_url)
             if not client.is_available():
-                llm_runtime_state["status"] = "offline"
-                llm_runtime_state["model_responding"] = False
-                llm_runtime_state["last_error"] = "LLM credentials missing or incomplete"
+                with llm_runtime_lock:
+                    llm_runtime_state["status"] = "offline"
+                    llm_runtime_state["model_responding"] = False
+                    llm_runtime_state["last_error"] = "LLM credentials missing or incomplete"
                 return {
                     "status": "error",
                     "message": "LLM credentials missing or incomplete",
@@ -858,14 +1046,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "model_responding": False,
                 }
             resp = client.complete("Ping. Respond with 'PONG' only.", max_tokens=256, timeout=12)
-            llm_runtime_state["last_tested"] = datetime.now(timezone.utc).isoformat()
+            tested_at = datetime.now(timezone.utc).isoformat()
             if resp:
                 clean_resp = redact_secrets(resp.strip())
-                llm_runtime_state["status"] = "connected"
-                llm_runtime_state["model_responding"] = True
-                llm_runtime_state["tested"] = True
-                llm_runtime_state["last_error"] = None
-                llm_runtime_state["active_model"] = client.model
+                with llm_runtime_lock:
+                    llm_runtime_state["last_tested"] = tested_at
+                    llm_runtime_state["status"] = "connected"
+                    llm_runtime_state["model_responding"] = True
+                    llm_runtime_state["tested"] = True
+                    llm_runtime_state["last_error"] = None
+                    llm_runtime_state["active_model"] = client.model
                 return {
                     "status": "success",
                     "message": f"Connected to {client.provider}/{client.model}! Response: {clean_resp}",
@@ -876,10 +1066,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 }
             else:
                 detail = redact_secrets(client.last_error or f"{client.provider} returned an empty response")
-                llm_runtime_state["status"] = "error"
-                llm_runtime_state["model_responding"] = False
-                llm_runtime_state["tested"] = True
-                llm_runtime_state["last_error"] = detail
+                with llm_runtime_lock:
+                    llm_runtime_state["last_tested"] = tested_at
+                    llm_runtime_state["status"] = "error"
+                    llm_runtime_state["model_responding"] = False
+                    llm_runtime_state["tested"] = True
+                    llm_runtime_state["last_error"] = detail
                 return {
                     "status": "error",
                     "message": f"Connection failed: {detail}",
@@ -888,10 +1080,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 }
         except Exception as e:
             err_msg = redact_secrets(str(e))
-            llm_runtime_state["status"] = "error"
-            llm_runtime_state["model_responding"] = False
-            llm_runtime_state["tested"] = True
-            llm_runtime_state["last_error"] = err_msg
+            with llm_runtime_lock:
+                llm_runtime_state["status"] = "error"
+                llm_runtime_state["model_responding"] = False
+                llm_runtime_state["tested"] = True
+                llm_runtime_state["last_error"] = err_msg
             return {
                 "status": "error",
                 "message": f"Connection test failed: {err_msg}",
@@ -909,12 +1102,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except ImportError:
             pass
 
+        with active_scans_lock:
+            active_scans_count = len(active_scans)
+
         return {
             "name": "Moros AI Agent Dashboard",
             "version": "1.0.0",
             "python_version": sys.version,
             "playwright_installed": playwright_ok,
-            "active_scans_count": len(active_scans),
+            "active_scans_count": active_scans_count,
             "targets_count": len(list(TARGETS_DIR.glob("*"))) if TARGETS_DIR.exists() else 0,
             "all_skills_count": len(SkillRegistry().list_skills()),
         }
@@ -923,6 +1119,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         targets = []
         if not TARGETS_DIR.exists():
             return targets
+
+        with active_scans_lock:
+            scanning_targets = {
+                name for name, info in active_scans.items()
+                if info.get("status") in {"starting", "running"}
+            }
 
         for d in TARGETS_DIR.iterdir():
             if d.is_dir():
@@ -935,7 +1137,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     sev = f.get("severity_level", "INFO")
                     sev_counts[sev] = sev_counts.get(sev, 0) + 1
 
-                is_scanning = d.name in active_scans and active_scans[d.name]["status"] == "running"
+                is_scanning = d.name in scanning_targets
 
                 targets.append({
                     "name": d.name,
@@ -975,7 +1177,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         tech_data = {}
         if tech_file.exists():
             try:
-                tech_data = json.loads(tech_file.read_text(encoding="utf-8"))
+                tech_data = json.loads(tech_file.read_text(encoding="utf-8", errors="replace"))
             except Exception:
                 pass
 
@@ -989,8 +1191,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
         # Subdomains count
         subdomains_file = output_dir / "recon" / "subdomains-all.txt"
         subdomain_count = 0
-        if subdomains_file.exists():
-            subdomain_count = len([line for line in subdomains_file.read_text().splitlines() if line.strip()])
+        if subdomains_file.is_file():
+            try:
+                subdomain_count = len([
+                    line for line in subdomains_file.read_text(encoding="utf-8", errors="replace").splitlines()
+                    if line.strip()
+                ])
+            except OSError:
+                subdomain_count = 0
+
+        with active_scans_lock:
+            is_scanning = active_scans.get(target_name, {}).get("status") in {"starting", "running"}
 
         return {
             "target": target_name,
@@ -1003,7 +1214,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "total_js_files": js_count,
             "total_subdomains": subdomain_count,
             "tech_fingerprint": tech_data,
-            "is_scanning": target_name in active_scans and active_scans[target_name]["status"] == "running",
+            "is_scanning": is_scanning,
         }
 
     @staticmethod
@@ -1047,13 +1258,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def get_agent_greeting(self, target_name, agent):
         greetings = {
             "coordinator": (
-                f"ðŸ›¡ï¸ **Moros Master Coordinator â€” Active**\n\n"
+                f"🛡️ **Moros Master Coordinator — Active**\n\n"
                 f"Target workspace: `{target_name}` | Status: `READY`\n\n"
                 "I orchestrate multi-agent operations, attack trees, and skill dispatch. "
                 "You can command me to run assessments, verify candidate findings, or coordinate sub-agents."
             ),
             "recon-agent": (
-                f"ðŸŒ **Reconnaissance Specialist Agent â€” Active**\n\n"
+                f"🌐 **Reconnaissance Specialist Agent — Active**\n\n"
                 f"Target workspace: `{target_name}` | Status: `READY`\n\n"
                 "Specialized in subdomain enumeration, DNS resolution, alive checks, and Wayback scraping.\n\n"
                 "**Directives supported:**\n"
@@ -1063,7 +1274,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "- `Summarize mapped attack surface`"
             ),
             "js-analyzer": (
-                f"âš¡ **JavaScript & API Hunter Agent â€” Active**\n\n"
+                f"⚡ **JavaScript & API Hunter Agent — Active**\n\n"
                 f"Target workspace: `{target_name}` | Status: `READY`\n\n"
                 "Specialized in headless browser crawling, source map recovery, AST route extraction, and credential pattern detection.\n\n"
                 "**Directives supported:**\n"
@@ -1073,7 +1284,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "- `Audit client-side source maps`"
             ),
             "xss-specialist": (
-                f"ðŸŽ¯ **XSS & Client-Side Specialist Agent â€” Active**\n\n"
+                f"🎯 **XSS & Client-Side Specialist Agent — Active**\n\n"
                 f"Target workspace: `{target_name}` | Status: `READY`\n\n"
                 "Specialized in DOM, Reflected, Stored, and Blind XSS payload injection with context-escape analysis.\n\n"
                 "**Directives supported:**\n"
@@ -1082,7 +1293,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "- `Generate context-tailored XSS payloads`"
             ),
             "ssrf-specialist": (
-                f"â˜ï¸ **SSRF & Cloud Metadata Hunter Agent â€” Active**\n\n"
+                f"☁️ **SSRF & Cloud Metadata Hunter Agent — Active**\n\n"
                 f"Target workspace: `{target_name}` | Status: `READY`\n\n"
                 "Specialized in SSRF identification, out-of-band canary interaction, and AWS/GCP/Azure instance metadata pivots.\n\n"
                 "**Directives supported:**\n"
@@ -1091,7 +1302,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "- `Inspect webhook and callback parameters`"
             ),
             "auth-race-specialist": (
-                f"ðŸ”‘ **Auth & Race Condition Agent â€” Active**\n\n"
+                f"🔑 **Auth & Race Condition Agent — Active**\n\n"
                 f"Target workspace: `{target_name}` | Status: `READY`\n\n"
                 "Specialized in IdP multi-threaded race conditions, token collisions, and password reset rate-limit auditing.\n\n"
                 "**Directives supported:**\n"
@@ -1100,7 +1311,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "- `Evaluate OAuth/SAML state handling`"
             ),
             "review-verifier": (
-                f"ðŸ” **Review-Skill Verifier Gate â€” Active**\n\n"
+                f"🔍 **Review-Skill Verifier Gate — Active**\n\n"
                 f"Target workspace: `{target_name}` | Status: `READY`\n\n"
                 "Specialized in strict evidence enforcement, independent cURL reproduction replay, and false-positive elimination.\n\n"
                 "**Directives supported:**\n"
@@ -1109,7 +1320,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "- `Enforce verification proof standards`"
             ),
             "report-specialist": (
-                f"ðŸ“„ **Reporting & Synthesis Agent â€” Active**\n\n"
+                f"📄 **Reporting & Synthesis Agent — Active**\n\n"
                 f"Target workspace: `{target_name}` | Status: `READY`\n\n"
                 "Specialized in OASIS SARIF 2.1.0 deliverable compilation, CVSS v3.1 scoring, and executive markdown synthesis.\n\n"
                 "**Directives supported:**\n"
@@ -1119,7 +1330,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             ),
         }
         return greetings.get(agent, (
-            f"ðŸ›¡ï¸ **Moros Specialist Agent â€” {agent}**\n\n"
+            f"🛡️ **Moros Specialist Agent — {agent}**\n\n"
             f"Target workspace: `{target_name}` | Status: `READY`\n\n"
             "Ready to execute operational directives for authorized assessment scope."
         ))
@@ -1127,7 +1338,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def get_subagent_roster(self, target_name):
         target_path = TARGETS_DIR / target_name
         store = ConversationStore(target_path)
-        scan_state = active_scans.get(target_name, {}).get("status", "idle")
+        with active_scans_lock:
+            scan_state = active_scans.get(target_name, {}).get("status", "idle")
+        with llm_runtime_lock:
+            llm_responding = bool(llm_runtime_state.get("model_responding"))
+            llm_status = llm_runtime_state.get("status")
         llm_available = LLMClient(provider="auto").is_available()
         run_manager = RunManager(target_path)
         latest_run = run_manager.get_latest_or_active_run()
@@ -1143,9 +1358,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return scan_state.upper()
             if not llm_available:
                 return "LLM OFFLINE"
-            if llm_runtime_state.get("model_responding"):
+            if llm_responding:
                 return "ONLINE (Active)"
-            if llm_runtime_state.get("status") == "error":
+            if llm_status == "error":
                 return "LLM ERROR"
             return "CONFIGURED (Ready)"
 
@@ -1264,6 +1479,73 @@ class DashboardHandler(BaseHTTPRequestHandler):
         findings = self.get_target_findings(target_name)
         return build_sarif_report(findings, target=target_name)
 
+    def get_target_costs(self, target_name):
+        target_path = TARGETS_DIR / target_name
+        receipt_file = target_path / "output" / "costs" / "receipt.json"
+        if receipt_file.is_file():
+            try:
+                return json.loads(receipt_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        log_file = target_path / "output" / "costs" / "cost-log.jsonl"
+        entries = []
+        total_cost = 0.0
+        in_tok = 0
+        out_tok = 0
+        if log_file.is_file():
+            for line in log_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                    entries.append(row)
+                    total_cost += float(row.get("cost_usd", 0.0))
+                    in_tok += int(row.get("input_tokens", 0))
+                    out_tok += int(row.get("output_tokens", 0))
+                except Exception:
+                    continue
+        return {
+            "target": target_name,
+            "summary": {
+                "total_cost_usd": round(total_cost, 6),
+                "total_input_tokens": in_tok,
+                "total_output_tokens": out_tok,
+                "total_llm_calls": len(entries),
+            },
+            "entries": entries,
+        }
+
+    def get_target_traces(self, target_name):
+        target_path = TARGETS_DIR / target_name
+        traces_dir = target_path / "output" / "traces"
+        traces = []
+        if traces_dir.is_dir():
+            files = sorted(traces_dir.glob("trace*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:10]
+            for f in files:
+                try:
+                    traces.append({
+                        "file": f.name,
+                        "spans": json.loads(f.read_text(encoding="utf-8")),
+                    })
+                except Exception:
+                    continue
+        return {"target": target_name, "traces": traces}
+
+    def get_target_memory(self, target_name):
+        target_path = TARGETS_DIR / target_name
+        try:
+            from tools.memory_manager import MemoryManager
+            mm = MemoryManager(target_path)
+            return {
+                "target": target_name,
+                "stats": mm.get_stats(),
+                "facts": mm.recall_facts(limit=50),
+                "techniques": mm.recall_techniques(limit=30),
+                "recent_events": mm.recall_events(limit=30),
+            }
+        except Exception as exc:
+            return {"target": target_name, "error": str(exc)}
+
     def execute_subagent_chat(self, target: str, agent: str, message: str) -> Dict[str, Any]:
         target_path = TARGETS_DIR / target
         store = ConversationStore(target_path)
@@ -1280,7 +1562,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         rm.log_event(run_id, "agent_chat_directive", {"agent": agent, "directive": clean_user_message[:200]})
 
         # Check for tools execution
-        from tools.agent_runtime import AgentContext, AgentResult, AgentRunner, ToolRegistry
+        from tools.agent_runtime import AgentContext, AgentRunner, ToolRegistry
         from tools.skill_runner import SkillRunner
         from tools.sarif_exporter import write_sarif_report
         from tools.scope_validator import ScopeValidator
@@ -1361,25 +1643,29 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if result.status == "completed" and result.summary:
                     answer = redact_secrets(result.summary)
                     source = "llm"
-                    llm_runtime_state["model_responding"] = True
-                    llm_runtime_state["status"] = "connected"
-                    llm_runtime_state["active_model"] = client.model
-                    llm_runtime_state["last_error"] = None
+                    with llm_runtime_lock:
+                        llm_runtime_state["model_responding"] = True
+                        llm_runtime_state["status"] = "connected"
+                        llm_runtime_state["active_model"] = client.model
+                        llm_runtime_state["last_error"] = None
                 else:
                     llm_error_msg = redact_secrets(result.summary or client.last_error or f"Model returned status '{result.status}'")
-                    llm_runtime_state["model_responding"] = False
-                    llm_runtime_state["status"] = "error"
-                    llm_runtime_state["last_error"] = llm_error_msg
+                    with llm_runtime_lock:
+                        llm_runtime_state["model_responding"] = False
+                        llm_runtime_state["status"] = "error"
+                        llm_runtime_state["last_error"] = llm_error_msg
             except Exception as e:
                 llm_error_msg = redact_secrets(str(e))
                 logger.warning(f"AgentRunner execution failed: {llm_error_msg}")
-                llm_runtime_state["model_responding"] = False
-                llm_runtime_state["status"] = "error"
-                llm_runtime_state["last_error"] = llm_error_msg
+                with llm_runtime_lock:
+                    llm_runtime_state["model_responding"] = False
+                    llm_runtime_state["status"] = "error"
+                    llm_runtime_state["last_error"] = llm_error_msg
         else:
             llm_error_msg = "No LLM provider configured (missing API credentials)"
-            llm_runtime_state["status"] = "offline"
-            llm_runtime_state["model_responding"] = False
+            with llm_runtime_lock:
+                llm_runtime_state["status"] = "offline"
+                llm_runtime_state["model_responding"] = False
 
         if answer and source == "llm":
             # Successful model response
@@ -1677,7 +1963,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             finding.setdefault("id", f"report-{index}")
                             finding.setdefault("endpoint", finding.get("url", ""))
                             finding.setdefault("category", finding.get("type", "candidate"))
-                            severity = str(finding.get("severity", "UNASSESSED")).upper()
+                            severity = str(finding.get("severity") or "UNASSESSED").upper()
                             finding.setdefault("severity_level", next((level for level in
                                 ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO") if level in severity), "UNASSESSED"))
                             finding.setdefault("validation_status", "unverified")
@@ -1739,15 +2025,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                                         "source_file": source_reference, "url": url,
                                     })
 
-                                raw_sev = item.get("severity", "Triage Severity: UNASSESSED â€” pending evidence and human review")
-                                sev_lvl = "UNASSESSED" if "UNASSESSED" in raw_sev.upper() else "MEDIUM"
-                                if "CRITICAL" in raw_sev.upper():
+                                raw_sev = item.get("severity") or "Triage Severity: UNASSESSED — pending evidence and human review"
+                                sev_upper = str(raw_sev or "info").upper()
+                                sev_lvl = "UNASSESSED" if "UNASSESSED" in sev_upper else "MEDIUM"
+                                if "CRITICAL" in sev_upper:
                                     sev_lvl = "CRITICAL"
-                                elif "HIGH" in raw_sev.upper():
+                                elif "HIGH" in sev_upper:
                                     sev_lvl = "HIGH"
-                                elif "LOW" in raw_sev.upper():
+                                elif "LOW" in sev_upper:
                                     sev_lvl = "LOW"
-                                elif "INFO" in raw_sev.upper():
+                                elif "INFO" in sev_upper:
                                     sev_lvl = "INFO"
 
                                 validation = item.get("validation_record") or {}
@@ -1809,14 +2096,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     if existing:
                         add_occurrence(existing, source_file, s.get("line_number"))
                         continue
-                    raw_sev = s.get("severity", "Triage Severity: MEDIUM â€” pending human review")
+                    raw_sev = s.get("severity") or "Triage Severity: MEDIUM — pending human review"
+                    sev_upper = str(raw_sev or "info").upper()
                     sev_lvl = "MEDIUM"
-                    if "HIGH" in raw_sev.upper():
+                    if "HIGH" in sev_upper:
                         sev_lvl = "HIGH"
-                    elif "CRITICAL" in raw_sev.upper():
+                    elif "CRITICAL" in sev_upper:
                         sev_lvl = "CRITICAL"
-                    elif "LOW" in raw_sev.upper():
+                    elif "LOW" in sev_upper:
                         sev_lvl = "LOW"
+                    elif "INFO" in sev_upper:
+                        sev_lvl = "INFO"
+                    elif "UNASSESSED" in sev_upper:
+                        sev_lvl = "UNASSESSED"
 
                     finding = {
                         "id": f"secret-{len(findings)+1}",
@@ -1835,6 +2127,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "raw_record_count": 1,
                         "details": s.get("context", ""),
                         "status": "pending_review",
+                        "validation_status": "unverified",
+                        "confidence": s.get("confidence", "not-scored"),
                     }
                     grouped[identity] = finding
                     findings.append(finding)
@@ -1867,7 +2161,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "id": f"gadget-{len(findings)+1}",
                         "title": f"Dangerous Sink: {sink}",
                         "category": "dom-xss",
-                        "severity": "Triage Severity: MEDIUM â€” pending human review",
+                        "severity": "Triage Severity: MEDIUM — pending human review",
                         "severity_level": "MEDIUM",
                         "endpoint": g.get("source_file", ""),
                         "parameter": g.get("controllable_source", ""),
@@ -1879,6 +2173,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "raw_record_count": raw_count,
                         "details": "Potential DOM sink identified in client-side JavaScript; no controllable input-to-sink path has been demonstrated.",
                         "status": "pending_review",
+                        "validation_status": "unverified",
+                        "confidence": "not-scored",
                     }
                     grouped[("gadget", source_key, sink)] = finding
                     findings.append(finding)
@@ -1892,28 +2188,49 @@ class DashboardHandler(BaseHTTPRequestHandler):
         api_file = TARGETS_DIR / target_name / "output" / "api" / "endpoints.json"
         legacy_api_file = TARGETS_DIR / target_name / "output" / "api" / "openapi-endpoints.json"
         inventory = {"endpoints": [], "total_endpoints": 0}
+        endpoints = []
         if ep_file.exists():
             try:
-                inventory = json.loads(ep_file.read_text(encoding="utf-8"))
+                loaded = json.loads(ep_file.read_text(encoding="utf-8", errors="replace"))
+                if isinstance(loaded, dict):
+                    inventory = loaded
+                    raw_endpoints = loaded.get("endpoints", [])
+                elif isinstance(loaded, list):
+                    raw_endpoints = loaded
+                else:
+                    raw_endpoints = []
+                if isinstance(raw_endpoints, list):
+                    for endpoint in raw_endpoints:
+                        if not isinstance(endpoint, dict):
+                            continue
+                        ep = dict(endpoint)
+                        ep.setdefault("source", "javascript")
+                        ep["source_file"] = _safe_source_reference(ep.get("source_file"), target_name)
+                        endpoints.append(ep)
             except Exception as e:
-                return {"error": str(e), "endpoints": []}
-        endpoints = inventory.get("endpoints", [])
-        for endpoint in endpoints:
-            endpoint.setdefault("source", "javascript")
-            endpoint["source_file"] = _safe_source_reference(endpoint.get("source_file"), target_name)
+                logger.warning("Failed to load JS endpoints for %s: %s", target_name, e)
+                return {"error": "Failed to load JavaScript endpoints", "endpoints": []}
         if api_file.exists() or legacy_api_file.exists():
             try:
                 source_file = api_file if api_file.exists() else legacy_api_file
-                api_inventory = json.loads(source_file.read_text(encoding="utf-8"))
-                for endpoint in api_inventory.get("endpoints", []):
-                    if not isinstance(endpoint, dict):
-                        continue
-                    endpoint["source"] = "openapi"
-                    endpoint["source_file"] = _safe_source_reference(endpoint.get("source_file"), target_name)
-                    endpoint["url"] = endpoint.get("base_url", "").rstrip("/") + endpoint.get("path", "")
-                    endpoints.append(endpoint)
+                api_inventory = json.loads(source_file.read_text(encoding="utf-8", errors="replace"))
+                raw_api_endpoints = (
+                    api_inventory.get("endpoints", [])
+                    if isinstance(api_inventory, dict)
+                    else (api_inventory if isinstance(api_inventory, list) else [])
+                )
+                if isinstance(raw_api_endpoints, list):
+                    for endpoint in raw_api_endpoints:
+                        if not isinstance(endpoint, dict):
+                            continue
+                        ep = dict(endpoint)
+                        ep["source"] = "openapi"
+                        ep["source_file"] = _safe_source_reference(ep.get("source_file"), target_name)
+                        ep["url"] = str(ep.get("base_url", "") or "").rstrip("/") + str(ep.get("path", "") or "")
+                        endpoints.append(ep)
             except Exception as e:
-                return {"error": str(e), "endpoints": endpoints}
+                logger.warning("Failed to load API endpoints for %s: %s", target_name, e)
+                return {"error": "Failed to load API endpoints", "endpoints": endpoints}
         inventory["endpoints"] = endpoints
         inventory["total_endpoints"] = len(endpoints)
         return inventory
@@ -1922,29 +2239,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
         tech_file = TARGETS_DIR / target_name / "output" / "js" / "tech-fingerprint.json"
         if tech_file.exists():
             try:
-                return json.loads(tech_file.read_text(encoding="utf-8"))
+                return json.loads(tech_file.read_text(encoding="utf-8", errors="replace"))
             except Exception as e:
-                return {"error": str(e)}
+                logger.warning("Failed to load tech fingerprint for %s: %s", target_name, e)
+                return {"error": "Failed to load technology fingerprint"}
         return {}
 
     def get_target_logs(self, target_name, specific_file=None):
-        logs_dir = TARGETS_DIR / target_name / "output" / "logs"
-        if not logs_dir.exists():
+        logs_dir = (TARGETS_DIR / target_name / "output" / "logs").resolve()
+        if not logs_dir.is_dir():
             return {"logs": [], "content": ""}
 
         all_logs = []
         for p in logs_dir.rglob("*.log"):
-            all_logs.append({
-                "path": str(p.relative_to(logs_dir)).replace("\\", "/"),
-                "size": p.stat().st_size,
-                "modified": datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc).isoformat(),
-            })
+            if p.is_file():
+                all_logs.append({
+                    "path": str(p.relative_to(logs_dir)).replace("\\", "/"),
+                    "size": p.stat().st_size,
+                    "modified": datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc).isoformat(),
+                })
 
         content = ""
         if specific_file:
             safe_p = (logs_dir / specific_file).resolve()
-            if str(safe_p).startswith(str(logs_dir)) and safe_p.exists():
-                content = safe_p.read_text(encoding="utf-8", errors="ignore")
+            if safe_p.is_relative_to(logs_dir) and safe_p.is_file():
+                try:
+                    content = safe_p.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    content = ""
 
         return {"logs": sorted(all_logs, key=lambda x: x["path"]), "content": content}
 
@@ -1972,13 +2294,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
         json_files = sorted(report_dir.glob("hackbot-report-*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
 
         md_file = md_files[0] if md_files else None
-        md_content = md_file.read_text(encoding="utf-8") if md_file else "# No report markdown found"
+        md_content = "# No report markdown found"
+        if md_file:
+            try:
+                md_content = md_file.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                md_content = "# Unable to read report markdown"
         json_content = {}
         matching_json = next((path for path in json_files if md_file and path.stem == md_file.stem), None)
         json_file = matching_json or (json_files[0] if json_files else None)
         if json_file:
             try:
-                json_content = json.loads(json_file.read_text(encoding="utf-8"))
+                json_content = json.loads(json_file.read_text(encoding="utf-8", errors="replace"))
             except Exception:
                 pass
 
@@ -2000,8 +2327,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
     # ==================== SCAN MANAGEMENT ====================
 
     def start_scan_job(self, target, skills, models, dry_run=False, scan_mode="quick", max_subagents=10):
-        if target in active_scans and active_scans[target]["status"] == "running":
-            return {"status": "error", "message": f"A scan is already running for {target}"}
+        log_buffer = []
+        with active_scans_lock:
+            existing = active_scans.get(target)
+            if existing and existing.get("status") in {"starting", "running"}:
+                return {"status": "error", "message": f"A scan is already running for {target}"}
+            active_scans[target] = {
+                "thread": None,
+                "status": "starting",
+                "logs": log_buffer,
+                "target": target,
+            }
 
         target_dir = TARGETS_DIR / target
         initialized = not target_dir.is_dir()
@@ -2010,13 +2346,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 from setup import init_target
                 init_target(target)
             except Exception as exc:
+                with active_scans_lock:
+                    active_scans.pop(target, None)
                 return {"status": "error", "message": f"Could not initialize target workspace: {exc}"}
 
-        log_buffer = []
+        def _append_log(entry_text: str) -> None:
+            with active_scans_lock:
+                log_buffer.append(entry_text)
+                if len(log_buffer) > 2000:
+                    del log_buffer[:-2000]
 
         def run_worker():
-            active_scans[target]["status"] = "running"
-            active_scans[target]["start_time"] = datetime.now(timezone.utc).isoformat()
+            with active_scans_lock:
+                scan_entry = active_scans.get(target)
+                if not scan_entry or scan_entry.get("status") == "stopped":
+                    return
+                scan_entry["status"] = "running"
+                scan_entry["start_time"] = datetime.now(timezone.utc).isoformat()
 
             cmd = [
                 sys.executable,
@@ -2033,7 +2379,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if dry_run:
                 cmd.append("--dry-run")
 
-            log_buffer.append(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Executing: {' '.join(cmd)}\n")
+            _append_log(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Executing: {' '.join(cmd)}\n")
 
             try:
                 proc = subprocess.Popen(
@@ -2046,37 +2392,49 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     bufsize=1,
                     cwd=str(PROJECT_ROOT),
                 )
-                active_scans[target]["process"] = proc
+                stop_requested = False
+                with active_scans_lock:
+                    scan_entry = active_scans.get(target)
+                    if scan_entry is not None:
+                        scan_entry["process"] = proc
+                        stop_requested = scan_entry.get("status") == "stopped"
+                if stop_requested:
+                    proc.terminate()
 
                 for line in iter(proc.stdout.readline, ""):
-                    log_buffer.append(line)
-                    if len(log_buffer) > 2000:
-                        log_buffer.pop(0)
+                    _append_log(line)
 
                 proc.stdout.close()
                 proc.wait()
 
-                if proc.returncode == 0:
-                    active_scans[target]["status"] = "completed"
-                elif proc.returncode == 3:
-                    active_scans[target]["status"] = "blocked_scope"
-                else:
-                    active_scans[target]["status"] = "failed"
-                log_buffer.append(f"\n[Finished with exit code {proc.returncode}]\n")
-                notification = send_discord_scan_summary(target, active_scans[target]["status"])
+                with active_scans_lock:
+                    scan_entry = active_scans.get(target)
+                    current_status = scan_entry.get("status") if scan_entry else None
+                    if current_status == "stopped":
+                        final_status = "stopped"
+                    elif proc.returncode == 0:
+                        final_status = "completed"
+                    elif proc.returncode == 3:
+                        final_status = "blocked_scope"
+                    else:
+                        final_status = "failed"
+                    if scan_entry is not None:
+                        scan_entry["status"] = final_status
+                _append_log(f"\n[Finished with exit code {proc.returncode}]\n")
+                notification = send_discord_scan_summary(target, final_status)
                 if notification != "not configured":
-                    log_buffer.append(f"[Discord] Scan summary notification: {notification}.\n")
+                    _append_log(f"[Discord] Scan summary notification: {notification}.\n")
             except Exception as e:
-                active_scans[target]["status"] = "error"
-                log_buffer.append(f"\n[Execution error: {e}]\n")
+                with active_scans_lock:
+                    scan_entry = active_scans.get(target)
+                    if scan_entry is not None and scan_entry.get("status") != "stopped":
+                        scan_entry["status"] = "error"
+                _append_log(f"\n[Execution error: {e}]\n")
 
         thread = threading.Thread(target=run_worker, daemon=True)
-        active_scans[target] = {
-            "thread": thread,
-            "status": "starting",
-            "logs": log_buffer,
-            "target": target,
-        }
+        with active_scans_lock:
+            if target in active_scans:
+                active_scans[target]["thread"] = thread
         thread.start()
 
         message = f"Scan started for {target}"
@@ -2085,25 +2443,41 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return {"status": "success", "message": message, "target": target, "initialized_target": initialized}
 
     def stop_scan_job(self, target):
-        if target in active_scans and active_scans[target].get("process"):
+        proc = None
+        with active_scans_lock:
+            scan_info = active_scans.get(target)
+            if not scan_info:
+                return {"status": "error", "message": f"No active scan found for {target}"}
+            proc = scan_info.get("process")
+            if not proc and scan_info.get("status") not in {"starting", "running"}:
+                return {"status": "error", "message": f"No active scan found for {target}"}
+            scan_info["status"] = "stopped"
+
+        if proc:
             try:
-                active_scans[target]["process"].terminate()
-                active_scans[target]["status"] = "stopped"
-                return {"status": "success", "message": f"Scan for {target} stopped"}
-            except Exception as e:
-                return {"status": "error", "message": str(e)}
-        return {"status": "error", "message": f"No active scan found for {target}"}
+                proc.terminate()
+            except Exception:
+                logger.exception("Failed to terminate scan process for %s", target)
+                return {"status": "error", "message": f"Failed to stop scan for {target}"}
+        return {"status": "success", "message": f"Scan for {target} stopped"}
 
     def get_scan_status(self, target):
-        if not target or target not in active_scans:
+        if not target:
             return {"status": "idle", "logs": []}
 
-        scan_info = active_scans[target]
+        with active_scans_lock:
+            scan_info = active_scans.get(target)
+            if not scan_info:
+                return {"status": "idle", "logs": []}
+            status = scan_info.get("status", "idle")
+            start_time = scan_info.get("start_time")
+            logs_copy = list(scan_info.get("logs", []))
+
         return {
-            "status": scan_info.get("status", "idle"),
+            "status": status,
             "target": target,
-            "start_time": scan_info.get("start_time"),
-            "logs": "".join(scan_info.get("logs", [])),
+            "start_time": start_time,
+            "logs": "".join(logs_copy),
         }
 
     def handle_sse_stream(self, target):
@@ -2128,7 +2502,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache, no-transform")
         self.send_header("Connection", "keep-alive")
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
 
         rm = RunManager(target_path)
@@ -2159,8 +2532,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.wfile.write(data.encode("utf-8"))
                 self.wfile.flush()
 
-                scan_info = active_scans.get(target)
-                if not scan_info or scan_info.get("status") in ("completed", "failed", "stopped"):
+                with active_scans_lock:
+                    scan_info = active_scans.get(target)
+                    scan_state = scan_info.get("status") if scan_info else None
+                if not scan_state or scan_state in ("completed", "failed", "stopped"):
                     if latest_run and latest_run.get("status") in ("completed", "failed"):
                         break
 
@@ -2184,10 +2559,10 @@ def run_dashboard(host="127.0.0.1", port=8080, open_browser=True, default_target
         url += f"?target={default_target}"
 
     print("=" * 60)
-    print("ðŸ›¡ï¸  MOROS AI AGENT â€” WEB DASHBOARD")
-    print(f"ðŸ“¡ Dashboard running at: {url}")
-    print(f"ðŸ“‚ Project Root: {PROJECT_ROOT}")
-    print("âŒ¨ï¸  Press Ctrl+C to stop the dashboard server")
+    print("🛡️  MOROS AI AGENT — WEB DASHBOARD")
+    print(f"📡 Dashboard running at: {url}")
+    print(f"📂 Project Root: {PROJECT_ROOT}")
+    print("⌨️  Press Ctrl+C to stop the dashboard server")
     print("=" * 60)
 
     if open_browser:
@@ -2197,14 +2572,14 @@ def run_dashboard(host="127.0.0.1", port=8080, open_browser=True, default_target
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\nðŸ›‘ Dashboard server stopped.")
+        print("\n🛑 Dashboard server stopped.")
     finally:
         httpd.server_close()
 
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Moros AI Agent â€” Web Dashboard Server")
+    parser = argparse.ArgumentParser(description="Moros AI Agent — Web Dashboard Server")
     parser.add_argument("--host", default="127.0.0.1", help="Host address (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8080, help="Port (default: 8080)")
     parser.add_argument("--target", default=None, help="Default target domain to open")

@@ -1,10 +1,7 @@
 import json
-import tempfile
 import urllib.request
 from pathlib import Path
-from unittest.mock import patch, MagicMock
-
-import pytest
+from unittest.mock import patch
 
 from tools.scope_validator import ScopeValidator
 from tools.poc_generator import PoCGenerator

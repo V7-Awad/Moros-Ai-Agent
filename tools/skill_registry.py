@@ -25,6 +25,7 @@ SKILLS_DIR = PROJECT_ROOT / "skills"
 # Core built-in skills
 CORE_SKILLS = {
     "recon-subdomain",
+    "deep-recon",
     "api-spec-discovery",
     "js-discover",
     "js-analyze",
@@ -79,6 +80,7 @@ class SkillRegistry:
         order = []
         recon_priority = [
             "recon-subdomain",
+            "deep-recon",
             "api-spec-discovery",
             "js-discover",
             "js-analyze",
@@ -182,19 +184,83 @@ class SkillRegistry:
             return True
         return False
 
+    @staticmethod
+    def _parse_frontmatter(text: str) -> Dict[str, Any]:
+        """Parse AAIF Agent Skills YAML-style frontmatter block if present."""
+        fm_match = re.match(r"^---\s*\n(.*?)\n---\s*(?:\n|$)", text, re.DOTALL)
+        if not fm_match:
+            return {}
+        block = fm_match.group(1)
+        data: Dict[str, Any] = {}
+        current_key = None
+        buffer: List[str] = []
+
+        def flush():
+            nonlocal current_key, buffer
+            if current_key and buffer:
+                val = " ".join(line.strip() for line in buffer if line.strip()).strip()
+                if val.startswith(('"', "'")) and val.endswith(('"', "'")) and len(val) >= 2:
+                    val = val[1:-1]
+                data[current_key] = val
+            current_key = None
+            buffer = []
+
+        for line in block.splitlines():
+            if not line.strip() or line.strip().startswith("#"):
+                continue
+            kv = re.match(r"^([a-zA-Z0-9_-]+)\s*:\s*(.*)$", line)
+            if kv and not line.startswith((" ", "\t")):
+                flush()
+                key = kv.group(1).strip()
+                val = kv.group(2).strip()
+                if val in (">", "|", ">-", "|-", ""):
+                    current_key = key
+                else:
+                    if val.startswith(('"', "'")) and val.endswith(('"', "'")) and len(val) >= 2:
+                        val = val[1:-1]
+                    data[key] = val
+            elif current_key and line.startswith((" ", "\t")):
+                buffer.append(line)
+        flush()
+        return data
+
+    def export_aaif_manifest(self, skill_id: str) -> Optional[Dict[str, Any]]:
+        """Export skill metadata in AAIF Agent Skills standard descriptor format."""
+        skill = self.get_skill(skill_id)
+        if not skill:
+            return None
+        return {
+            "schema": "https://agentskills.io/schema/v1",
+            "name": skill["id"],
+            "title": skill["title"],
+            "description": skill["description"],
+            "category": skill["category"],
+            "dependencies": skill.get("dependencies", []),
+            "checklist": skill.get("checklist", []),
+        }
+
     def _parse_skill_md(self, skill_file: Path, skill_id: str) -> Dict[str, Any]:
-        """Parse title, description, and checklist from SKILL.md."""
+        """Parse title, description, AAIF frontmatter, and checklist from SKILL.md."""
         is_custom = skill_id not in CORE_SKILLS
         title = skill_id.replace("-", " ").title()
         description = "Specialized security skill for autonomous offensive assessment."
         category = "Core Offensive" if not is_custom else "Custom Security"
         checklist = []
         dependencies = []
+        frontmatter: Dict[str, Any] = {}
 
         if skill_file.is_file():
             try:
                 text = skill_file.read_text(encoding="utf-8")
-                # Extract Title
+                frontmatter = self._parse_frontmatter(text)
+                if frontmatter.get("name"):
+                    title = str(frontmatter["name"]).replace("-", " ").title()
+                if frontmatter.get("description"):
+                    description = str(frontmatter["description"])
+                if frontmatter.get("category"):
+                    category = str(frontmatter["category"])
+
+                # Extract Title (markdown heading takes display precedence when present)
                 m_title = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
                 if m_title:
                     raw_title = m_title.group(1).strip()
@@ -205,7 +271,7 @@ class SkillRegistry:
                 if m_cat:
                     category = m_cat.group(1).strip()
 
-                # Extract Description
+                # Extract Description section if present
                 m_desc = re.search(r"## Description\s*\n(.*?)(?=\n##|\Z)", text, re.DOTALL)
                 if m_desc:
                     description = m_desc.group(1).strip()

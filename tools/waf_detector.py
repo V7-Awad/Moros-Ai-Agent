@@ -7,8 +7,7 @@ Identifies upstream WAFs/CDNs and computes adaptive evasion recommendations
 """
 
 from __future__ import annotations
-import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 
 WAF_SIGNATURES: Dict[str, Dict[str, Any]] = {

@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 import pytest
 
-from tools.skill_registry import SkillRegistry, CORE_SKILLS
+from tools.skill_registry import SkillRegistry
 
 
 @pytest.fixture

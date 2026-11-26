@@ -1,14 +1,5 @@
-import json
-import os
-import tempfile
-from pathlib import Path
-from unittest.mock import patch, MagicMock
-
-import pytest
-
-from tools.agent_runtime import AgentContext, AgentRunner, build_default_agent_tools
+from tools.agent_runtime import AgentContext, build_default_agent_tools
 from tools.skill_registry import SkillRegistry
-from tools.llm_client import LLMClient
 
 
 def test_dynamic_skills_discovery():
@@ -88,11 +79,24 @@ def test_custom_skill_execution_via_script(tmp_path):
     assert (out_dir / "findings" / "candidates-jwt-analysis.json").exists()
 
 
-def test_custom_script_with_direct_network_calls_is_blocked(tmp_path):
+def test_custom_script_with_direct_network_calls_is_blocked(tmp_path, monkeypatch):
+    import skill_registry
+    import tools.skill_registry as sr
     from tools.skill_runner import SkillRunner
 
-    runner = SkillRunner("example.com", tmp_path)
-    result = runner.run_custom_skill("path-traversal")
+    skills_dir = tmp_path / "skills"
+    bad_skill_dir = skills_dir / "unscoped-net-skill"
+    bad_skill_dir.mkdir(parents=True)
+    (bad_skill_dir / "SKILL.md").write_text("# Unscoped Test Skill\n", encoding="utf-8")
+    (bad_skill_dir / "run.py").write_text("import requests\nrequests.get('https://example.com')\n", encoding="utf-8")
+
+    monkeypatch.setattr(skill_registry, "SKILLS_DIR", skills_dir)
+    monkeypatch.setattr(sr, "SKILLS_DIR", skills_dir)
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+
+    runner = SkillRunner("example.com", target_dir)
+    result = runner.run_custom_skill("unscoped-net-skill")
 
     assert result["status"] == "BLOCKED_SCOPE"
     assert "shared scope-enforced HTTP client" in result["summary"]

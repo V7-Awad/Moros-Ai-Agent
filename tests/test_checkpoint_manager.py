@@ -1,7 +1,5 @@
 import threading
 import time
-import pytest
-from pathlib import Path
 from tools.checkpoint_manager import CheckpointManager
 
 

@@ -19,7 +19,6 @@ import logging
 import os
 import sys
 import threading
-import time
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +34,11 @@ from skill_runner import SkillRunner
 from conversation_store import ConversationStore
 from run_manager import RunManager
 from scope_validator import ScopeValidator
+from cost_tracker import CostTracker
+from trace_logger import TraceLogger
+from memory_manager import MemoryManager
+from model_router import ModelRouter
+from mcp_client import MCPClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -94,7 +98,9 @@ class HackbotOrchestrator:
                  review_model: str = None, api_spec: str = None,
                  active_host_limit: int = 100, root_only_active: bool = False,
                  https_only: bool = False, max_http_requests: int = 150,
-                 request_delay: float = 0.3, parallel: bool = False):
+                 request_delay: float = 0.3, parallel: bool = False,
+                 budget_usd: float = 10.0, mcp_servers: list = None,
+                 enable_tracing: bool = True, smart_routing: bool = False):
         self.target = target
         self.target_dir = Path(target_dir)
         self.skills = skills
@@ -108,6 +114,8 @@ class HackbotOrchestrator:
         self.max_http_requests = max(1, max_http_requests)
         self.request_delay = max(0.0, request_delay)
         self.parallel = parallel
+        self.budget_usd = float(budget_usd)
+        self.smart_routing = bool(smart_routing)
         self.scope_authorized = False
         self.scope_blocked_skills: list = []
         self.scope_audit: dict = {}
@@ -119,20 +127,44 @@ class HackbotOrchestrator:
 
         # Ensure output directories
         output_base = self.target_dir / "output"
-        for subdir in ["recon", "js", "content-discovery", "findings", "logs", "report", "api", "runs"]:
+        for subdir in ["recon", "js", "content-discovery", "findings", "logs", "report", "api", "runs", "costs", "traces"]:
             (output_base / subdir).mkdir(parents=True, exist_ok=True)
         self.conversations = ConversationStore(self.target_dir)
 
-        # Initialize durable run tracking.
+        # Initialize durable run tracking, telemetry, cost, and tiered memory.
         self.run_manager = RunManager(self.target_dir)
         self.current_run = None
+        self.current_trace_id = None
         self.scope_validator = ScopeValidator(self.target, target_dir=self.target_dir)
+        self.cost_tracker = CostTracker(self.target_dir, budget_cap_usd=self.budget_usd)
+        self.tracer = TraceLogger(self.target_dir) if enable_tracing else None
+        self.memory_manager = MemoryManager(self.target_dir)
+        self.model_router = ModelRouter(budget_usd=self.budget_usd)
+        self.mcp_clients = []
+        for idx, spec in enumerate(mcp_servers or [], 1):
+            try:
+                spec_str = str(spec).strip()
+                if spec_str.startswith(("http://", "https://")):
+                    client = MCPClient(server_name=f"mcp-{idx}", transport="http", url=spec_str)
+                else:
+                    import shlex
+                    client = MCPClient(server_name=f"mcp-{idx}", transport="stdio", command=shlex.split(spec_str))
+                client.connect()
+                client.discover_tools()
+                self.mcp_clients.append(client)
+            except Exception as exc:
+                logger.warning("Failed to connect MCP server '%s': %s", spec, exc)
 
         # "default" must auto-detect configured providers; model labels are not providers.
         self.llm = self._llm_for_model(self.models[0] if self.models else "default")
         self.runner = SkillRunner(self.target, self.target_dir, self.llm,
                                   max_http_requests=self.max_http_requests,
                                   request_delay=self.request_delay)
+        self.runner.cost_tracker = self.cost_tracker
+        self.runner.tracer = self.tracer
+        self.runner.memory_manager = self.memory_manager
+        self.runner.model_router = self.model_router
+        self.runner.mcp_clients = self.mcp_clients
         if hasattr(self.runner, "http"):
             self.runner.http.scope_validator = self.scope_validator
 
@@ -246,6 +278,9 @@ class HackbotOrchestrator:
             models=",".join(self.models)
         )
         run_id = self.current_run["run_id"]
+        if self.tracer:
+            self.current_trace_id = self.tracer.start_trace(f"scan:{self.target}")
+            self.runner.trace_id = self.current_trace_id
         try:
             self.runner.run_started_at = datetime.fromisoformat(
                 self.current_run["started_at"].replace("Z", "+00:00")
@@ -300,6 +335,7 @@ class HackbotOrchestrator:
                     detected_names = ", ".join(d["waf"] for d in waf_info["detected_wafs"])
                     logger.warning(f"🛡️  WAF Detected: {detected_names}. Applying adaptive evasion pacing ({waf_info['recommended_delay']}s delay).")
                     self.runner.http.delay_seconds = max(self.runner.http.delay_seconds, waf_info["recommended_delay"])
+                    self.memory_manager.store_fact("waf", detected_names, category="infrastructure", source="waf_detector")
 
                 tech_info = TechProfiler().profile_target(
                     probe_resp.get("headers", {}),
@@ -307,6 +343,7 @@ class HackbotOrchestrator:
                 )
                 if tech_info.get("technologies"):
                     logger.info(f"🧩 Target Technologies: {', '.join(tech_info['technologies'])}")
+                    self.memory_manager.store_fact("technologies", ", ".join(tech_info["technologies"]), category="infrastructure", source="tech_profiler")
                     boosted = tech_info.get("prioritized_skills", [])
                     if boosted:
                         elevated = [s for s in self.skills if s in boosted]
@@ -382,6 +419,24 @@ class HackbotOrchestrator:
             self._log_event("scope-check", "RUN_STOPPED", "A request or redirect violated the active scope policy; all later target requests were blocked.")
         self.run_manager.finish_run(run_id, status=final_status)
 
+        try:
+            self.cost_tracker.save_receipt()
+        except Exception as exc:
+            logger.debug("Cost receipt save error: %s", exc)
+
+        if self.tracer and self.current_trace_id:
+            try:
+                self.tracer.end_trace(self.current_trace_id)
+                self.tracer.export(self.current_trace_id)
+            except Exception as exc:
+                logger.debug("Trace export error: %s", exc)
+
+        for client in self.mcp_clients:
+            try:
+                client.disconnect()
+            except Exception:
+                pass
+
         # Step 7: Build Directed Attack Surface Graph
         try:
             from attack_graph import AttackGraphBuilder
@@ -397,6 +452,8 @@ class HackbotOrchestrator:
             logger.info("\n✅ Orchestration complete!")
         return {"status": "BLOCKED_SCOPE" if policy_stop else ("FAILED" if self.failed_skills else "SUCCESS"),
                 "run_id": run_id,
+                "trace_id": self.current_trace_id,
+                "cost_summary": self.cost_tracker.get_running_total(),
                 "failed_skills": self.failed_skills,
                 "scope_violations": getattr(self.runner.http, "policy_violations", [])}
 
@@ -426,7 +483,11 @@ class HackbotOrchestrator:
                 logger.info(f"  Run: {sub_run_id}")
                 with self._lock:
                     self.run_manager.update_skill_progress(run_id, skill_name, status="running")
-                    self.llm = self._llm_for_model(model)
+                    if self.smart_routing and model in ("default", "auto"):
+                        decision = self.model_router.select_model(skill_name)
+                        self.llm = LLMClient(provider=decision.provider, model=decision.model)
+                    else:
+                        self.llm = self._llm_for_model(model)
                     self.runner.llm = self.llm
 
                 result = self._execute_skill(skill_name, model, run_num)
@@ -519,6 +580,13 @@ class HackbotOrchestrator:
                 )
                 result["status"] = res.get("status", "COMPLETED")
                 result["notes"] = f"Found {res.get('subdomains', 0)} subdomains, {res.get('live_hosts', 0)} live hosts"
+            elif skill_name == "deep-recon":
+                res = self.runner.run_deep_recon(active_validation=self.scope_authorized)
+                result["status"] = res.get("status", "COMPLETED")
+                result["notes"] = (
+                    f"Parallel deep-recon merged {res.get('subdomains', 0)} subdomains; "
+                    f"WAF={res.get('wafs', [])}; Tech={res.get('technologies', [])}"
+                )
             elif skill_name == "api-spec-discovery":
                 if self.api_spec:
                     result.update(self._execute_api_spec())

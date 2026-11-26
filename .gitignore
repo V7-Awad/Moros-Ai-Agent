@@ -9,6 +9,8 @@ venv/
 .venv/
 env/
 .env
+.env.*
+!.env.example
 
 # IDE
 .vscode/
@@ -34,7 +36,13 @@ learning_engine/memory/*.db
 learning_engine/memory/*.db-journal
 learning_engine/memory/*.db-wal
 *.db
+*.db-shm
+*.db-wal
+*.db-journal
 *.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
 
 # Working scratch & IDE internal
 .work/
@@ -49,10 +57,23 @@ playwright-browsers/
 # Node
 node_modules/
 
-# Distribution
+# Distribution & packages
 dist/
 build/
+wheels/
+*.egg
 *.egg-info/
+
+# Testing, coverage & caches
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.cache/
+*.tmp
 
 # Local audits & internal working notes
 docs/REMAINING_GAPS_FULL_AUDIT.md

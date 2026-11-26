@@ -1,9 +1,9 @@
 # Completion Checklist Format — Standard for All Skills
 
-Every skill's SKILL.md must include a **Methodology Checklist** section using this exact format:
+Every skill's SKILL.md should include a **Verification Checklist** section (matching `skill_registry.py` and `CONTRIBUTING.md`; legacy skills may use `## Methodology Checklist`) using this exact format:
 
 ```markdown
-## Methodology Checklist
+## Verification Checklist
 
 - [ ] Step 1: <description>
   - Expected artifact: `<path/to/output/file>`

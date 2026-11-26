@@ -14,7 +14,6 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 # Keep the CLI usable on Windows consoles that still default to CP1252.
@@ -25,9 +24,10 @@ if hasattr(sys.stdout, "reconfigure"):
 PROJECT_ROOT = Path(__file__).parent.resolve()
 sys.path.insert(0, str(PROJECT_ROOT / "tools"))
 
-from hackbot_orchestrator import HackbotOrchestrator, SKILL_ORDER
+from hackbot_orchestrator import HackbotOrchestrator
 from skill_registry import SkillRegistry
 from llm_client import load_dotenv_if_present, KNOWN_PROVIDERS
+from model_router import ModelRouter
 
 
 BANNER = r"""
@@ -61,6 +61,12 @@ def check_prerequisites():
         import jsbeautifier
     except ImportError:
         issues.append("jsbeautifier not installed. Run: pip install jsbeautifier")
+
+    # Check PyYAML
+    try:
+        import yaml
+    except ImportError:
+        issues.append("PyYAML not installed. Run: pip install PyYAML")
 
     return issues
 
@@ -142,6 +148,16 @@ Examples:
                         help="Bug bounty identifier to send in X-Bug-Bounty header (e.g. 'hackerone-handle')")
     parser.add_argument("--parallel", action="store_true",
                         help="Execute independent skills in parallel using ThreadPoolExecutor")
+    parser.add_argument("--budget", type=float, default=10.0,
+                        help="Maximum LLM spend budget in USD (default: 10.0)")
+    parser.add_argument("--mcp-server", action="append", default=[],
+                        help="External MCP tool server URL or stdio command (repeatable)")
+    parser.add_argument("--no-trace", action="store_true",
+                        help="Disable OpenTelemetry trace export under output/traces/")
+    parser.add_argument("--smart-route", action="store_true",
+                        help="Enable complexity-based cost-aware model routing")
+    parser.add_argument("--deep-recon", action="store_true",
+                        help="Include parallel deep-recon fan-out skill in scan")
     parser.add_argument("--dashboard", action="store_true",
                         help="Launch local web dashboard viewer")
     parser.add_argument("--port", type=int, default=8080,
@@ -283,7 +299,12 @@ Examples:
                 sys.exit(1)
 
     # Parse models
+    if args.deep_recon and "deep-recon" not in skills:
+        insert_at = 1 if skills and skills[0] == "recon-subdomain" else 0
+        skills.insert(insert_at, "deep-recon")
+
     models = [m.strip() for m in args.models.split(",")]
+    cost_est = ModelRouter(budget_usd=args.budget).estimate_scan_cost(len(skills))
 
     # Dry run
     if args.dry_run:
@@ -292,7 +313,8 @@ Examples:
         print(f"   Directory: {target_dir}")
         print(f"   Skills ({len(skills)}): {' → '.join(skills)}")
         print(f"   Scan mode: {args.scan_mode}")
-        print(f"   Models: {', '.join(models)}")
+        print(f"   Models: {', '.join(models)} (smart-route: {args.smart_route})")
+        print(f"   Budget Cap: ${args.budget:.2f} | Est. LLM Cost: ${cost_est['cost_low_usd']:.4f}–${cost_est['cost_high_usd']:.4f}")
         print(f"   Runs per skill: {args.runs_per_skill}")
         print(f"   Review model: {args.review_model or 'same as skill'}")
         if args.api_spec:
@@ -314,7 +336,7 @@ Examples:
     print(f"\n🚀 Starting Moros AI scan of {args.target}")
     print(f"   Skills: {', '.join(skills)}")
     print(f"   Scan mode: {args.scan_mode}")
-    print(f"   Models: {', '.join(models)}")
+    print(f"   Models: {', '.join(models)} | Budget Cap: ${args.budget:.2f}")
     print()
 
     orchestrator = HackbotOrchestrator(
@@ -331,11 +353,17 @@ Examples:
         max_http_requests=args.max_http_requests,
         request_delay=args.request_delay,
         parallel=args.parallel,
+        budget_usd=args.budget,
+        mcp_servers=args.mcp_server,
+        enable_tracing=not args.no_trace,
+        smart_routing=args.smart_route,
     )
 
     scan_started_at = time.time()
     try:
         result = orchestrator.run()
+        if orchestrator.cost_tracker.get_running_total().get("total_calls", 0) > 0:
+            print("\n" + orchestrator.cost_tracker.format_human_summary())
         if result and result.get("status") == "BLOCKED_SCOPE":
             print("\n🛑 Scan stopped because a request or redirect violated the saved scope policy.")
             sys.exit(3)

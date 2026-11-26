@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import uuid
 from datetime import datetime, timezone
 
@@ -56,25 +57,32 @@ def persist_finding(db: Database, doc: dict) -> dict:
     row = db.one("SELECT finding_id FROM findings WHERE finding_id = ?", (doc["finding_id"],))
     if row:
         return {**doc, "status": "existing"}
-    db.execute(
-        """
-        INSERT INTO findings
-            (finding_id, target, vuln_class, title, severity, confidence,
-             evidence, signals, source, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            doc["finding_id"],
-            doc["target"],
-            doc["vuln_class"],
-            doc["title"],
-            doc["severity"],
-            doc["confidence"],
-            doc["evidence"],
-            json.dumps(doc["signals"]),
-            doc["source"],
-            doc["created_at"],
-        ),
-    )
-    db.commit()
+    try:
+        db.execute(
+            """
+            INSERT INTO findings
+                (finding_id, target, vuln_class, title, severity, confidence,
+                 evidence, signals, source, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                doc["finding_id"],
+                doc["target"],
+                doc["vuln_class"],
+                doc["title"],
+                doc["severity"],
+                doc["confidence"],
+                doc["evidence"],
+                json.dumps(doc["signals"]),
+                doc["source"],
+                doc["created_at"],
+            ),
+        )
+        db.commit()
+    except sqlite3.IntegrityError:
+        db.rollback()
+        row = db.one("SELECT finding_id FROM findings WHERE finding_id = ?", (doc["finding_id"],))
+        if row:
+            return {**doc, "status": "existing"}
+        raise
     return {**doc, "status": "new"}

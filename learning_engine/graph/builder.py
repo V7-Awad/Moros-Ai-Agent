@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from ..core.storage import Database
+from ..core.validation import parse_signals_json
 
 
 def build_graph(db: Database) -> dict:
@@ -25,7 +26,7 @@ def build_graph(db: Database) -> dict:
         c = _node("vuln_class", f["vuln_class"], severity=f["severity"])
         edges.append({"from": t, "to": c, "kind": "finding",
                       "finding_id": f["finding_id"], "title": f["title"]})
-        for key in json.loads(f["signals"] or "{}"):
+        for key in parse_signals_json(f["signals"]):
             s = _node("signal", key)
             edges.append({"from": c, "to": s, "kind": "signal"})
 

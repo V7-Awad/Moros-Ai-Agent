@@ -1,6 +1,5 @@
 import json
 import pytest
-from pathlib import Path
 from tools.skill_runner import SkillRunner
 
 
@@ -135,3 +134,135 @@ def test_all_registered_vuln_skills_are_implemented(test_target_env):
     for skill in all_vuln_skills:
         res = runner.run_vuln_skill(skill)
         assert res["status"] != "NOT_IMPLEMENTED", f"Skill {skill} returned NOT_IMPLEMENTED!"
+
+
+def test_custom_skill_scope_filter_allows_scoped_http_and_blocks_raw_network(tmp_path, monkeypatch):
+    import sys
+    import subprocess
+    from pathlib import Path
+    from unittest.mock import patch
+
+    monkeypatch.setenv("MOROS_HTTP_REQUESTS_REMAINING", "0")
+    runner = SkillRunner("test.local", tmp_path)
+    runner.scope_authorized = True
+
+    # ScopedHttpClient skills must not be blocked as BLOCKED_SCOPE by unscoped_network_patterns
+    for skill_name in ("path-traversal", "http-smuggling", "rate-limit-test"):
+        res = runner.run_custom_skill(skill_name)
+        assert res["status"] == "COMPLETED", f"{skill_name} was unexpectedly blocked: {res}"
+
+    # Raw unscoped network/process scripts must still be blocked
+    import skill_registry
+    fake_skill_dir = tmp_path / "fake_skills" / "raw-net-skill"
+    fake_skill_dir.mkdir(parents=True)
+    monkeypatch.setattr(skill_registry, "SKILLS_DIR", tmp_path / "fake_skills")
+    for snippet in (
+        "import requests\nrequests.get('https://evil.com')\n",
+        "import urllib.request\nurllib.request.urlopen('https://evil.com')\n",
+        "import http.client\nhttp.client.HTTPConnection('evil.com')\n",
+        "import socket\nsocket.socket()\n",
+        "import subprocess\nsubprocess.run(['curl', 'https://evil.com'])\n",
+    ):
+        (fake_skill_dir / "run.py").write_text(snippet, encoding="utf-8")
+        blocked = runner.run_custom_skill("raw-net-skill")
+        assert blocked["status"] == "BLOCKED_SCOPE"
+
+
+def test_skill_scripts_edge_cases_and_fixes(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parent.parent
+    skills_dir = repo_root / "skills"
+
+    def run_skill(name: str, target: str = "test.local", env_extra: dict | None = None):
+        t_dir = tmp_path / f"target_{name}"
+        out_dir = t_dir / "output"
+        (out_dir / "findings").mkdir(parents=True, exist_ok=True)
+        env = dict(**__import__("os").environ)
+        env["MOROS_HTTP_REQUESTS_REMAINING"] = "0"
+        if env_extra:
+            env.update(env_extra)
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(skills_dir / name / "run.py"),
+                "--target", target,
+                "--target-dir", str(t_dir),
+                "--output-dir", str(out_dir),
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+        return proc, out_dir
+
+    # 1. Invalid / non-80/443 target fails gracefully with valid empty JSON even when budget > 0
+    for name in ("http-smuggling", "cors-audit", "crlf-injection", "idor-audit", "open-redirect", "subdomain-takeover"):
+        proc, out_dir = run_skill(name, target="http://test.local:8080", env_extra={"MOROS_HTTP_REQUESTS_REMAINING": "5"})
+        assert proc.returncode == 0, f"{name} failed on port 8080: {proc.stderr}"
+        out_json = out_dir / "findings" / f"candidates-{name}.json"
+        assert out_json.is_file()
+        parsed = json.loads(out_json.read_text(encoding="utf-8"))
+        assert parsed["findings"] == []
+
+    # 2. Invalid/empty MOROS_HTTP_REQUESTS_REMAINING falls back cleanly without ValueError
+    for bad_val in ("", "not-a-number"):
+        proc, out_dir = run_skill("crlf-injection", target="http://test.local:8080", env_extra={"MOROS_HTTP_REQUESTS_REMAINING": bad_val})
+        assert proc.returncode == 0, proc.stderr
+
+    # 3. jwt-analysis leading slash fix + JSON endpoint loading
+    t_jwt = tmp_path / "target_jwt"
+    out_jwt = t_jwt / "output"
+    (out_jwt / "api").mkdir(parents=True, exist_ok=True)
+    (out_jwt / "api" / "endpoints.json").write_text(
+        json.dumps({"endpoints": [{"path": "api/v1/jwt/verify"}]}), encoding="utf-8"
+    )
+    proc = subprocess.run(
+        [sys.executable, str(skills_dir / "jwt-analysis" / "run.py"),
+         "--target", "test.local", "--target-dir", str(t_jwt), "--output-dir", str(out_jwt)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0
+    jwt_data = json.loads((out_jwt / "findings" / "candidates-jwt-analysis.json").read_text(encoding="utf-8"))
+    assert jwt_data["findings"][0]["url"] == "https://test.local/api/v1/jwt/verify"
+
+    # 4. Nested loop caps break outer loop too (prototype-pollution=20, open-redirect=5, websocket-audit=10)
+    t_caps = tmp_path / "target_caps"
+    out_caps = t_caps / "output"
+    js_dir = out_caps / "js"
+    js_dir.mkdir(parents=True, exist_ok=True)
+    for idx in range(15):
+        (js_dir / f"app_{idx}.js").write_text(
+            "a['__proto__'] = 1;\n"
+            "b['__proto__'] = 2;\n"
+            "const u = '/go?redirect=1&next=2&url=3';\n"
+            "const ws = 'wss://test.local/ws1 wss://test.local/ws2 wss://test.local/ws3';\n",
+            encoding="utf-8",
+        )
+    for skill_name, cap in (("prototype-pollution", 20), ("open-redirect", 5), ("websocket-audit", 10)):
+        env = dict(**__import__("os").environ)
+        env["MOROS_HTTP_REQUESTS_REMAINING"] = "0"
+        proc = subprocess.run(
+            [sys.executable, str(skills_dir / skill_name / "run.py"),
+             "--target", "test.local", "--target-dir", str(t_caps), "--output-dir", str(out_caps)],
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+        assert proc.returncode == 0, proc.stderr
+        data = json.loads((out_caps / "findings" / f"candidates-{skill_name}.json").read_text(encoding="utf-8"))
+        assert len(data["findings"]) == cap, f"{skill_name} exceeded cap {cap}: {len(data['findings'])}"
+
+    # 5. open-redirect _inject_redirect_dest helper injects test_dest into matching param
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("open_redirect_run", skills_dir / "open-redirect" / "run.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    injected = mod._inject_redirect_dest(
+        "https://test.local/login?next=/home&tab=1",
+        ["redirect", "next"],
+        "https://moros-redirect-test.example",
+    )
+    assert "next=https%3A%2F%2Fmoros-redirect-test.example" in injected
+    assert "tab=1" in injected

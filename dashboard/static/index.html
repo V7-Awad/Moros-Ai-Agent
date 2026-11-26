@@ -24,6 +24,8 @@
       --warn: #f1c26b;
       --vio: #a98bff;
       --high: #ff8a3d;
+      --text: #ffffff;
+      --font-sans: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       color-scheme: dark;
       box-sizing: border-box;
       padding-top: env(safe-area-inset-top, 0px);
@@ -289,6 +291,34 @@
       color: #fff;
       box-shadow: 0 0 16px rgba(169, 139, 255, .35);
       background: rgba(169, 139, 255, .1);
+    }
+    .cta {
+      padding: 9px 20px;
+      border-radius: 999px;
+      border: 1px solid rgba(0, 229, 255, .45);
+      font: 600 13px var(--font-sans);
+      background: linear-gradient(135deg, var(--blue), #0056cc);
+      color: #fff;
+      box-shadow: 0 0 20px var(--blue-glow);
+      transition: all .2s ease;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      text-decoration: none;
+    }
+    .cta:hover:not(:disabled) {
+      border-color: var(--cyan);
+      box-shadow: 0 0 28px var(--cyan-glow);
+      transform: translateY(-1px);
+    }
+    .cta:active:not(:disabled) {
+      transform: scale(.97);
+    }
+    .cta:disabled {
+      opacity: .35;
+      cursor: default;
+      box-shadow: none;
     }
 
     /* ==================== 4. LAYOUT & CARDS (FULL WIDTH EXPANSIVE) ==================== */
@@ -981,7 +1011,7 @@
       </div>
     </div>
     <!-- Thin progress bar under header -->
-    <div class="prog"><i id="globalProgBar" style="width: 100%;"></i></div>
+    <div class="prog"><i id="globalProgBar" style="width: 0%;"></i></div>
   </header>
 
   <!-- ==================== MAIN CONTENT WRAPPER ==================== -->
@@ -1604,8 +1634,54 @@
     let activeFilter = "ALL";
     let pollInterval = null;
     let autoScrollTerminal = true;
+    let targetSwitchEpoch = 0;
+    let latestSkillsStatus = [];
     const lastObservedScanState = {};
     const scanRefreshInProgress = new Set();
+
+    function updateGlobalProgressBar(scanStatus, skills = latestSkillsStatus, explicitProgress = null) {
+      const bar = document.getElementById('globalProgBar');
+      if (!bar) return;
+      const status = String(scanStatus || 'idle').toLowerCase();
+      let pct = 0;
+      let bg = 'linear-gradient(90deg, rgba(2, 119, 255, .35), rgba(0, 229, 255, .45), rgba(2, 119, 255, .35))';
+
+      if (status === 'completed') {
+        pct = 100;
+        bg = 'linear-gradient(90deg, var(--blue), var(--ok))';
+      } else if (status === 'starting') {
+        pct = 10;
+      } else if (status === 'running') {
+        if (typeof explicitProgress === 'number' && !Number.isNaN(explicitProgress)) {
+          pct = Math.max(5, Math.min(99, Math.round(explicitProgress)));
+        } else {
+          const list = Array.isArray(skills) ? skills : [];
+          const requested = list.filter(s => s && s.requested_in_latest_run);
+          if (requested.length > 0) {
+            const doneStates = new Set(['completed', 'failed', 'blocked', 'blocked_scope', 'candidates_only', 'not_implemented']);
+            const finished = requested.filter(s => doneStates.has(s.state)).length;
+            const active = requested.filter(s => s.state === 'running').length;
+            pct = Math.min(95, Math.max(12, Math.round(((finished + active * 0.5) / requested.length) * 85) + 10));
+          } else {
+            pct = 15;
+          }
+        }
+      } else if (['failed', 'error', 'stopped', 'blocked_scope'].includes(status)) {
+        const list = Array.isArray(skills) ? skills : [];
+        const requested = list.filter(s => s && s.requested_in_latest_run);
+        const doneStates = new Set(['completed', 'failed', 'blocked', 'blocked_scope', 'candidates_only', 'not_implemented']);
+        const finished = requested.filter(s => doneStates.has(s.state)).length;
+        pct = requested.length > 0 ? Math.max(10, Math.round((finished / requested.length) * 100)) : 0;
+        bg = status === 'blocked_scope'
+          ? 'linear-gradient(90deg, var(--warn), var(--high))'
+          : 'linear-gradient(90deg, var(--bad), var(--warn))';
+      } else {
+        pct = 0;
+      }
+
+      bar.style.width = `${pct}%`;
+      bar.style.background = bg;
+    }
 
     // --- Tab Navigation ---
     function switchTab(tabId) {
@@ -1689,21 +1765,37 @@
       try {
         const response = await fetch('/api/config/llm');
         const config = await response.json();
-        const label = config.is_available
-          ? `LLM CONFIGURED · ${config.provider}/${config.model || 'default'}`
-          : 'LLM OFFLINE';
-        if (indicator) {
-          indicator.textContent = label;
-          indicator.style.color = config.is_available ? 'var(--ok)' : 'var(--warn)';
+        updateLlmBadge(config);
+        const connState = config.connection_state || (config.model_responding ? 'connected' : (config.is_available ? 'configured' : 'offline'));
+        const modelLabel = `${config.provider || 'none'}/${config.model || 'default'}`;
+        const isConnected = Boolean(config.model_responding || connState === 'connected');
+        const isError = connState === 'error' || config.status === 'error';
+        const isConfigured = Boolean(config.is_available || connState === 'configured' || connState === 'tested');
+
+        if (notice) {
+          if (isConnected) {
+            notice.textContent = `Model connected: ${modelLabel} is responding.`;
+          } else if (isError) {
+            notice.textContent = `Model error (${modelLabel}): ${config.last_error || 'Connection test failed.'}`;
+          } else if (isConfigured) {
+            notice.textContent = `Model configured: ${modelLabel}. Run Test Connection to verify access before scanning.`;
+          } else {
+            notice.textContent = 'No model is connected. Moros will use deterministic checks only; configure a model before an agentic scan.';
+          }
         }
-        if (notice) notice.textContent = config.is_available
-          ? `Model configured: ${config.provider}/${config.model || 'default'}. Run Test Connection to verify access before scanning.`
-          : 'No model is connected. Moros will use deterministic checks only; configure a model before an agentic scan.';
         const modalStatus = document.getElementById('llmCurrentStatus');
         const modalStatusText = document.getElementById('llmCurrentStatusText');
-        if (modalStatusText) modalStatusText.textContent = config.is_available
-          ? `Configured: ${config.provider}/${config.model || 'default'}. Connection has not been verified; use Test Connection before scanning.`
-          : 'No model is connected. Add a provider key or configure local Ollama, then test the connection. Until then, scans use deterministic checks only.';
+        if (modalStatusText) {
+          if (isConnected) {
+            modalStatusText.textContent = `Connected: ${modelLabel} verified and responding.`;
+          } else if (isError) {
+            modalStatusText.textContent = `Connection error for ${modelLabel}: ${config.last_error || 'Check credentials or base URL and run Test Connection.'}`;
+          } else if (isConfigured) {
+            modalStatusText.textContent = `Configured: ${modelLabel}. Connection has not been verified; use Test Connection before scanning.`;
+          } else {
+            modalStatusText.textContent = 'No model is connected. Add a provider key or configure local Ollama, then test the connection. Until then, scans use deterministic checks only.';
+          }
+        }
         if (modalStatus && !isNoticeDismissed(noticeKey(modalStatus))) {
           modalStatus.style.display = '';
           modalStatus.removeAttribute('aria-hidden');
@@ -1735,25 +1827,45 @@
       }
     }
 
-    function stopActiveScan() {
+    async function stopActiveScan() {
       if (!currentTarget) return;
-      fetch('/api/scan/stop', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target: currentTarget })
-      }).then(() => pollScanStatus()).catch(e => console.error(e));
+      try {
+        const res = await fetch('/api/scan/stop', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target: currentTarget })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.status === 'error') {
+          alert(data.error || data.message || 'Failed to stop active scan.');
+          return;
+        }
+        await pollScanStatus();
+      } catch (e) {
+        console.error(e);
+        alert('Error stopping scan: ' + e);
+      }
     }
 
-    function resetTargetData() {
+    async function resetTargetData() {
       if (!currentTarget) return;
-      fetch('/api/scan/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target: currentTarget, skills: 'all', dry_run: false })
-      }).then(() => {
+      try {
+        const res = await fetch('/api/scan/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target: currentTarget, skills: 'all', dry_run: false })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.status === 'error') {
+          alert(data.error || data.message || 'Failed to start rescan.');
+          return;
+        }
         switchTab('terminal');
-        pollScanStatus();
-      }).catch(e => console.error(e));
+        await pollScanStatus();
+      } catch (e) {
+        console.error(e);
+        alert('Error starting rescan: ' + e);
+      }
     }
 
     // --- Initialization ---
@@ -1817,21 +1929,34 @@
     }
 
     async function onTargetChange() {
+      targetSwitchEpoch += 1;
       currentTarget = document.getElementById('targetSelect').value;
       document.getElementById('scanTargetInput').value = currentTarget;
+      latestSkillsStatus = [];
+      updateGlobalProgressBar('idle', []);
+      const logSel = document.getElementById('logFileSelect');
+      if (logSel) {
+        logSel.innerHTML = '<option value="LIVE">Live Scan Stream</option>';
+        logSel.value = 'LIVE';
+      }
+      const termOut = document.getElementById('terminalOutput');
+      if (termOut) termOut.textContent = 'Listening for agent execution logs...';
       await refreshTargetData();
       await pollScanStatus();
     }
 
     async function refreshTargetData() {
-      if (!currentTarget) return;
+      const reqTarget = currentTarget;
+      const reqEpoch = targetSwitchEpoch;
+      if (!reqTarget) return;
 
-      document.getElementById('overviewTargetName').textContent = currentTarget;
+      document.getElementById('overviewTargetName').textContent = reqTarget;
 
       // 1. Fetch Summary
       try {
-        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/summary`);
+        const res = await fetch(`/api/targets/${encodeURIComponent(reqTarget)}/summary`);
         const summary = await res.json();
+        if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
 
         const scopeBadge = document.getElementById('scopeBadge');
         const overviewScopeTag = document.getElementById('overviewScopeTag');
@@ -1869,12 +1994,19 @@
         console.error("Summary error:", e);
       }
 
+      if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
       await fetchFindings();
+      if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
       await fetchSkillsStatus();
+      if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
       await fetchEndpoints();
+      if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
       await fetchCheckpoints();
+      if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
       await fetchLogsList();
+      if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
       await fetchConversations();
+      if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
       await fetchReport();
     }
 
@@ -1979,9 +2111,14 @@
 
     // --- Findings ---
     async function fetchFindings() {
+      const reqTarget = currentTarget;
+      const reqEpoch = targetSwitchEpoch;
+      if (!reqTarget) return;
       try {
-        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/findings`);
-        currentFindings = await res.json();
+        const res = await fetch(`/api/targets/${encodeURIComponent(reqTarget)}/findings`);
+        const data = await res.json();
+        if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
+        currentFindings = data;
         document.getElementById('navFindingsCount').textContent = currentFindings.length;
         renderFindingsList();
       } catch (e) {
@@ -2029,7 +2166,7 @@
             <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:8px;">
               <div>
                 <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
-                  <span class="${tagClass}">${f.severity_level}</span>
+                  <span class="${tagClass}">${escapeHtml(f.severity_level)}</span>
                   <strong style="font:600 16px 'Space Grotesk', system-ui, sans-serif; color:#fff;">${escapeHtml(f.title)}</strong>
                 </div>
                 <div class="mono" style="font-size:12px; color:var(--mut);">${escapeHtml(f.endpoint || sourceRef || 'Global Scope')}</div>
@@ -2210,20 +2347,26 @@
     }
 
     async function fetchSkillsStatus() {
+      const reqTarget = currentTarget;
+      const reqEpoch = targetSwitchEpoch;
+      if (!reqTarget) return;
       try {
-        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/skills`);
+        const res = await fetch(`/api/targets/${encodeURIComponent(reqTarget)}/skills`);
         const skills = await res.json();
+        if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
+        latestSkillsStatus = Array.isArray(skills) ? skills : [];
+        updateGlobalProgressBar(lastObservedScanState[reqTarget] || 'idle', latestSkillsStatus);
         const container = document.getElementById('skillsTimeline');
 
         const countEl = document.getElementById('navSkillsCount');
-        if (countEl) countEl.textContent = skills.length;
+        if (countEl) countEl.textContent = latestSkillsStatus.length;
 
-        if (!skills || skills.length === 0) {
+        if (!latestSkillsStatus || latestSkillsStatus.length === 0) {
           container.innerHTML = '<div class="card"><p class="hint">No skills registered.</p></div>';
           return;
         }
 
-        container.innerHTML = skills.map((s, idx) => {
+        container.innerHTML = latestSkillsStatus.map((s, idx) => {
           let secClass = "sec";
           let badge = `<span class="tag info">NOT IN LATEST RUN</span>`;
           if (s.state === "completed") {
@@ -2253,7 +2396,7 @@
             : `<span class="tag info" style="font-size:10px; padding:1px 6px;">CORE</span>`;
           const catBadge = s.category ? `<span class="tag low" style="font-size:10px; padding:1px 6px;">${escapeHtml(s.category)}</span>` : '';
           const deleteBtn = isCustom 
-            ? `<button onclick="deleteCustomSkill('${escapeHtml(s.skill)}')" class="ghost" style="padding:2px 8px; font-size:11px; color:var(--bad); border-color:rgba(255,77,94,0.3); margin-left:6px;" title="Delete Custom Skill">&times; Delete</button>`
+            ? `<button onclick="deleteCustomSkill('${escapeJs(s.skill)}')" class="ghost" style="padding:2px 8px; font-size:11px; color:var(--bad); border-color:rgba(255,77,94,0.3); margin-left:6px;" title="Delete Custom Skill">&times; Delete</button>`
             : '';
 
           return `
@@ -2269,7 +2412,7 @@
                     ${deleteBtn}
                   </div>
                   ${s.description ? `<p style="margin:4px 0 6px; font-size:12px; color:var(--mut); line-height:1.4;">${escapeHtml(s.description)}</p>` : ''}
-                  <small style="color:var(--mut);">Historical logs: ${s.logs_count || 0} files &bull; Latest-run review: ${escapeHtml(s.review_status || 'not recorded')}</small>
+                  <small style="color:var(--mut);">Historical logs: ${Number(s.logs_count || 0)} files &bull; Latest-run review: ${escapeHtml(s.review_status || 'not recorded')}</small>
                 </div>
                 <div>
                   ${badge}
@@ -2285,9 +2428,13 @@
 
     // --- Endpoints Table ---
     async function fetchEndpoints() {
+      const reqTarget = currentTarget;
+      const reqEpoch = targetSwitchEpoch;
+      if (!reqTarget) return;
       try {
-        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/endpoints`);
+        const res = await fetch(`/api/targets/${encodeURIComponent(reqTarget)}/endpoints`);
         const data = await res.json();
+        if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
         const tb = document.getElementById('endpointsTableBody');
         const list = data.endpoints || [];
         document.getElementById('navEndpointsCount').textContent = list.length;
@@ -2323,13 +2470,18 @@
 
     // --- Checkpoints ---
     async function fetchCheckpoints() {
+      const reqTarget = currentTarget;
+      const reqEpoch = targetSwitchEpoch;
+      if (!reqTarget) return;
       try {
-        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/checkpoints`);
+        const res = await fetch(`/api/targets/${encodeURIComponent(reqTarget)}/checkpoints`);
         const cps = await res.json();
+        if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
         const container = document.getElementById('checkpointsContainer');
         const overviewList = document.getElementById('overviewCheckpointsList');
 
-        const pending = cps.filter(c => c.status === "PENDING_APPROVAL");
+        const isPendingCheckpoint = (c) => c && (c.status === "WAITING_APPROVAL" || c.status === "PENDING_APPROVAL");
+        const pending = cps.filter(isPendingCheckpoint);
         document.getElementById('navCheckpointsBadge').textContent = pending.length > 0 ? `${pending.length} PENDING` : "CLEAR";
 
         if (cps.length === 0) {
@@ -2344,30 +2496,33 @@
               <strong>${escapeHtml(c.type)}</strong>
               <small class="mono">${escapeHtml(c.target_url)}</small>
             </div>
-            <span class="nav-badge ${c.status === 'APPROVED' ? '' : (c.status === 'REJECTED' ? 'bad' : 'warn')}" style="margin-left:auto;">${c.status}</span>
+            <span class="nav-badge ${c.status === 'APPROVED' ? '' : (c.status === 'REJECTED' ? 'bad' : 'warn')}" style="margin-left:auto;">${escapeHtml(c.status)}</span>
           </div>
         `).join('');
 
-        container.innerHTML = cps.map(c => `
-          <div class="card" style="border-color:${c.status === 'PENDING_APPROVAL' ? 'rgba(241,194,107,.5)' : 'var(--line)'};">
-            <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:8px;">
-              <div>
-                <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
-                  <span class="tag ${c.status === 'APPROVED' ? 'ok' : (c.status === 'REJECTED' ? 'bad' : 'med')}">${c.status}</span>
-                  <h3 style="margin:0; font:600 16px 'Space Grotesk', system-ui, sans-serif; color:#fff;">${escapeHtml(c.type)}</h3>
+        container.innerHTML = cps.map(c => {
+          const awaiting = isPendingCheckpoint(c);
+          return `
+            <div class="card" style="border-color:${awaiting ? 'rgba(241,194,107,.5)' : 'var(--line)'};">
+              <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:8px;">
+                <div>
+                  <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+                    <span class="tag ${c.status === 'APPROVED' ? 'ok' : (c.status === 'REJECTED' ? 'bad' : 'med')}">${escapeHtml(c.status)}</span>
+                    <h3 style="margin:0; font:600 16px 'Space Grotesk', system-ui, sans-serif; color:#fff;">${escapeHtml(c.type)}</h3>
+                  </div>
+                  <div class="mono" style="font-size:12px; color:var(--mut);">${escapeHtml(c.method || 'ACTION')} ${escapeHtml(c.target_url)}</div>
                 </div>
-                <div class="mono" style="font-size:12px; color:var(--mut);">${escapeHtml(c.method || 'ACTION')} ${escapeHtml(c.target_url)}</div>
+                ${awaiting ? `
+                  <div style="display:flex; gap:8px;">
+                    <button onclick="respondCheckpoint('${escapeJs(c.id)}', 'approve')" class="btn" style="padding:6px 14px; font-size:12px; background:linear-gradient(135deg,var(--ok),#12a880);">Approve</button>
+                    <button onclick="respondCheckpoint('${escapeJs(c.id)}', 'reject')" class="btn-danger" style="padding:6px 14px; font-size:12px;">Reject</button>
+                  </div>
+                ` : `<span class="hint">Resolved</span>`}
               </div>
-              ${c.status === 'PENDING_APPROVAL' ? `
-                <div style="display:flex; gap:8px;">
-                  <button onclick="respondCheckpoint('${c.id}', 'approve')" class="btn" style="padding:6px 14px; font-size:12px; background:linear-gradient(135deg,var(--ok),#12a880);">Approve</button>
-                  <button onclick="respondCheckpoint('${c.id}', 'reject')" class="btn-danger" style="padding:6px 14px; font-size:12px;">Reject</button>
-                </div>
-              ` : `<span class="hint">Resolved</span>`}
+              <p style="margin:10px 0 0; font-size:13px; color:#cbd5e1;">${escapeHtml(c.reason || '')}</p>
             </div>
-            <p style="margin:10px 0 0; font-size:13px; color:#cbd5e1;">${escapeHtml(c.reason || '')}</p>
-          </div>
-        `).join('');
+          `;
+        }).join('');
       } catch (e) {
         console.error("Checkpoints error:", e);
       }
@@ -2375,22 +2530,31 @@
 
     async function respondCheckpoint(id, action) {
       try {
-        await fetch('/api/checkpoints/action', {
+        const res = await fetch('/api/checkpoints/action', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ target: currentTarget, checkpoint_id: id, action: action })
         });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.status === 'error') {
+          alert(data.error || data.message || "Error saving checkpoint decision");
+          return;
+        }
         await fetchCheckpoints();
       } catch (e) {
-        alert("Error saving checkpoint decision");
+        alert("Error saving checkpoint decision: " + e);
       }
     }
 
     // --- Terminal & Logs ---
     async function fetchLogsList() {
+      const reqTarget = currentTarget;
+      const reqEpoch = targetSwitchEpoch;
+      if (!reqTarget) return;
       try {
-        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/logs`);
+        const res = await fetch(`/api/targets/${encodeURIComponent(reqTarget)}/logs`);
         const data = await res.json();
+        if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
         const sel = document.getElementById('logFileSelect');
         const currentVal = sel.value;
         sel.innerHTML = '<option value="LIVE">Live Scan Stream</option>';
@@ -2400,7 +2564,11 @@
           opt.textContent = `${l.path} (${Math.round(l.size/1024*10)/10} KB)`;
           sel.appendChild(opt);
         });
-        sel.value = currentVal;
+        if (Array.from(sel.options).some(o => o.value === currentVal)) {
+          sel.value = currentVal;
+        } else {
+          sel.value = 'LIVE';
+        }
       } catch (e) {
         console.error("Logs error:", e);
       }
@@ -2412,12 +2580,18 @@
         await pollScanStatus();
         return;
       }
+      const reqTarget = currentTarget;
+      const reqEpoch = targetSwitchEpoch;
+      if (!reqTarget) return;
       try {
-        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/logs?file=${encodeURIComponent(file)}`);
+        const res = await fetch(`/api/targets/${encodeURIComponent(reqTarget)}/logs?file=${encodeURIComponent(file)}`);
         const data = await res.json();
+        if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
         document.getElementById('terminalOutput').textContent = data.content || "Empty log file.";
       } catch (e) {
-        document.getElementById('terminalOutput').textContent = "Error reading log.";
+        if (reqTarget === currentTarget && reqEpoch === targetSwitchEpoch) {
+          document.getElementById('terminalOutput').textContent = "Error reading log.";
+        }
       }
     }
 
@@ -2428,16 +2602,19 @@
     }
 
     async function pollScanStatus() {
-      if (!currentTarget) return;
+      const reqTarget = currentTarget;
+      const reqEpoch = targetSwitchEpoch;
+      if (!reqTarget) return;
       try {
-        const res = await fetch(`/api/scan/status?target=${encodeURIComponent(currentTarget)}`);
+        const res = await fetch(`/api/scan/status?target=${encodeURIComponent(reqTarget)}`);
         const data = await res.json();
-        const previousStatus = lastObservedScanState[currentTarget];
+        if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
+        const previousStatus = lastObservedScanState[reqTarget];
         const currentStatus = String(data.status || 'idle').toLowerCase();
-        lastObservedScanState[currentTarget] = currentStatus;
+        lastObservedScanState[reqTarget] = currentStatus;
         const badge = document.getElementById('scanStatusBadge');
 
-        if (data.status === "running") {
+        if (currentStatus === "running") {
           badge.className = "pill ok";
           badge.innerHTML = "<b>SCANNING...</b>";
         } else {
@@ -2446,24 +2623,33 @@
         }
 
         const logSel = document.getElementById('logFileSelect');
-        if (logSel && logSel.value === "LIVE" && data.logs) {
+        const logText = Array.isArray(data.logs)
+          ? data.logs.join('')
+          : (typeof data.logs === 'string' ? data.logs : '');
+        const isScanActive = currentStatus === 'running' || currentStatus === 'starting';
+        if (logSel && logSel.value === "LIVE" && (logText.length > 0 || isScanActive)) {
           const out = document.getElementById('terminalOutput');
-          out.textContent = data.logs || "Waiting for output...";
+          if (out) out.textContent = logText || "Waiting for output...";
           if (autoScrollTerminal) {
             const box = document.getElementById('terminalBox');
-            box.scrollTop = box.scrollHeight;
+            if (box) box.scrollTop = box.scrollHeight;
           }
         }
 
+        updateGlobalProgressBar(currentStatus, latestSkillsStatus, data.progress);
+
+        if (isScanActive && !scanRefreshInProgress.has(reqTarget)) {
+          fetchSkillsStatus();
+        }
+
         const justFinished = ['running', 'starting'].includes(previousStatus)
-          && ['completed', 'failed', 'error', 'stopped'].includes(currentStatus);
-        if (justFinished && !scanRefreshInProgress.has(currentTarget)) {
-          const finishedTarget = currentTarget;
-          scanRefreshInProgress.add(finishedTarget);
+          && ['completed', 'failed', 'error', 'stopped', 'blocked_scope'].includes(currentStatus);
+        if (justFinished && !scanRefreshInProgress.has(reqTarget)) {
+          scanRefreshInProgress.add(reqTarget);
           try {
             await refreshTargetData();
           } finally {
-            scanRefreshInProgress.delete(finishedTarget);
+            scanRefreshInProgress.delete(reqTarget);
           }
         }
       } catch (e) {
@@ -2485,11 +2671,15 @@
 
     async function fetchConversations() {
       const container = document.getElementById('conversationMessages');
-      if (!container || !currentTarget) return;
+      const reqTarget = currentTarget;
+      const reqAgent = currentAgent;
+      const reqEpoch = targetSwitchEpoch;
+      if (!container || !reqTarget) return;
 
       try {
-        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/conversations?agent=${encodeURIComponent(currentAgent)}`);
+        const res = await fetch(`/api/targets/${encodeURIComponent(reqTarget)}/conversations?agent=${encodeURIComponent(reqAgent)}`);
         const data = await res.json();
+        if (reqTarget !== currentTarget || reqAgent !== currentAgent || reqEpoch !== targetSwitchEpoch) return;
         
         // Update roster
         if (data.roster && data.roster.length > 0) {
@@ -2680,7 +2870,7 @@
           body: JSON.stringify({ target: currentTarget, agent: currentAgent, message: message })
         });
         const data = await res.json();
-        if (data.status !== 'success') {
+        if (!res.ok || (data.status !== 'success' && data.status !== 'fallback')) {
           alert(data.error || data.message || 'Failed to send message');
         } else {
           await fetchConversations();
@@ -2704,13 +2894,17 @@
 
     // --- Report Conglomeration (Offline Markdown Parser) ---
     async function fetchReport() {
+      const reqTarget = currentTarget;
+      const reqEpoch = targetSwitchEpoch;
+      if (!reqTarget) return;
       try {
         const sarifBtn = document.getElementById('btnDownloadSarif');
-        if (sarifBtn && currentTarget) {
-          sarifBtn.href = `/api/targets/${encodeURIComponent(currentTarget)}/sarif`;
+        if (sarifBtn && reqTarget) {
+          sarifBtn.href = `/api/targets/${encodeURIComponent(reqTarget)}/sarif`;
         }
-        const res = await fetch(`/api/targets/${encodeURIComponent(currentTarget)}/report`);
+        const res = await fetch(`/api/targets/${encodeURIComponent(reqTarget)}/report`);
         const data = await res.json();
+        if (reqTarget !== currentTarget || reqEpoch !== targetSwitchEpoch) return;
         document.getElementById('reportContent').innerHTML = renderOfflineMarkdown(data.markdown || "# No report content yet.");
       } catch (e) {
         console.error("Report error:", e);
@@ -2739,9 +2933,11 @@
       // Inline code
       html = html.replace(/`([^`]+)`/g, '<code class="mono" style="background:#050505; color:var(--cyan); padding:2px 5px; border-radius:4px; font-size:12px;">$1</code>');
 
-      // Unordered lists
+      // Unordered lists (non-greedy contiguous grouping so separate lists are not merged across paragraphs)
       html = html.replace(/^\- (.*$)/gim, '<li style="margin:4px 0; color:#e2e8f0;">$1</li>');
-      html = html.replace(/(<li.*<\/li>)/s, '<ul style="padding-left:20px; margin:10px 0;">$1</ul>');
+      html = html.replace(/((?:<li[^>]*>.*?<\/li>\s*)+)/gs, function(match) {
+        return '<ul style="padding-left:20px; margin:10px 0;">' + match.trim() + '</ul>\n\n';
+      });
 
       // Paragraphs
       html = html.split('\n\n').map(p => {
@@ -2779,11 +2975,12 @@
           body: JSON.stringify({ target: target, skills: skills, models: models, scan_mode: scanMode, dry_run: false })
         });
         const data = await res.json();
-        if (data.status === "success") {
+        if (res.ok && data.status === "success") {
+          targetSwitchEpoch += 1;
           currentTarget = target;
           await refreshTargetData();
         } else {
-          alert(data.message || data.error || "Failed to start scan");
+          alert(data.error || data.message || "Failed to start scan");
         }
       } catch (e) {
         alert("Dashboard API request failed: " + e);
@@ -2805,13 +3002,14 @@
           body: JSON.stringify({ domain: domain })
         });
         const data = await res.json();
-        if (data.status === "success") {
+        if (res.ok && data.status === "success") {
           await fetchTargets();
+          targetSwitchEpoch += 1;
           currentTarget = domain;
           document.getElementById('targetSelect').value = domain;
           await refreshTargetData();
         } else {
-          alert(data.message || "Target creation failed");
+          alert(data.error || data.message || "Target creation failed");
         }
       } catch (e) {
         alert("Error: " + e);
@@ -2819,13 +3017,28 @@
     }
 
     function escapeHtml(str) {
-      if (!str) return '';
-      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     }
 
     function escapeJs(str) {
-      if (!str) return '';
-      return String(str).replace(/'/g, "\\'").replace(/"/g, '\\"');
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, '\\x27')
+        .replace(/"/g, '\\x22')
+        .replace(/\n/g, '\\n')
+        .replace(/\r/g, '\\r')
+        .replace(/</g, '\\x3c')
+        .replace(/>/g, '\\x3e')
+        .replace(/&/g, '\\x26')
+        .replace(/\u2028/g, '\\u2028')
+        .replace(/\u2029/g, '\\u2029');
     }
 
     function copyToClipboard(text) {
@@ -2838,6 +3051,8 @@
     async function openLlmModal() {
       openModal('llmModal');
       document.getElementById('llmTestResult').style.display = 'none';
+      document.getElementById('llmBaseUrlInput').value = '';
+      document.getElementById('llmApiKeyInput').value = '';
       try {
         const res = await fetch('/api/config/llm');
         const data = await res.json();
@@ -2969,7 +3184,7 @@
           body: JSON.stringify({ provider, model, api_key: apiKey, base_url: baseUrl })
         });
         const data = await res.json();
-        if (data.status === 'success') {
+        if (res.ok && data.status === 'success') {
           resultDiv.style.background = 'rgba(25, 230, 176, 0.15)';
           resultDiv.style.color = '#b9f7e6';
           resultDiv.style.border = '1px solid rgba(25, 230, 176, 0.4)';
@@ -2978,13 +3193,15 @@
           resultDiv.style.background = 'rgba(255, 77, 94, 0.15)';
           resultDiv.style.color = '#ffb3ba';
           resultDiv.style.border = '1px solid rgba(255, 77, 94, 0.4)';
-          resultDiv.textContent = data.message || 'Connection failed';
+          resultDiv.textContent = data.error || data.message || 'Connection failed';
         }
+        await refreshLlmStatus();
       } catch (e) {
         resultDiv.style.background = 'rgba(255, 77, 94, 0.15)';
         resultDiv.style.color = '#ffb3ba';
         resultDiv.style.border = '1px solid rgba(255, 77, 94, 0.4)';
         resultDiv.textContent = 'Test error: ' + e;
+        await refreshLlmBadge();
       }
     }
 
@@ -3001,13 +3218,14 @@
           body: JSON.stringify({ provider, model, api_key: apiKey, base_url: baseUrl })
         });
         const data = await res.json();
-        if (data.status === 'success') {
+        if (res.ok && data.status === 'success') {
           alert('Model & API configuration saved and active!');
           closeModal('llmModal');
           document.getElementById('llmApiKeyInput').value = '';
           updateLlmBadge(data.config);
+          await refreshLlmStatus();
         } else {
-          alert('Failed to save configuration: ' + (data.message || 'Unknown error'));
+          alert('Failed to save configuration: ' + (data.error || data.message || 'Unknown error'));
         }
       } catch (e) {
         alert('Save error: ' + e);
@@ -3041,16 +3259,11 @@
     }
 
     async function refreshLlmBadge() {
-      try {
-        const res = await fetch('/api/config/llm');
-        const data = await res.json();
-        updateLlmBadge(data);
-      } catch (e) {}
+      await refreshLlmStatus();
     }
 
     window.onload = () => {
       init();
-      refreshLlmBadge();
     };
   </script>
 </body>

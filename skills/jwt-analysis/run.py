@@ -7,7 +7,6 @@ import argparse
 import base64
 import json
 import re
-import sys
 from pathlib import Path
 
 
@@ -19,6 +18,62 @@ def b64_decode(data: str) -> str:
         return base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
     except Exception:
         return ""
+
+
+def _load_endpoints(out_dir: Path) -> list[str]:
+    endpoints: list[str] = []
+    seen: set[str] = set()
+
+    def _add(ep: str) -> None:
+        val = (ep or "").strip()
+        if val and val not in seen:
+            seen.add(val)
+            endpoints.append(val)
+
+    def _from_item(item) -> None:
+        if isinstance(item, str):
+            _add(item)
+        elif isinstance(item, dict):
+            url = str(item.get("url") or "").strip()
+            if not url:
+                path = str(item.get("path") or "").strip()
+                base = str(item.get("base_url") or "").strip().rstrip("/")
+                url = f"{base}/{path.lstrip('/')}" if base and path else path
+            _add(url)
+
+    for rel in [
+        "js/endpoints.json",
+        "api/endpoints.json",
+        "api/openapi-endpoints.json",
+        "content-discovery/discovered-paths.json",
+        "recon/endpoints.txt",
+        "content/discovered-endpoints.txt",
+    ]:
+        ep_file = out_dir / rel
+        if not ep_file.exists():
+            continue
+        try:
+            if ep_file.suffix == ".json":
+                data = json.loads(ep_file.read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    for item in data:
+                        _from_item(item)
+                elif isinstance(data, dict):
+                    if isinstance(data.get("endpoints"), list):
+                        for item in data["endpoints"]:
+                            _from_item(item)
+                    elif isinstance(data.get("interesting_routes"), list) or isinstance(data.get("paths_checked"), list):
+                        for item in (data.get("interesting_routes") or []):
+                            _from_item(item)
+                        for item in (data.get("paths_checked") or []):
+                            if isinstance(item, dict) and item.get("status_code") not in (None, 404):
+                                _from_item(item)
+            else:
+                for line in ep_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    _add(line)
+        except Exception:
+            continue
+    return endpoints
 
 
 def main():
@@ -33,6 +88,7 @@ def main():
     findings_dir.mkdir(parents=True, exist_ok=True)
     out_file = findings_dir / "candidates-jwt-analysis.json"
 
+    target_base = (args.target if "://" in args.target else f"https://{args.target}").rstrip("/")
     findings = []
     jwt_regex = re.compile(r"eyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]*")
 
@@ -50,13 +106,13 @@ def main():
                     if len(parts) >= 2:
                         header = b64_decode(parts[0])
                         payload = b64_decode(parts[1])
-                        
+
                         # Check none algorithm
                         if '"alg":"none"' in header.lower().replace(" ", ""):
                             findings.append({
                                 "title": f"JWT 'none' Algorithm Vulnerability in {js_file.name}",
                                 "severity": "HIGH",
-                                "url": f"https://{args.target}/{js_file.name}",
+                                "url": f"{target_base}/{js_file.name}",
                                 "cwe": "CWE-347",
                                 "evidence": token[:40] + "...",
                                 "notes": f"Decoded Header: {header}. Algorithm 'none' is accepted or defined.",
@@ -67,7 +123,7 @@ def main():
                             findings.append({
                                 "title": f"Hardcoded or Leaked JWT Token in {js_file.name}",
                                 "severity": "MEDIUM",
-                                "url": f"https://{args.target}/{js_file.name}",
+                                "url": f"{target_base}/{js_file.name}",
                                 "cwe": "CWE-522",
                                 "evidence": token[:35] + "...",
                                 "notes": f"Decoded Header: {header} | Payload claims: {payload[:150]}",
@@ -78,20 +134,19 @@ def main():
                 continue
 
     # Also check endpoints
-    ep_file = out_dir / "recon" / "endpoints.txt"
-    if ep_file.exists():
-        for line in ep_file.read_text(encoding="utf-8").splitlines():
-            if any(k in line.lower() for k in ["jwt", "token", "auth/verify", "oauth/token"]):
-                findings.append({
-                    "title": f"Candidate JWT Auth Endpoint: {line.strip()}",
-                    "severity": "LOW",
-                    "url": line.strip() if "://" in line else f"https://{args.target}{line.strip()}",
-                    "cwe": "CWE-287",
-                    "evidence": line.strip(),
-                    "notes": "Authentication or token verification endpoint discovered for JWT inspection.",
-                    "status": "candidate",
-                    "validation_status": "unverified"
-                })
+    for ep in _load_endpoints(out_dir):
+        if any(k in ep.lower() for k in ["jwt", "token", "auth/verify", "oauth/token"]):
+            full_url = ep if "://" in ep else f"{target_base}/{ep.lstrip('/')}"
+            findings.append({
+                "title": f"Candidate JWT Auth Endpoint: {ep}",
+                "severity": "LOW",
+                "url": full_url,
+                "cwe": "CWE-287",
+                "evidence": ep,
+                "notes": "Authentication or token verification endpoint discovered for JWT inspection.",
+                "status": "candidate",
+                "validation_status": "unverified"
+            })
 
     out_file.write_text(json.dumps({
         "target": args.target,

@@ -38,7 +38,7 @@ These are the **mandatory** points where the system MUST pause and wait for huma
 
 | Checkpoint | When | What Must Be Reviewed |
 |---|---|---|
-| **Pre-Run Authorization** | Before any skill runs against a target | `scope-of-work.pdf` must exist in `targets/<domain>/` |
+| **Pre-Run Authorization** | Before any skill runs against a target | `scope-of-work.{md,txt,yaml,yml,json}` containing the target domain and authorization wording must exist in `targets/<domain>/` (`verify_scope()`) |
 | **Destructive Actions** | Before any DELETE, state-changing POST/PUT | Exact request to be sent, target endpoint, rationale |
 | **Exploit Chain Claims** | Before labeling a chain of low findings as critical | Full chain with evidence at each step |
 | **Password Reset / Auth Brute-force** | Before any credential-related testing | Specific parameters and wordlist to be used |
@@ -88,7 +88,7 @@ A finding's severity is NOT finalized until a human pentester confirms it. Autom
 
 - Skills NEVER write output inside `skills/<name>/`. All output → `targets/<domain>/output/`.
 - Each target gets its own folder under `targets/`.
-- `scope-of-work.pdf` (or `.md`) is **required** in each target folder before offensive skills run.
+- `scope-of-work.md` (or `.txt`, `.yaml`, `.yml`, `.json`) containing the target domain and authorization wording is **required** in each target folder before active offensive skills run.
 
 ---
 

@@ -56,6 +56,8 @@ def main():
                         break
             except Exception:
                 continue
+            if len(findings) >= 20:
+                break
 
     out_file.write_text(json.dumps({
         "target": args.target,
