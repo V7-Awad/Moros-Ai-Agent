@@ -8,7 +8,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-356%20passing-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](tests/)
 [![SARIF 2.1.0](https://img.shields.io/badge/SARIF-2.1.0-orange.svg)](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html)
 [![CVSS v3.1](https://img.shields.io/badge/CVSS-v3.1-red.svg)](https://www.first.org/cvss/v3.1/)
 
@@ -28,7 +28,10 @@ Traditional DAST scanners frequently spray indiscriminate payload lists at web t
 - **Resilient HTTP & LLM Failover**: Supports scoped HTTP/HTTPS/SOCKS5 proxy routing (`--proxy`), idempotent `GET`/`HEAD` retry backoff, optional session cookie jars, complexity-based model routing (`--smart-route`), and automatic cross-provider LLM failover.
 - **Scan Resumability & Sandboxed Execution**: Resumes interrupted runs cleanly from durable state (`--resume`) and isolates custom skill scripts inside scrubbed local or Docker sandboxes (`--sandbox`).
 - **Cryptographic False-Positive Suppression**: Automatically hashes attack responses (`status:length:body_snippet`) against a local false-positive database (`memory/FALSE_POSITIVE_DB.md`) to eliminate repetitive alerts.
-- **Standardized Outputs & Standalone PoCs**: Verified findings are scored with FIRST CVSS v3.1 metrics, exported to OASIS SARIF 2.1.0, and accompanied by reproducible Bash/cURL and Python scripts.
+- **Deterministic Exploit Validation (`tools/exploit_validator.py`)**: Reproduces candidate findings safely within `ScopedHttpClient` and `CheckpointManager` HITL gates, writing sanitized request/response proof bundles (`output/evidence/validation/`) with SHA-256 provenance entries in `output/evidence/ledger.jsonl`.
+- **Correlated Attack Chain Engine (`tools/attack_chain.py`, `tools/attack_graph.py`)**: Links assets, endpoints, identities, trust boundaries, and findings via explicit technical signals, distinguishing `verified` vs `inferred` transitions and scoring paths independently of finding severity.
+- **Controlled Remediation & Retesting (`tools/remediation_assistant.py`, `tools/retest_engine.py`)**: Generates minimal single-file unified diffs tested inside isolated sandboxes/worktrees (`approval_status: "pending_approval"`), then verifies fixes with before/after comparison, regression checks, and preserved historical evidence.
+- **Standardized Outputs, CI Gate & Standalone PoCs**: Confirmed and validated findings are scored with FIRST CVSS v3.1 metrics, exported to OASIS SARIF 2.1.0, evaluated by [`tools/ci_gate.py`](tools/ci_gate.py) / [`.github/actions/moros-scan/action.yml`](.github/actions/moros-scan/action.yml), and accompanied by reproducible Bash/cURL and Python scripts.
 - **Interactive Operations Dashboard**: Local web interface with optional TLS/HTTPS, Bearer token auth, live SSE event streams, visual attack graphs, cost/trace/memory panels, scheduling, and checkpoint management.
 
 ---
@@ -234,6 +237,14 @@ python run.py --target app.example.com --dry-run
 | `--request-delay` | `<float>` | Minimum seconds between target requests (default: `0.3`) |
 | `--proxy` | `<url>` | HTTP/HTTPS/SOCKS5 proxy URL for scoped target requests (sets `MOROS_PROXY`) |
 | `--resume` | `[run_id]` | Resume the latest (or specified) incomplete scan run ID |
+| `--validate` | | Enable deterministic Phase 1 candidate validation before report assembly |
+| `--remediate` | `<finding_id>` | Generate and sandbox-test a minimal remediation patch for `FINDING_ID` (no auto-commit) |
+| `--repo-dir` | `<path>` | Authorized source repository root for `--remediate` (default: project root) |
+| `--retest` | `<finding_id>` | Run deterministic Phase 4 retest verification for `FINDING_ID` |
+| `--ci-gate` | | Evaluate CI/CD policy gate against target artifacts (`tools/ci_gate.py`) |
+| `--min-severity` | `info \| low \| medium \| high \| critical` | Minimum severity threshold for `--ci-gate` (default: `high`) |
+| `--fail-on-confirmed` | `[true \| false]` | Fail `--ci-gate` (exit `2`) when confirmed/validated findings meet thresholds |
+| `--pr-summary-out` | `<path>` | Write secret-redacted Markdown PR summary from `--ci-gate` to `PATH` |
 | `--fail-on-candidate` | | Exit with code `2` when unverified candidate findings are present (CI gate) |
 | `--mcp-server` | `<cmd_or_url>` | External MCP tool server URL (HTTP/SSE) or stdio command (repeatable) |
 | `--no-trace` | | Disable OpenTelemetry trace export under `output/traces/` |
@@ -328,17 +339,20 @@ python dashboard.py --port 8443 --ssl-cert server.crt --ssl-key server.key
 ### Dashboard Features
 - **Operations Console**: Real-time target selection, scope verification status, and one-click assessment launcher.
 - **HITL Checkpoints Manager**: Live queue of pending state-changing requests with one-click Approve and Reject actions.
-- **Attack Graph Visualizer**: Interactive network graph showing discovered assets, endpoints, parameters, and vulnerability sinks.
+- **Attack Graph & Chain Visualizer**: Interactive graph and attack-chain view (`/api/targets/{t}/attack-graph`) distinguishing verified vs inferred paths across assets, endpoints, identities, and findings.
 - **Live Event Stream**: Server-Sent Events (SSE) streaming real-time tool logs and scan progress.
-- **Vulnerability Inspector**: Structured finding cards with CVSS v3.1 vector breakdowns, CWE mappings, and linked reproduction scripts.
-- **Observability & Automation**: Interactive panels for LLM spend/tokens, trace spans, tiered memory, recurring schedules, and learned skill proposals.
+- **Vulnerability Inspector & Lifecycle Actions**: Structured finding cards with lifecycle badges (`candidate`, `confirmed`, `validated`, `inconclusive`, `false_positive`, `fixed`, `accepted_risk`), CVSS v3.1 breakdowns, and `/validate`, `/remediate`, and `/retest` actions.
+- **Observability & Automation**: Interactive panels for LLM spend/tokens, trace spans, tiered memory, recurring schedules, and learned skill proposal approval/disable/rollback controls.
 - **Hardened API Controls**: Bearer token auth (`MOROS_DASHBOARD_TOKEN`), same-origin CSRF checks on mutations, and configurable `/api/` rate limiting.
 
 ### Further Documentation
 - [Architecture & Operations Guide](docs/architecture.md)
+- [Phases 1–6 Implementation Design](docs/ROADMAP_IMPLEMENTATION_DESIGN.md)
+- [Controlled-Lab Lifecycle Example Report](docs/EXAMPLE_LIFECYCLE_REPORT.md)
 - [Dashboard & A2A API Reference](docs/API_REFERENCE.md)
 - [Deployment & Hardening Guide](docs/DEPLOYMENT.md)
 - [OWASP Agentic Security Control Matrix](docs/OWASP_AGENTIC_SECURITY.md)
+- [Phase 0 Audit & Baseline Report](docs/ROADMAP_AUDIT.md)
 - [PDF Operator Guide](docs/MOROS_AI_OPERATOR_GUIDE.pdf)
 
 ---
@@ -360,44 +374,23 @@ python targets/app.example.com/output/pocs/poc_idor_profile_read_9f8e7d6c.py
 
 ## SARIF 2.1.0 & CI/CD Pipeline Integration
 
-Findings are automatically formatted into OASIS SARIF 2.1.0 (`findings.sarif`) with complete CVSS scores, CWE taxons, and code locations. This enables direct integration with GitHub Code Scanning alerts, GitLab Security, and DefectDojo.
+Findings are automatically formatted into OASIS SARIF 2.1.0 (`findings.sarif`) with complete CVSS scores, CWE taxons, lifecycle verification metadata, and code/endpoint locations. Use [`tools/ci_gate.py`](tools/ci_gate.py) and the composite GitHub Action [`.github/actions/moros-scan/action.yml`](.github/actions/moros-scan/action.yml) to enforce scope-guarded security gates and upload SARIF to GitHub Code Scanning.
 
-### GitHub Actions Example
+### GitHub Actions Example (Composite Action)
+
+See [`.github/workflows/moros-dast-example.yml`](.github/workflows/moros-dast-example.yml) and [`.github/workflows/moros-retest-example.yml`](.github/workflows/moros-retest-example.yml) for full SHA-pinned workflows with fork-PR guards and PR summary comments:
 
 ```yaml
-name: Moros Security Audit
-on:
-  push:
-    branches: [main]
-  schedule:
-    - cron: '0 2 * * 1'
-
-jobs:
-  audit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Dependencies
-        run: |
-          pip install -r requirements.txt
-          playwright install chromium
-
-      - name: Run Moros Assessment
-        run: |
-          python setup.py init-target --domain app.example.com
-          python run.py --target app.example.com --scan-mode quick
-
-      - name: Upload SARIF to GitHub Code Scanning
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: targets/app.example.com/output/report/findings.sarif
+- name: Run Moros AI Scan & CI Gate
+  uses: ./.github/actions/moros-scan
+  with:
+    target: app.example.com
+    scan-mode: quick
+    budget: "3.0"
+    min-severity: high
+    fail-on-candidate: "false"
+    fail-on-confirmed: "true"
+    upload-sarif: "true"
 ```
 
 ---
@@ -431,7 +424,7 @@ Moros is designed for modular extensibility. New security skills can be added wi
 
 ## Automated Testing
 
-The repository includes **356 automated tests** across **35 test modules** in `tests/`, plus a simulated vulnerable-app evaluation benchmark (`evals/juice_shop_benchmark.py`) and GitHub Actions CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)):
+The repository includes automated offline test suites across `tests/`, `evals/`, and GitHub Actions CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)). Phase 0 baseline verification recorded **361 passing tests** across `tests/` and `evals/`, **19/19** passing checks in `tools/eval_harness.py`, and **14/14** accurate cases in `evals/juice_shop_benchmark.py --json`, expanded with dedicated unit and end-to-end test suites for Phases 1–6 (`test_exploit_validator.py`, `test_attack_chain.py`, `test_remediation_assistant.py`, `test_retest_engine.py`, `test_ci_gate.py`, `test_dashboard_roadmap_apis.py`, and `test_roadmap_e2e.py`):
 
 ```bash
 # Run the full unit, integration, security, and local E2E test suite
@@ -443,9 +436,10 @@ python evals/juice_shop_benchmark.py --json
 
 Coverage includes:
 - Scope boundary validation, HITL checkpoint gating, prompt injection scrubbing, and secret redaction
+- Deterministic exploit validation, SHA-256 evidence ledger provenance, correlated attack chains, isolated sandbox remediation, and post-fix retesting
 - HTTP proxy routing, safe `GET`/`HEAD` backoff retries, cookie jar persistence, and cross-provider LLM failover
-- Scan resumability, sandbox isolation (`LocalSandbox` / `DockerSandbox`), `business-logic` runner, and end-to-end local mock target scanning
-- Dashboard TLS/HTTPS, CSRF origin enforcement, rate limiting, REST/SSE/A2A endpoints, and DevOps config checks
+- Scan resumability, sandbox isolation (`LocalSandbox` / `DockerSandbox`), `business-logic` runner, and end-to-end local mock target lifecycle testing
+- Dashboard TLS/HTTPS, CSRF origin enforcement, rate limiting, REST/SSE/A2A endpoints, CI gate evaluation, and DevOps config checks
 
 ---
 

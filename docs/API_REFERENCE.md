@@ -81,7 +81,11 @@ Static UI assets (`/`, `/index.html`, etc.) remain readable without a token so t
 | `GET` | `/api/targets/{target}` | Targets | Target summary (alias for `/summary`) |
 | `GET` | `/api/targets/{target}/summary` | Targets | Target summary metrics, tech fingerprint, and scan state |
 | `GET` | `/api/targets/{target}/skills` | Targets | Per-skill execution state, review status, and log file counts for latest run |
-| `GET` | `/api/targets/{target}/findings` | Targets | Deduplicated findings, JS secrets, and DOM XSS sink candidates |
+| `GET` | `/api/targets/{target}/findings` | Targets | Deduplicated findings with lifecycle statuses, JS secrets, and DOM XSS sink candidates |
+| `GET` | `/api/targets/{target}/attack-graph` | Targets | Correlated attack graph, `attack_chains`, `chain_summary`, and Mermaid diagrams |
+| `POST` | `/api/targets/{target}/validate` | Lifecycle | Runs deterministic `ExploitValidator` on a finding, proof ref, or target findings |
+| `POST` | `/api/targets/{target}/remediate` | Lifecycle | Generates isolated remediation diff & test results (`approval_status: "pending_approval"`) |
+| `POST` | `/api/targets/{target}/retest` | Lifecycle | Re-runs validation strategy via `RetestEngine` and preserves historical evidence |
 | `GET` | `/api/targets/{target}/endpoints` | Targets | Discovered JS and OpenAPI endpoints inventory |
 | `GET` | `/api/targets/{target}/tech` | Targets | Technology fingerprint JSON (`tech-fingerprint.json`) |
 | `GET` | `/api/targets/{target}/logs` | Targets | Lists `.log` files or reads `?file=<relpath>` securely |
@@ -100,6 +104,7 @@ Static UI assets (`/`, `/index.html`, etc.) remain readable without a token so t
 | `GET` | `/api/targets/{target}/memory` | Observability | Target `MemoryManager` stats, facts, techniques, and recent events |
 | `GET` | `/api/targets/{target}/schedules` | Automation | Lists configured scan schedules for target |
 | `GET` | `/api/targets/{target}/skill-proposals` | Learning | Lists drafted self-improving skill proposals for target |
+| `POST` | `/api/targets/{target}/skill-proposals/rollback` | Learning | Rolls back, disables, or enables a target skill proposal via `SkillLearner` |
 | `POST` | `/api/scan/start` | Scans | Launches background `run.py` scan job |
 | `POST` | `/api/scan/stop` | Scans | Terminates active scan subprocess for target |
 | `GET` | `/api/scan/status` | Scans | Polls in-memory scan status and buffered console logs |
@@ -182,7 +187,79 @@ Returns target metrics (`has_scope`, `scope_file`, `total_findings`, `raw_findin
 Returns per-skill execution state for the latest run (`state`, `review_status`, `logs_count`, `log_files`, `latest_run_id`, `requested_in_latest_run`).
 
 #### `GET /api/targets/{target}/findings`
-Aggregates and deduplicates findings from `output/findings/**`, `output/js/secrets-findings.json`, and `output/js/gadgets.json`, or returns the canonical `hackbot-report-*.json` snapshot when its `source_artifact_mtimes` manifest matches current disk artifacts.
+Aggregates and deduplicates findings from `output/findings/**` (`confirmed-*.json`, `validated-*.json`, `candidates-*.json`, `*-results.json`), `output/js/secrets-findings.json`, and `output/js/gadgets.json`, or returns the canonical `hackbot-report-*.json` snapshot when its `source_artifact_mtimes` manifest matches current disk artifacts.
+- **Evidence Enrichment & Lifecycle Resolution:** Enriches findings from `output/evidence/validation/`, `output/evidence/retests/`, `output/evidence/ledger.jsonl`, and `output/remediation/`. Recognizes additive lifecycle statuses (`candidate`, `validating`, `confirmed`, `validated`, `human_reviewed`, `inconclusive`, `false_positive`, `fixed`, `accepted_risk`) only when backed by a valid deterministic `validation_result` (`proof_artifact` + `evidence_ids`), human `validation_record`, or `latest_retest` proof/evidence; unverified items without proof are forced to `candidate` / `unverified`.
+- **Additional Finding Fields:** `confidence_score`, `proof_artifact`, `validation_run_id`, `validation_result`, `validation_record`, `latest_retest`, `retest_history`, `retest_outcome`, `remediation_report`.
+
+#### `GET /api/targets/{target}/attack-graph`
+Returns the correlated attack graph from `output/report/attack-graph.json` (and `output/report/attack-chains.json` if needed), or builds it dynamically via `AttackGraphBuilder` / `AttackChainEngine`.
+- **Query Params:** `refresh` (`1` | `true` | `yes` to rebuild from current workspace artifacts).
+- **Response (`200`):**
+  ```json
+  {
+    "target": "example.com",
+    "total_nodes": 12,
+    "total_edges": 14,
+    "nodes": [],
+    "edges": [],
+    "attack_chains": [],
+    "chain_summary": {
+      "total_chains": 0,
+      "verified_chains": 0,
+      "inferred_chains": 0,
+      "max_path_risk_score": 0.0,
+      "max_path_severity": "INFO"
+    },
+    "trust_boundaries": [],
+    "chain_mermaid": "graph TD",
+    "mermaid": "graph TD"
+  }
+  ```
+
+#### `POST /api/targets/{target}/validate`
+Triggers deterministic Phase 1 validation (`ExploitValidator`) strictly within `ScopeValidator` and `CheckpointManager` HITL policies (non-destructive `GET`/`HEAD` by default).
+- **Request Body:** Supply one of `proof_ref` / `proof_artifact`, `finding` (JSON object), `finding_id` (string), or omit all three to validate all target findings. Optional bounds: `max_requests` (`1`–`50`, default `20`), `timeout_seconds` (`1.0`–`30.0`, default `10.0`).
+- **Response (`200`):**
+  - Single finding / proof replay: `{ "status": "success", "target": "...", "validation_result": {...}, "finding": {...} }`
+  - Target-wide batch: `{ "status": "success", "target": "...", "total_validated": 3, "validation_results": [...], "findings": [...] }`
+- **Errors:** `400` on invalid payload or path traversal outside target workspace; `404` if `finding_id` is not found.
+
+#### `POST /api/targets/{target}/remediate`
+Executes `RemediationAssistant` in an isolated temporary workspace or detached git worktree without modifying the main repository or auto-committing.
+- **Request Body:**
+  ```json
+  {
+    "finding_id": "fnd-9a3f1c2b8e04",
+    "repo_root": "/path/to/repo",
+    "test_paths": ["tests/test_app.py"],
+    "require_confirmed": true,
+    "run_tests": true,
+    "use_git_worktree": false
+  }
+  ```
+  Accepts `finding` (inline object) or `finding_id`, optional `proposed_diff` (string), and defaults `require_confirmed=true` and `run_tests=true`. Persists the report to `output/remediation/<finding_id>.json`.
+- **Response (`200`):** `{ "status": "success", "target": "...", "remediation_report": { "approval_status": "pending_approval", ... } }`
+- **Errors:** `400` if unconfirmed (`require_confirmed=true`), missing context, or unsafe diff; `403` on repository boundary or approval violation; `404` if `finding_id` is not found.
+
+#### `POST /api/targets/{target}/retest`
+Executes `RetestEngine` against a finding (or original proof) under `ScopeValidator` and `CheckpointManager` gates, preserving all historical proof and evidence references.
+- **Request Body:**
+  ```json
+  {
+    "finding_id": "fnd-9a3f1c2b8e04",
+    "proof_artifact": "output/evidence/validation/val-4c8e21a09f12.json",
+    "remediation_id": "rem-1",
+    "code_version": "a1b2c3d",
+    "regression_routes": ["/search?q=test"],
+    "check_reintroduced_vulns": false,
+    "max_requests": 20,
+    "regression_max_requests": 5,
+    "timeout_seconds": 10.0
+  }
+  ```
+  Also accepts inline `finding`, `validation_result`, `expected_routes`, and `environment` objects.
+- **Response (`200`):** `{ "status": "success", "target": "...", "retest_result": {...}, "finding": {...} }`
+- **Errors:** `400` on invalid inputs or out-of-workspace `proof_artifact`; `404` if `finding_id` is not found.
 
 #### `GET /api/targets/{target}/endpoints`
 Combines JavaScript AST endpoints (`output/js/endpoints.json`) and OpenAPI endpoints (`output/api/endpoints.json` or `openapi-endpoints.json`) with sanitized `source_file` references.
@@ -226,6 +303,22 @@ Returns `{ "target": "...", "schedules": [...] }` via `ScanScheduler.list_schedu
 
 #### `GET /api/targets/{target}/skill-proposals`
 Returns `{ "target": "...", "proposals": [...] }` via `SkillLearner.list_proposals()`.
+
+#### `POST /api/targets/{target}/skill-proposals/rollback`
+Safely rolls back, disables, or enables a learned skill proposal via `SkillLearner` without modifying built-in `CORE_SKILLS`. (`POST /api/targets/{target}/skill-proposals` also accepts `"action": "rollback" | "disable" | "enable"`.)
+- **Request Body:**
+  ```json
+  {
+    "proposal_id": "prop-xss-pattern-v1-a1b2c3",
+    "action": "rollback",
+    "reason": "Superseded or false-positive prone",
+    "actor": "dashboard",
+    "restore_previous": false
+  }
+  ```
+  `action` defaults to `"rollback"` (supported values: `"rollback"`, `"disable"`, `"enable"`).
+- **Response (`200`):** `{ "status": "success", "target": "...", "action": "rollback", "proposal": {...} }`
+- **Errors:** `400` on missing `proposal_id`, unsupported `action`, policy invariant violation, or core-skill collision; `404` if `proposal_id` is not found.
 
 ---
 

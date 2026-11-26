@@ -177,11 +177,14 @@ python run.py --target app.example.com --scan-mode quick
 
 ---
 
-## 7. CI/CD Security Gate (`--fail-on-candidate`)
+## 7. CI/CD Security Gate & Reusable GitHub Action
 
-Use `--fail-on-candidate` in CI pipelines to fail builds whenever an assessment produces new unverified candidate findings:
+Moros provides both a standalone policy evaluator ([`tools/ci_gate.py`](../tools/ci_gate.py) / `run.py --ci-gate`) and a reusable composite GitHub Action ([`.github/actions/moros-scan/action.yml`](../.github/actions/moros-scan/action.yml)).
+
+### CLI Gate & Lifecycle Commands (`run.py` / `tools/ci_gate.py`)
 
 ```bash
+# 1. Run quick assessment with deterministic Phase 1 validation, then evaluate CI gate
 python setup.py init-target --domain staging.example.com
 python run.py \
   --target staging.example.com \
@@ -189,24 +192,53 @@ python run.py \
   --https-only \
   --max-http-requests 80 \
   --no-trace \
-  --fail-on-candidate
+  --validate \
+  --ci-gate \
+  --min-severity high \
+  --fail-on-confirmed true \
+  --pr-summary-out /tmp/moros-pr-summary.md
+
+# 2. Evaluate CI policy gate directly against existing target artifacts
+python tools/ci_gate.py \
+  --output-dir targets/staging.example.com/output \
+  --target staging.example.com \
+  --min-severity high \
+  --fail-on-confirmed true \
+  --fail-on-candidate false \
+  --summary-out /tmp/moros-pr-summary.md
+
+# 3. Legacy candidate-only gate
+python run.py --target staging.example.com --scan-mode quick --fail-on-candidate
+
+# 4. Generate isolated remediation proposal (never auto-commits) or run deterministic retest
+python run.py --target staging.example.com --remediate fnd-9a3f1c2b8e04 --repo-dir /path/to/app
+python run.py --target staging.example.com --retest fnd-9a3f1c2b8e04
 ```
 
 ### Exit Codes
 | Code | Meaning |
 |:---|:---|
-| `0` | Scan completed with no unverified candidate findings (or `--fail-on-candidate` not set) |
-| `1` | Scan execution failed |
-| `2` | `--fail-on-candidate` triggered: one or more `candidates-*.json` files produced in this run contain findings |
-| `3` | `BLOCKED_SCOPE`: request or redirect violated the target's scope policy |
+| `0` | Scan or CI policy gate passed |
+| `1` | Scan, remediation, or retest execution failed |
+| `2` | Policy gate triggered (`--fail-on-candidate`, `--ci-gate` / `tools/ci_gate.py`), or missing LLM preflight on active scan |
+| `3` | `BLOCKED_SCOPE`: request, redirect, or missing `scope-of-work.*` authorization violated scope policy |
+| `4` | Invalid gate configuration, missing/malformed scan artifacts, or failed scan step in composite action |
 | `130` | Interrupted by operator (`SIGINT`) |
 
+### Composite GitHub Action (`.github/actions/moros-scan`)
+
+The composite action validates explicit target authorization (`tools/ci_gate.py --check-scope`) before running `run.py`, evaluates policy thresholds, writes a secret-redacted Markdown PR summary, and optionally uploads OASIS SARIF 2.1.0 using a SHA-pinned `github/codeql-action/upload-sarif` step.
+
+- **Key Inputs:** `target` (required), `scan-mode` (`quick`), `budget` (`5.0`), `min-severity` (`high`), `fail-on-candidate` (`false`), `fail-on-confirmed` (`true`), `upload-sarif` (`true`), `config-path`, `min-confidence` (`0.0`), `require-validation` (`false`), `max-http-requests` (`80`).
+- **Outputs:** `exit-code`, `sarif-path`, `summary-markdown`, `confirmed-count`, `candidate-count`.
+- **Example Workflows:** See [`.github/workflows/moros-dast-example.yml`](../.github/workflows/moros-dast-example.yml) and [`.github/workflows/moros-retest-example.yml`](../.github/workflows/moros-retest-example.yml) for SHA-pinned configurations with `vars.MOROS_AUTHORIZED_TARGET` verification and fork-PR active-scan protection.
+
 ### Uploading SARIF 2.1.0 Results
-Moros writes OASIS SARIF 2.1.0 output to `targets/<domain>/output/report/findings.sarif` (also downloadable from `GET /api/targets/<domain>/sarif`), ready for `github/codeql-action/upload-sarif`:
+Moros writes OASIS SARIF 2.1.0 output to `targets/<domain>/output/report/findings.sarif` (also downloadable from `GET /api/targets/<domain>/sarif`), validateable offline via `python tools/ci_gate.py --validate-sarif <path>`:
 
 ```yaml
 - name: Upload Moros SARIF
-  uses: github/codeql-action/upload-sarif@v3
+  uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3.28.18
   if: always()
   with:
     sarif_file: targets/staging.example.com/output/report/findings.sarif
