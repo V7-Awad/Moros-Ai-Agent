@@ -1,0 +1,106 @@
+name: Moros DAST Assessment (Example)
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Authorized target domain (must match repository MOROS_AUTHORIZED_TARGET variable)"
+        required: true
+      scan_mode:
+        description: "Scan profile (quick or passive)"
+        required: false
+        default: "quick"
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: write
+
+jobs:
+  dast-gate:
+    name: Authorized DAST Gate
+    runs-on: ubuntu-latest
+    # Explicit scope guard: refuse active DAST runs on untrusted fork PRs.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Moros dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify explicit authorized target scope
+        id: resolve_target
+        env:
+          AUTHORIZED_TARGET: ${{ vars.MOROS_AUTHORIZED_TARGET }}
+          DISPATCH_TARGET: ${{ github.event.inputs.target }}
+          DISPATCH_MODE: ${{ github.event.inputs.scan_mode }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "$AUTHORIZED_TARGET" ]; then
+            echo "Refusing active DAST scan: repository variable MOROS_AUTHORIZED_TARGET is not configured."
+            exit 3
+          fi
+          target="$AUTHORIZED_TARGET"
+          mode="quick"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$DISPATCH_TARGET" ]; then
+            if [ "$DISPATCH_TARGET" != "$AUTHORIZED_TARGET" ]; then
+              echo "Refusing active scan: untrusted dispatch target does not match MOROS_AUTHORIZED_TARGET."
+              exit 3
+            fi
+            mode="${DISPATCH_MODE:-quick}"
+          fi
+          python tools/ci_gate.py \
+            --check-scope \
+            --target "$target" \
+            --target-dir "targets/$target" \
+            --scan-mode "$mode"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "scan_mode=$mode" >> "$GITHUB_OUTPUT"
+
+      - name: Run Moros AI Scan & CI Gate
+        id: moros
+        uses: ./.github/actions/moros-scan
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        with:
+          target: ${{ steps.resolve_target.outputs.target }}
+          scan-mode: ${{ steps.resolve_target.outputs.scan_mode }}
+          budget: "3.0"
+          min-severity: "high"
+          fail-on-candidate: "false"
+          fail-on-confirmed: "true"
+          upload-sarif: "true"
+
+      - name: Upload redacted scan report artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4.5.0
+        with:
+          name: moros-dast-reports
+          path: |
+            targets/${{ steps.resolve_target.outputs.target }}/output/report/
+            targets/${{ steps.resolve_target.outputs.target }}/output/logs/scope-audit-latest.json
+          if-no-files-found: ignore
+
+      - name: Post redacted PR summary comment
+        if: ${{ always() && github.event_name == 'pull_request' && steps.moros.outputs.summary-markdown != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SUMMARY_BODY: ${{ steps.moros.outputs.summary-markdown }}
+        run: |
+          gh pr comment "$PR_NUMBER" --body "$SUMMARY_BODY"

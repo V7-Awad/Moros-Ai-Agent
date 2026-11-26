@@ -1,0 +1,192 @@
+name: "Moros AI Security Scan"
+description: "Run a scope-validated Moros AI DAST/security assessment, evaluate CI policy gates, generate a redacted PR summary, and optionally upload SARIF 2.1.0."
+
+inputs:
+  target:
+    description: "Authorized target domain to scan (must match targets/<target>/scope-of-work.* for active modes)."
+    required: true
+  scan-mode:
+    description: "Moros scan profile: quick, deep, full, or passive."
+    required: false
+    default: "quick"
+  budget:
+    description: "Maximum LLM spend budget in USD."
+    required: false
+    default: "5.0"
+  min-severity:
+    description: "Minimum severity threshold to trigger CI gate: info, low, medium, high, or critical."
+    required: false
+    default: "high"
+  fail-on-candidate:
+    description: "Fail the CI gate (exit code 2) when unverified candidate findings meet thresholds."
+    required: false
+    default: "false"
+  fail-on-confirmed:
+    description: "Fail the CI gate (exit code 2) when confirmed/validated findings meet thresholds."
+    required: false
+    default: "true"
+  upload-sarif:
+    description: "Upload generated SARIF 2.1.0 report to GitHub Code Scanning (true/false)."
+    required: false
+    default: "true"
+  config-path:
+    description: "Optional path to JSON/YAML CI gate policy configuration file."
+    required: false
+    default: ""
+  min-confidence:
+    description: "Minimum finding confidence threshold (0.0 to 1.0)."
+    required: false
+    default: "0.0"
+  require-validation:
+    description: "Fail the CI gate when unvalidated findings remain above thresholds."
+    required: false
+    default: "false"
+  max-http-requests:
+    description: "Maximum bounded HTTP GET/HEAD requests per scan."
+    required: false
+    default: "80"
+
+outputs:
+  exit-code:
+    description: "Moros CI gate exit code (0=pass, 2=gate triggered, 3=scope violation, 4=invalid config/missing artifacts)."
+    value: ${{ steps.gate.outputs.exit-code }}
+  sarif-path:
+    description: "Path to the generated OASIS SARIF 2.1.0 report if present."
+    value: ${{ steps.gate.outputs.sarif-path }}
+  summary-markdown:
+    description: "Secret-redacted Markdown PR summary generated from gate results."
+    value: ${{ steps.gate.outputs.summary-markdown }}
+  confirmed-count:
+    description: "Count of confirmed and human-validated findings."
+    value: ${{ steps.gate.outputs.confirmed-count }}
+  candidate-count:
+    description: "Count of unverified candidate findings."
+    value: ${{ steps.gate.outputs.candidate-count }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Validate explicit authorized scope
+      id: scope_guard
+      shell: bash
+      env:
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_SCAN_MODE: ${{ inputs.scan-mode }}
+      run: |
+        set -euo pipefail
+        if ! python tools/ci_gate.py \
+          --check-scope \
+          --target "$INPUT_TARGET" \
+          --target-dir "targets/$INPUT_TARGET" \
+          --scan-mode "$INPUT_SCAN_MODE" > /tmp/moros-scope-check.json; then
+          echo "Scope authorization check failed for target."
+          cat /tmp/moros-scope-check.json
+          exit 3
+        fi
+        echo "Scope authorization verified."
+
+    - name: Execute Moros security scan
+      id: scan
+      shell: bash
+      env:
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_SCAN_MODE: ${{ inputs.scan-mode }}
+        INPUT_BUDGET: ${{ inputs.budget }}
+        INPUT_MAX_HTTP_REQUESTS: ${{ inputs.max-http-requests }}
+      run: |
+        set +e
+        python run.py \
+          --target "$INPUT_TARGET" \
+          --scan-mode "$INPUT_SCAN_MODE" \
+          --budget "$INPUT_BUDGET" \
+          --max-http-requests "$INPUT_MAX_HTTP_REQUESTS" \
+          --https-only \
+          --no-trace \
+          --quiet
+        scan_rc=$?
+        echo "scan-exit-code=$scan_rc" >> "$GITHUB_OUTPUT"
+        exit 0
+
+    - name: Evaluate CI gate and generate redacted PR summary
+      id: gate
+      shell: bash
+      env:
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_MIN_SEVERITY: ${{ inputs.min-severity }}
+        INPUT_FAIL_ON_CANDIDATE: ${{ inputs.fail-on-candidate }}
+        INPUT_FAIL_ON_CONFIRMED: ${{ inputs.fail-on-confirmed }}
+        INPUT_MIN_CONFIDENCE: ${{ inputs.min-confidence }}
+        INPUT_REQUIRE_VALIDATION: ${{ inputs.require-validation }}
+        INPUT_CONFIG_PATH: ${{ inputs.config-path }}
+        SCAN_RC: ${{ steps.scan.outputs.scan-exit-code }}
+      run: |
+        set +e
+        target_output="targets/$INPUT_TARGET/output"
+        summary_file="/tmp/moros-pr-summary.md"
+        gate_json="/tmp/moros-gate-result.json"
+
+        cmd=(
+          python tools/ci_gate.py
+          --output-dir "$target_output"
+          --target "$INPUT_TARGET"
+          --min-severity "$INPUT_MIN_SEVERITY"
+          --fail-on-candidate "$INPUT_FAIL_ON_CANDIDATE"
+          --fail-on-confirmed "$INPUT_FAIL_ON_CONFIRMED"
+          --min-confidence "$INPUT_MIN_CONFIDENCE"
+          --require-validation "$INPUT_REQUIRE_VALIDATION"
+          --json-out "$gate_json"
+          --summary-out "$summary_file"
+        )
+        if [ -n "$INPUT_CONFIG_PATH" ]; then
+          cmd+=(--config "$INPUT_CONFIG_PATH")
+        fi
+
+        "${cmd[@]}" > /dev/null
+        gate_rc=$?
+
+        if [ "$SCAN_RC" = "3" ]; then
+          gate_rc=3
+        elif [ "$SCAN_RC" != "0" ] && [ "$gate_rc" = "0" ]; then
+          gate_rc=4
+        fi
+
+        sarif_path=""
+        if [ -f "$target_output/report/findings.sarif" ]; then
+          sarif_path="$target_output/report/findings.sarif"
+        fi
+
+        confirmed_count=$(python -c 'import json, sys; d=json.load(open(sys.argv[1])); c=d.get("counts",{}); print(int(c.get("confirmed",0))+int(c.get("validated",0)))' "$gate_json" 2>/dev/null || echo "0")
+        candidate_count=$(python -c 'import json, sys; d=json.load(open(sys.argv[1])); print(int(d.get("counts",{}).get("candidate",0)))' "$gate_json" 2>/dev/null || echo "0")
+
+        {
+          echo "exit-code=$gate_rc"
+          echo "sarif-path=$sarif_path"
+          echo "confirmed-count=$confirmed_count"
+          echo "candidate-count=$candidate_count"
+          echo "summary-markdown<<MOROS_SUMMARY_EOF"
+          if [ -f "$summary_file" ]; then
+            cat "$summary_file"
+          else
+            echo "Moros AI CI gate exited with code $gate_rc."
+          fi
+          echo "MOROS_SUMMARY_EOF"
+        } >> "$GITHUB_OUTPUT"
+
+        if [ -f "$summary_file" ]; then
+          cat "$summary_file" >> "$GITHUB_STEP_SUMMARY"
+        fi
+        exit 0
+
+    - name: Upload SARIF 2.1.0 to GitHub Code Scanning
+      if: ${{ always() && inputs.upload-sarif == 'true' && steps.gate.outputs.sarif-path != '' }}
+      uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3.28.18
+      with:
+        sarif_file: ${{ steps.gate.outputs.sarif-path }}
+        category: moros-ai-${{ inputs.target }}
+
+    - name: Enforce CI gate exit code
+      shell: bash
+      env:
+        GATE_EXIT_CODE: ${{ steps.gate.outputs.exit-code }}
+      run: |
+        exit "${GATE_EXIT_CODE:-4}"
